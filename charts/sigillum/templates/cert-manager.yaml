@@ -1,0 +1,27 @@
+{{- if and .Values.controller.enabled .Values.webhook.enabled .Values.webhook.certificate.useCertManager }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ .Values.webhook.certificate.issuerName }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "sigillum.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "sigillum.fullname" . }}-webhook
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "sigillum.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "sigillum.webhook.secretName" . }}
+  issuerRef:
+    name: {{ .Values.webhook.certificate.issuerName }}
+    kind: Issuer
+  duration: {{ .Values.webhook.certificate.duration }}
+  renewBefore: {{ .Values.webhook.certificate.renewBefore }}
+  dnsNames:
+    - {{ include "sigillum.webhook.serviceName" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "sigillum.webhook.serviceName" . }}.{{ .Release.Namespace }}.svc.cluster.local
+{{- end }}

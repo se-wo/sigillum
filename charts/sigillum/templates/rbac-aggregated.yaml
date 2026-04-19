@@ -1,0 +1,43 @@
+{{- if and .Values.rbac.create .Values.rbac.aggregateClusterRoles }}
+# view: read-only access to sigillum CRs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sigillum-view
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+    {{- include "sigillum.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [sigillum.dev]
+    resources: [mailbackends, clustermailbackends, mailpolicies]
+    verbs: [get, list, watch]
+---
+# edit: mutate namespace-scoped resources, read cluster-scoped backends.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sigillum-edit
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    {{- include "sigillum.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [sigillum.dev]
+    resources: [mailbackends, mailpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [sigillum.dev]
+    resources: [clustermailbackends]
+    verbs: [get, list, watch]
+---
+# admin: full mutation including cluster-scoped backends.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sigillum-admin
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+    {{- include "sigillum.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [sigillum.dev]
+    resources: [mailbackends, mailpolicies, clustermailbackends]
+    verbs: [get, list, watch, create, update, patch, delete]
+{{- end }}

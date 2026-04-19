@@ -1,0 +1,127 @@
+## Common ##
+
+image:
+  repository: ghcr.io/se-wo/sigillum
+  tag: ""           # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+commonLabels: {}
+commonAnnotations: {}
+
+logLevel: info
+
+## CRDs ##
+# CRDs ship in charts/sigillum/crds/ and Helm installs them automatically.
+# Toggle deletion behaviour here (Helm removes nothing on uninstall by default,
+# which is the safe operator pattern).
+
+## api-server (REST send path) ##
+api:
+  enabled: true
+  replicas: 2
+  service:
+    type: ClusterIP
+    port: 8443
+  metricsPort: 9090
+  tokenAudience: sigillum
+  tokenCacheSize: 4096
+  tokenCacheTTL: 5m
+  shutdownTimeout: 25s
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  # TLS secret (optional). When unset, the api-server listens plain HTTP and
+  # the chart user is expected to terminate TLS at the mesh / Gateway layer.
+  tls:
+    secretName: ""
+  extraArgs: []
+
+## controller (reconcilers + validating webhook) ##
+controller:
+  enabled: true
+  replicas: 1
+  metricsPort: 8080
+  probePort: 8081
+  webhookPort: 9443
+  leaderElect: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+  extraArgs: []
+
+## Validating webhook ##
+# The chart can either rely on cert-manager to provision the serving cert
+# (recommended) or accept an externally-provided secret with tls.crt/tls.key.
+webhook:
+  enabled: true
+  failurePolicy: Fail
+  sideEffects: None
+  certificate:
+    # When useCertManager=true the chart creates an Issuer + Certificate that
+    # writes into webhook.certificate.secretName.
+    useCertManager: false
+    issuerName: sigillum-selfsigned
+    secretName: sigillum-webhook-tls
+    duration: 8760h
+    renewBefore: 720h
+
+## Pod security ##
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  capabilities:
+    drop: [ALL]
+
+## Observability ##
+serviceMonitor:
+  enabled: false
+  namespace: ""
+  labels: {}
+  interval: 30s
+  scrapeTimeout: 10s
+
+## RBAC ##
+# A ClusterRole that lets external service accounts hold view/edit/admin
+# permissions on Sigillum CRs is rendered when rbac.aggregateClusterRoles=true.
+rbac:
+  create: true
+  aggregateClusterRoles: true
