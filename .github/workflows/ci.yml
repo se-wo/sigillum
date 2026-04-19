@@ -24,6 +24,13 @@ jobs:
         run: make build
       - name: test
         run: make test
+      - name: upload binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sigillum-linux-amd64
+          path: bin/sigillum
+          retention-days: 1
+          if-no-files-found: error
 
   e2e:
     runs-on: ubuntu-latest
@@ -34,15 +41,58 @@ jobs:
         with:
           go-version: '1.22'
           cache: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sigillum-linux-amd64
+          path: bin/
+      - name: make binary executable
+        run: chmod +x bin/sigillum
       - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           version: v0.23.0
           cluster_name: kind
       - name: build image
-        run: docker build -t ghcr.io/se-wo/sigillum:ci .
+        run: docker build -f Dockerfile.ci -t ghcr.io/se-wo/sigillum:ci .
       - name: load image
         run: kind load docker-image ghcr.io/se-wo/sigillum:ci
       - name: e2e
         env:
           SIGILLUM_E2E: "1"
         run: make e2e
+      - name: diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo "::group::nodes"
+          kubectl get nodes -o wide
+          echo "::endgroup::"
+          for ns in sigillum-e2e mailhog cert-manager; do
+            if kubectl get ns "$ns" >/dev/null 2>&1; then
+              echo "::group::[$ns] pods"
+              kubectl -n "$ns" get pods -o wide
+              echo "::endgroup::"
+              echo "::group::[$ns] describe pods"
+              kubectl -n "$ns" describe pods
+              echo "::endgroup::"
+              echo "::group::[$ns] events"
+              kubectl -n "$ns" get events --sort-by=.lastTimestamp
+              echo "::endgroup::"
+              echo "::group::[$ns] logs (current + previous)"
+              for pod in $(kubectl -n "$ns" get pods -o name); do
+                for c in $(kubectl -n "$ns" get "$pod" -o jsonpath='{.spec.containers[*].name}'); do
+                  echo "--- $pod ($c) current ---"
+                  kubectl -n "$ns" logs "$pod" -c "$c" --tail=300
+                  echo "--- $pod ($c) previous ---"
+                  kubectl -n "$ns" logs "$pod" -c "$c" --tail=300 --previous 2>/dev/null
+                done
+              done
+              echo "::endgroup::"
+            fi
+          done
+          echo "::group::sigillum CRs"
+          kubectl get clustermailbackends,mailbackends,mailpolicies -A -o yaml 2>/dev/null
+          echo "::endgroup::"
+          echo "::group::helm release"
+          helm -n sigillum-e2e list
+          helm -n sigillum-e2e status sigillum 2>/dev/null
+          echo "::endgroup::"

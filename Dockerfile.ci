@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1.7
+#
+# Ultra-thin image for CI: consumes bin/sigillum from the build-test job's
+# artifact instead of compiling again inside a Go layer. Keeps the E2E
+# job's image build under a few seconds.
+
+FROM gcr.io/distroless/static:nonroot
+WORKDIR /
+COPY bin/sigillum /sigillum
+USER 65532:65532
+ENTRYPOINT ["/sigillum"]
