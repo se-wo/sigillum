@@ -37,6 +37,7 @@ jobs:
       - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           version: v0.23.0
+          cluster_name: kind
       - name: build image
         run: docker build -t ghcr.io/se-wo/sigillum:ci .
       - name: load image
