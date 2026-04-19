@@ -99,8 +99,8 @@ func TestE2E_Smoke(t *testing.T) {
 
 	// POST a message and assert 202.
 	payload := map[string]any{
-		"from":    map[string]string{"address": "billing@example.com"},
-		"to":      []map[string]string{{"address": "bob@noreply.example.com"}},
+		"from":    "billing@example.com",
+		"to":      []string{"bob@noreply.example.com"},
 		"subject": "e2e hello",
 		"body":    map[string]string{"text": "hello from e2e"},
 	}
