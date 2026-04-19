@@ -56,6 +56,9 @@ func init() {
 			disableWebhook        bool
 		)
 		fs := flag.NewFlagSet("controller", flag.ContinueOnError)
+		// --mode is consumed by the entrypoint; accept it here so Parse does
+		// not error out on it.
+		_ = fs.String("mode", "", "operating mode (handled by entrypoint)")
 		fs.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "address the metric endpoint binds to")
 		fs.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "address health/readiness probes bind to")
 		fs.IntVar(&webhookPort, "webhook-port", 9443, "port the validating webhook server listens on")

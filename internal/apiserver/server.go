@@ -75,6 +75,9 @@ func init() {
 			shutdownTimeout time.Duration
 		)
 		fs := flag.NewFlagSet("api", flag.ContinueOnError)
+		// --mode is consumed by the entrypoint; accept it here so Parse does
+		// not error out on it.
+		_ = fs.String("mode", "", "operating mode (handled by entrypoint)")
 		fs.StringVar(&addr, "listen", ":8443", "HTTPS listen address (TLS via SIGILLUM_TLS_CERT/KEY) or HTTP if no cert configured")
 		fs.StringVar(&metricsAddr, "metrics-listen", ":9090", "Prometheus metrics listen address")
 		fs.IntVar(&tokenCacheSize, "token-cache-size", 4096, "LRU cache capacity for TokenReview results")
