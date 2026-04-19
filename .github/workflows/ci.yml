@@ -40,4 +40,6 @@ jobs:
       - name: load image
         run: kind load docker-image ghcr.io/se-wo/sigillum:ci
       - name: e2e
+        env:
+          SIGILLUM_E2E: "1"
         run: make e2e

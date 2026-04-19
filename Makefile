@@ -45,11 +45,16 @@ build:
 .PHONY: test
 test: manifests generate fmt vet envtest
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
-	$(GO) test $(PKG) -coverprofile=cover.out
+	$(GO) test -tags=envtest $(PKG) -coverprofile=cover.out
 
 .PHONY: test-unit
 test-unit:
 	$(GO) test -short $(PKG)
+
+.PHONY: test-envtest
+test-envtest: envtest
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
+	$(GO) test -tags=envtest ./internal/controller/... -v
 
 .PHONY: manifests
 manifests: controller-gen
