@@ -17,7 +17,6 @@ package e2e
 
 import (
 	"bytes"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -58,34 +57,23 @@ func TestE2E_Smoke(t *testing.T) {
 	apply(t, root, mailhogManifest)
 	waitForReady(t, mailhogNS, "app=mailhog", 60*time.Second)
 
-	// Install the chart — image is baked from the CI step that loaded it
-	// into kind with tag `ci`. cert-manager was installed by the outer
-	// workflow; we toggle useCertManager so the chart drops an Issuer +
-	// Certificate and the cainjector fills in the webhook's caBundle.
+	// Install the chart. Webhook admission is disabled for E2E — the
+	// envtest suite already covers the validator; here we want the fast
+	// path with no cert-manager dependency. See chart
+	// controller-deployment.yaml: webhook.enabled=false also toggles
+	// --disable-webhook=true on the controller binary.
 	run(t, root, "helm", "upgrade", "--install", "sigillum", chartPath,
 		"-n", namespace,
 		"--set", "image.repository="+imageRepo,
 		"--set", "image.tag="+imageTag,
 		"--set", "image.pullPolicy=Never",
-		"--set", "webhook.certificate.useCertManager=true",
+		"--set", "webhook.enabled=false",
 		"--set", "api.tokenAudience=sigillum",
-		"--wait", "--timeout", "300s",
+		"--wait", "--timeout", "180s",
 	)
 
-	// The webhook Secret arrives asynchronously from cert-manager, so a
-	// bare `kubectl apply` can race with webhook readiness and get
-	// rejected by the Fail-policy validating webhook. Retry creation
-	// until admission accepts it.
-	if err := pollUntil(120*time.Second, func() error {
-		return applyErr(t, root, clusterBackendManifest)
-	}); err != nil {
-		t.Fatalf("apply ClusterMailBackend: %v", err)
-	}
-	if err := pollUntil(60*time.Second, func() error {
-		return applyErr(t, root, policyManifest)
-	}); err != nil {
-		t.Fatalf("apply MailPolicy: %v", err)
-	}
+	apply(t, root, clusterBackendManifest)
+	apply(t, root, policyManifest)
 
 	// Wait for backend to go Ready (probe will dial MailHog).
 	if err := pollUntil(60*time.Second, func() error {
@@ -117,9 +105,10 @@ func TestE2E_Smoke(t *testing.T) {
 		"body":    map[string]string{"text": "hello from e2e"},
 	}
 	body, _ := json.Marshal(payload)
-	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
-	client := &http.Client{Transport: tr, Timeout: 10 * time.Second}
-	req, _ := http.NewRequest(http.MethodPost, "https://127.0.0.1:"+apiPort+"/v1/messages", bytes.NewReader(body))
+	// The chart's api.tls.secretName is empty by default so the
+	// api-server listens plain HTTP on its service port.
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:"+apiPort+"/v1/messages", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 

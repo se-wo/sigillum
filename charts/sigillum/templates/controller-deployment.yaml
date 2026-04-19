@@ -32,6 +32,9 @@ spec:
             - --webhook-port={{ .Values.controller.webhookPort }}
             - --leader-elect={{ .Values.controller.leaderElect }}
             - --webhook-cert-dir=/etc/sigillum/webhook-tls
+            {{- if not .Values.webhook.enabled }}
+            - --disable-webhook=true
+            {{- end }}
             {{- range .Values.controller.extraArgs }}
             - {{ . }}
             {{- end }}
