@@ -59,20 +59,33 @@ func TestE2E_Smoke(t *testing.T) {
 	waitForReady(t, mailhogNS, "app=mailhog", 60*time.Second)
 
 	// Install the chart — image is baked from the CI step that loaded it
-	// into kind with tag `ci`.
+	// into kind with tag `ci`. cert-manager was installed by the outer
+	// workflow; we toggle useCertManager so the chart drops an Issuer +
+	// Certificate and the cainjector fills in the webhook's caBundle.
 	run(t, root, "helm", "upgrade", "--install", "sigillum", chartPath,
 		"-n", namespace,
 		"--set", "image.repository="+imageRepo,
 		"--set", "image.tag="+imageTag,
 		"--set", "image.pullPolicy=Never",
-		"--set", "webhook.useCertManager=false",
+		"--set", "webhook.certificate.useCertManager=true",
 		"--set", "api.tokenAudience=sigillum",
-		"--wait", "--timeout", "120s",
+		"--wait", "--timeout", "300s",
 	)
 
-	// Backend + policy wired to MailHog.
-	apply(t, root, clusterBackendManifest)
-	apply(t, root, policyManifest)
+	// The webhook Secret arrives asynchronously from cert-manager, so a
+	// bare `kubectl apply` can race with webhook readiness and get
+	// rejected by the Fail-policy validating webhook. Retry creation
+	// until admission accepts it.
+	if err := pollUntil(120*time.Second, func() error {
+		return applyErr(t, root, clusterBackendManifest)
+	}); err != nil {
+		t.Fatalf("apply ClusterMailBackend: %v", err)
+	}
+	if err := pollUntil(60*time.Second, func() error {
+		return applyErr(t, root, policyManifest)
+	}); err != nil {
+		t.Fatalf("apply MailPolicy: %v", err)
+	}
 
 	// Wait for backend to go Ready (probe will dial MailHog).
 	if err := pollUntil(60*time.Second, func() error {
@@ -189,6 +202,18 @@ func apply(t *testing.T, dir, manifest string) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
+}
+
+// applyErr returns the apply error instead of failing the test — used for
+// polling scenarios where admission races with webhook readiness.
+func applyErr(t *testing.T, dir, manifest string) error {
+	t.Helper()
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(manifest)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func waitForReady(t *testing.T, ns, selector string, timeout time.Duration) {

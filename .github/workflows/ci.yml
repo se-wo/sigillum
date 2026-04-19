@@ -38,6 +38,12 @@ jobs:
         with:
           version: v0.23.0
           cluster_name: kind
+      - name: install cert-manager
+        run: |
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.15.3/cert-manager.yaml
+          kubectl -n cert-manager rollout status deploy/cert-manager --timeout=120s
+          kubectl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=120s
+          kubectl -n cert-manager rollout status deploy/cert-manager-cainjector --timeout=120s
       - name: build image
         run: docker build -t ghcr.io/se-wo/sigillum:ci .
       - name: load image
