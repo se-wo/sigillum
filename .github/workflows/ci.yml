@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+      - name: tidy
+        run: go mod tidy && git diff --exit-code go.mod go.sum
+      - name: vet
+        run: go vet ./...
+      - name: build
+        run: make build
+      - name: test
+        run: make test
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+      - uses: helm/kind-action@v1
+        with:
+          version: v0.23.0
+      - name: build image
+        run: docker build -t ghcr.io/se-wo/sigillum:ci .
+      - name: load image
+        run: kind load docker-image ghcr.io/se-wo/sigillum:ci
+      - name: e2e
+        run: make e2e
