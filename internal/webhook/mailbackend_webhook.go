@@ -60,15 +60,17 @@ func (v *MailBackendValidator) ValidateDelete(_ context.Context, _ runtime.Objec
 
 func (v *MailBackendValidator) validate(obj runtime.Object) (admission.Warnings, error) {
 	var (
-		spec *sigv1.BackendSpec
-		gk   schema.GroupKind
-		name string
+		spec   *sigv1.BackendSpec
+		gk     schema.GroupKind
+		name   string
+		selfNs string
 	)
 	switch o := obj.(type) {
 	case *sigv1.MailBackend:
 		spec = &o.Spec
 		gk = schema.GroupKind{Group: sigv1.GroupVersion.Group, Kind: "MailBackend"}
 		name = o.Name
+		selfNs = o.Namespace
 	case *sigv1.ClusterMailBackend:
 		spec = &o.Spec
 		gk = schema.GroupKind{Group: sigv1.GroupVersion.Group, Kind: "ClusterMailBackend"}
@@ -102,6 +104,12 @@ func (v *MailBackendValidator) validate(obj runtime.Object) (admission.Warnings,
 				if ep.Port == 0 {
 					allErrs = append(allErrs, field.Required(epPath.Child("port"), "port is required"))
 				}
+				// Disabling TLS certificate verification exposes credentials to
+				// interception; reject at admission time on both backend kinds.
+				if ep.InsecureSkipVerify {
+					allErrs = append(allErrs, field.Forbidden(epPath.Child("insecureSkipVerify"),
+						"TLS certificate verification must not be disabled"))
+				}
 			}
 			if spec.SMTP.AuthType != "" && spec.SMTP.AuthType != sigv1.SMTPAuthNone && spec.SMTP.CredentialsRef == nil {
 				allErrs = append(allErrs, field.Required(smtpPath.Child("credentialsRef"), "credentialsRef is required when authType != NONE"))
@@ -109,6 +117,14 @@ func (v *MailBackendValidator) validate(obj runtime.Object) (admission.Warnings,
 			if v.clusterScoped && spec.SMTP.CredentialsRef != nil && spec.SMTP.CredentialsRef.Namespace == "" {
 				allErrs = append(allErrs, field.Required(smtpPath.Child("credentialsRef").Child("namespace"),
 					"namespace is required for credentialsRef on cluster-scoped backends"))
+			}
+			// Prevent cross-namespace Secret reads: a namespace-scoped MailBackend
+			// must resolve its credentials within its own namespace only.
+			if !v.clusterScoped && spec.SMTP.CredentialsRef != nil &&
+				spec.SMTP.CredentialsRef.Namespace != "" && spec.SMTP.CredentialsRef.Namespace != selfNs {
+				allErrs = append(allErrs, field.Invalid(smtpPath.Child("credentialsRef").Child("namespace"),
+					spec.SMTP.CredentialsRef.Namespace,
+					"cross-namespace credential references are not permitted on namespace-scoped backends"))
 			}
 		}
 	}

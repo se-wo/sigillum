@@ -100,6 +100,12 @@ func AssembleMessage(msg *driver.Message, heloDomain string) ([]byte, string, er
 		if isReservedHeader(k) {
 			continue
 		}
+		if err := validateHeaderKey(k); err != nil {
+			return nil, messageID, err
+		}
+		if containsInjectionChars(v) {
+			return nil, messageID, fmt.Errorf("header %q value contains CR, LF, or NUL", k)
+		}
 		hdr.Set(k, v)
 	}
 
@@ -220,13 +226,24 @@ func writeAttachment(mw *multipart.Writer, a driver.Attachment) error {
 	if ct == "" {
 		ct = "application/octet-stream"
 	}
+	if containsInjectionChars(ct) {
+		return fmt.Errorf("attachment contentType contains CR, LF, or NUL")
+	}
 	ph.Set("Content-Type", ct)
 	disp := a.Disposition
 	if disp == "" {
 		disp = "attachment"
 	}
+	if containsInjectionChars(disp) {
+		return fmt.Errorf("attachment disposition contains CR, LF, or NUL")
+	}
 	if a.Filename != "" {
-		ph.Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disp, a.Filename))
+		if containsInjectionChars(a.Filename) {
+			return fmt.Errorf("attachment filename contains CR, LF, or NUL")
+		}
+		// Escape backslash and double-quote per RFC 2183 before quoting.
+		safeName := strings.ReplaceAll(strings.ReplaceAll(a.Filename, `\`, `\\`), `"`, `\"`)
+		ph.Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disp, safeName))
 	} else {
 		ph.Set("Content-Disposition", disp)
 	}
@@ -319,4 +336,24 @@ func isReservedHeader(k string) bool {
 		return true
 	}
 	return false
+}
+
+// containsInjectionChars reports whether s contains characters that allow
+// SMTP/MIME header injection: CR, LF, or NUL.
+func containsInjectionChars(s string) bool {
+	return strings.ContainsAny(s, "\r\n\x00")
+}
+
+// validateHeaderKey returns an error if k is not a valid RFC-5322 field-name
+// token: visible ASCII (33–126) excluding colon.
+func validateHeaderKey(k string) error {
+	if k == "" {
+		return fmt.Errorf("header key must not be empty")
+	}
+	for _, c := range k {
+		if c < 33 || c > 126 || c == ':' {
+			return fmt.Errorf("header key %q contains invalid character", k)
+		}
+	}
+	return nil
 }

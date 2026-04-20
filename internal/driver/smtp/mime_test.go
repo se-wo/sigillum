@@ -169,6 +169,70 @@ func TestAssemble_ReservedHeaderIgnored(t *testing.T) {
 	}
 }
 
+func TestAssemble_RejectsHeaderValueCRLF(t *testing.T) {
+	msg := &driver.Message{
+		From:    driver.Address{Address: "a@b"},
+		To:      []driver.Address{{Address: "c@d"}},
+		Body:    driver.Body{Text: "x"},
+		Headers: map[string]string{"X-Corr": "ok\r\nBcc: evil@x"},
+	}
+	_, _, err := AssembleMessage(msg, "")
+	if err == nil {
+		t.Fatal("expected error for CRLF in header value")
+	}
+}
+
+func TestAssemble_RejectsHeaderKeyCRLF(t *testing.T) {
+	msg := &driver.Message{
+		From:    driver.Address{Address: "a@b"},
+		To:      []driver.Address{{Address: "c@d"}},
+		Body:    driver.Body{Text: "x"},
+		Headers: map[string]string{"X-Bad\r\nKey": "val"},
+	}
+	_, _, err := AssembleMessage(msg, "")
+	if err == nil {
+		t.Fatal("expected error for CRLF in header key")
+	}
+}
+
+func TestAssemble_RejectsAttachmentFilenameCRLF(t *testing.T) {
+	msg := &driver.Message{
+		From: driver.Address{Address: "a@b"},
+		To:   []driver.Address{{Address: "c@d"}},
+		Body: driver.Body{Text: "x"},
+		Attachments: []driver.Attachment{{
+			Filename:    "evil\r\nBcc: x@y",
+			ContentType: "text/plain",
+			Content:     []byte("data"),
+		}},
+	}
+	_, _, err := AssembleMessage(msg, "")
+	if err == nil {
+		t.Fatal("expected error for CRLF in attachment filename")
+	}
+}
+
+func TestAssemble_EscapesQuotesInFilename(t *testing.T) {
+	msg := &driver.Message{
+		From: driver.Address{Address: "a@b"},
+		To:   []driver.Address{{Address: "c@d"}},
+		Body: driver.Body{Text: "x"},
+		Attachments: []driver.Attachment{{
+			Filename:    `file"name.txt`,
+			ContentType: "text/plain",
+			Content:     []byte("data"),
+		}},
+	}
+	raw, _, err := AssembleMessage(msg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The double-quote in the filename must be escaped in the wire bytes.
+	if strings.Contains(string(raw), `filename="file"name`) {
+		t.Fatal("unescaped double-quote found in Content-Disposition filename")
+	}
+}
+
 type partOut struct {
 	header string
 	body   []byte

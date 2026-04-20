@@ -131,6 +131,19 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := validateRequestHeaders(req.Headers); err != nil {
+		problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+			"Invalid header", err.Error()))
+		return
+	}
+	for i, att := range req.Attachments {
+		if err := validateAttachmentMeta(att); err != nil {
+			problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+				fmt.Sprintf("Invalid attachment[%d]", i), err.Error()))
+			return
+		}
+	}
+
 	atts, err := decodeAttachments(req.Attachments)
 	if err != nil {
 		problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
@@ -407,6 +420,35 @@ func withSubject(ctx context.Context, s subject) context.Context {
 type subject struct {
 	Namespace      string
 	ServiceAccount string
+}
+
+// validateRequestHeaders rejects header keys or values containing CR, LF, or
+// NUL, which would allow SMTP header injection through the driver.
+func validateRequestHeaders(h map[string]string) error {
+	for k, v := range h {
+		if strings.ContainsAny(k, "\r\n\x00") {
+			return fmt.Errorf("header key contains CR, LF, or NUL")
+		}
+		if strings.ContainsAny(v, "\r\n\x00") {
+			return fmt.Errorf("header %q value contains CR, LF, or NUL", k)
+		}
+	}
+	return nil
+}
+
+// validateAttachmentMeta rejects attachment metadata fields (filename,
+// contentType, disposition) containing CR, LF, or NUL.
+func validateAttachmentMeta(a requestAttachment) error {
+	if strings.ContainsAny(a.Filename, "\r\n\x00") {
+		return fmt.Errorf("filename %q contains CR, LF, or NUL", a.Filename)
+	}
+	if strings.ContainsAny(a.ContentType, "\r\n\x00") {
+		return fmt.Errorf("contentType %q contains CR, LF, or NUL", a.ContentType)
+	}
+	if strings.ContainsAny(a.Disposition, "\r\n\x00") {
+		return fmt.Errorf("disposition %q contains CR, LF, or NUL", a.Disposition)
+	}
+	return nil
 }
 
 var _ = errors.New // keep import in case future error wrapping is needed

@@ -20,10 +20,6 @@ rules:
       - mailbackends/finalizers
       - clustermailbackends/finalizers
     verbs: [update]
-  # Resolve credentialsRef on backends.
-  - apiGroups: [""]
-    resources: [secrets]
-    verbs: [get, list, watch]
   # Emit events for human-friendly reconcile feedback.
   - apiGroups: [""]
     resources: [events]
@@ -46,4 +42,60 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "sigillum.controller.fullname" . }}
     namespace: {{ .Release.Namespace }}
+---
+# Secret access is namespace-scoped. Add namespaces containing ClusterMailBackend
+# credentials to rbac.allowedSecretNamespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "sigillum.controller.fullname" . }}-secret-reader
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "sigillum.controller.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "sigillum.controller.fullname" . }}-secret-reader
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "sigillum.controller.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "sigillum.controller.fullname" . }}-secret-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sigillum.controller.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+{{- range .Values.rbac.allowedSecretNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "sigillum.controller.fullname" $ }}-secret-reader
+  namespace: {{ . }}
+  labels: {{- include "sigillum.controller.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "sigillum.controller.fullname" $ }}-secret-reader
+  namespace: {{ . }}
+  labels: {{- include "sigillum.controller.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "sigillum.controller.fullname" $ }}-secret-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sigillum.controller.fullname" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
 {{- end }}

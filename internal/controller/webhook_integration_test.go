@@ -78,6 +78,61 @@ func TestWebhook_AcceptsValidBackend(t *testing.T) {
 	}
 }
 
+func TestWebhook_RejectsCrossNamespaceCredentialsRef(t *testing.T) {
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "sigillum-wh-5"}}
+	_ = testClient.Create(context.Background(), ns)
+
+	mb := &sigv1.MailBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "cross-ns", Namespace: ns.Name},
+		Spec: sigv1.BackendSpec{
+			Type: sigv1.BackendSMTP,
+			SMTP: &sigv1.SMTPBackendSpec{
+				Endpoints: []sigv1.SMTPEndpoint{{Host: "mx", Port: 587, TLS: sigv1.SMTPTLSStartTLS}},
+				AuthType:  sigv1.SMTPAuthPlain,
+				CredentialsRef: &sigv1.SecretReference{
+					Name:      "victim-secret",
+					Namespace: "kube-system", // different namespace — must be rejected
+				},
+			},
+		},
+	}
+	err := testClient.Create(context.Background(), mb)
+	if err == nil {
+		t.Fatal("expected webhook to reject cross-namespace credentialsRef")
+	}
+	if !strings.Contains(err.Error(), "cross-namespace") {
+		t.Fatalf("wanted cross-namespace error, got %v", err)
+	}
+}
+
+func TestWebhook_RejectsInsecureSkipVerify(t *testing.T) {
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "sigillum-wh-6"}}
+	_ = testClient.Create(context.Background(), ns)
+
+	mb := &sigv1.MailBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "insecure-tls", Namespace: ns.Name},
+		Spec: sigv1.BackendSpec{
+			Type: sigv1.BackendSMTP,
+			SMTP: &sigv1.SMTPBackendSpec{
+				Endpoints: []sigv1.SMTPEndpoint{{
+					Host:               "mx",
+					Port:               587,
+					TLS:                sigv1.SMTPTLSStartTLS,
+					InsecureSkipVerify: true,
+				}},
+				AuthType: sigv1.SMTPAuthNone,
+			},
+		},
+	}
+	err := testClient.Create(context.Background(), mb)
+	if err == nil {
+		t.Fatal("expected webhook to reject insecureSkipVerify=true")
+	}
+	if !strings.Contains(err.Error(), "insecureSkipVerify") {
+		t.Fatalf("wanted insecureSkipVerify error, got %v", err)
+	}
+}
+
 func TestWebhook_MailPolicyRejectsEmptySubjects(t *testing.T) {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "sigillum-wh-4"}}
 	_ = testClient.Create(context.Background(), ns)
