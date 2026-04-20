@@ -1,0 +1,22 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "sigillum.fullname" . }}
+  namespace: {{ default .Release.Namespace .Values.serviceMonitor.namespace }}
+  labels:
+    {{- include "sigillum.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}{{- toYaml . | nindent 4 }}{{- end }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ .Release.Namespace }}]
+  selector:
+    matchExpressions:
+      - { key: app.kubernetes.io/name, operator: In, values: [{{ include "sigillum.name" . }}] }
+      - { key: app.kubernetes.io/instance, operator: In, values: [{{ .Release.Name }}] }
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+      path: /metrics
+{{- end }}

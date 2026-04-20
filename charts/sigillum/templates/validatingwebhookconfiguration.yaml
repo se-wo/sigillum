@@ -1,0 +1,60 @@
+{{- if and .Values.controller.enabled .Values.webhook.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "sigillum.fullname" . }}
+  labels: {{- include "sigillum.labels" . | nindent 4 }}
+  {{- if .Values.webhook.certificate.useCertManager }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "sigillum.fullname" . }}-webhook
+  {{- end }}
+webhooks:
+  - name: vmailbackend.sigillum.dev
+    admissionReviewVersions: [v1]
+    sideEffects: {{ .Values.webhook.sideEffects }}
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    clientConfig:
+      service:
+        name: {{ include "sigillum.webhook.serviceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-sigillum-dev-v1alpha1-mailbackend
+        port: 443
+    rules:
+      - apiGroups: [sigillum.dev]
+        apiVersions: [v1alpha1]
+        resources: [mailbackends]
+        operations: [CREATE, UPDATE]
+        scope: Namespaced
+  - name: vclustermailbackend.sigillum.dev
+    admissionReviewVersions: [v1]
+    sideEffects: {{ .Values.webhook.sideEffects }}
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    clientConfig:
+      service:
+        name: {{ include "sigillum.webhook.serviceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-sigillum-dev-v1alpha1-clustermailbackend
+        port: 443
+    rules:
+      - apiGroups: [sigillum.dev]
+        apiVersions: [v1alpha1]
+        resources: [clustermailbackends]
+        operations: [CREATE, UPDATE]
+        scope: Cluster
+  - name: vmailpolicy.sigillum.dev
+    admissionReviewVersions: [v1]
+    sideEffects: {{ .Values.webhook.sideEffects }}
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    clientConfig:
+      service:
+        name: {{ include "sigillum.webhook.serviceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-sigillum-dev-v1alpha1-mailpolicy
+        port: 443
+    rules:
+      - apiGroups: [sigillum.dev]
+        apiVersions: [v1alpha1]
+        resources: [mailpolicies]
+        operations: [CREATE, UPDATE]
+        scope: Namespaced
+{{- end }}

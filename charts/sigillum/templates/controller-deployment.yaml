@@ -1,0 +1,90 @@
+{{- if .Values.controller.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sigillum.controller.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "sigillum.controller.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels: {{- include "sigillum.controller.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sigillum.controller.selectorLabels" . | nindent 8 }}
+        {{- with .Values.controller.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
+      annotations:
+        {{- with .Values.controller.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ include "sigillum.controller.fullname" . }}
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: sigillum
+          image: {{ include "sigillum.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --mode=controller
+            - --metrics-bind-address=:{{ .Values.controller.metricsPort }}
+            - --health-probe-bind-address=:{{ .Values.controller.probePort }}
+            - --webhook-port={{ .Values.controller.webhookPort }}
+            - --leader-elect={{ .Values.controller.leaderElect }}
+            - --webhook-cert-dir=/etc/sigillum/webhook-tls
+            {{- if not .Values.webhook.enabled }}
+            - --disable-webhook=true
+            {{- end }}
+            {{- range .Values.controller.extraArgs }}
+            - {{ . }}
+            {{- end }}
+          env:
+            - name: SIGILLUM_LOG_LEVEL
+              value: {{ .Values.logLevel }}
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.controller.metricsPort }}
+            - name: probe
+              containerPort: {{ .Values.controller.probePort }}
+            {{- if .Values.webhook.enabled }}
+            - name: webhook
+              containerPort: {{ .Values.controller.webhookPort }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /readyz, port: probe }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: probe }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources: {{- toYaml .Values.controller.resources | nindent 12 }}
+          securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          {{- if .Values.webhook.enabled }}
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /etc/sigillum/webhook-tls
+              readOnly: true
+          {{- end }}
+      {{- if .Values.webhook.enabled }}
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: {{ include "sigillum.webhook.secretName" . }}
+            optional: true
+      {{- end }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

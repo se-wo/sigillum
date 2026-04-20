@@ -1,0 +1,66 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-sigillum-dev-v1alpha1-clustermailbackend
+  failurePolicy: Fail
+  name: vclustermailbackend.sigillum.dev
+  rules:
+  - apiGroups:
+    - sigillum.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - clustermailbackends
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-sigillum-dev-v1alpha1-mailbackend
+  failurePolicy: Fail
+  name: vmailbackend.sigillum.dev
+  rules:
+  - apiGroups:
+    - sigillum.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - mailbackends
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-sigillum-dev-v1alpha1-mailpolicy
+  failurePolicy: Fail
+  name: vmailpolicy.sigillum.dev
+  rules:
+  - apiGroups:
+    - sigillum.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - mailpolicies
+  sideEffects: None

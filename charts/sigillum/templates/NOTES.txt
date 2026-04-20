@@ -1,0 +1,45 @@
+Sigillum {{ .Chart.AppVersion }} installed.
+
+  api-server:  {{ include "sigillum.api.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.api.service.port }}
+  controller:  {{ include "sigillum.controller.fullname" . }}.{{ .Release.Namespace }}
+
+Quickstart:
+
+  1. Create a ClusterMailBackend pointing at your relay:
+
+       kubectl apply -f - <<'YAML'
+       apiVersion: sigillum.dev/v1alpha1
+       kind: ClusterMailBackend
+       metadata:
+         name: corporate-smtp
+       spec:
+         type: smtp
+         smtp:
+           endpoints:
+             - { host: smtp.example.com, port: 587, tls: starttls }
+           authType: PLAIN
+           credentialsRef:
+             name: corporate-smtp-credentials
+             namespace: {{ .Release.Namespace }}
+       YAML
+
+  2. Bind a workload to the backend with a MailPolicy:
+
+       kubectl -n my-team apply -f - <<'YAML'
+       apiVersion: sigillum.dev/v1alpha1
+       kind: MailPolicy
+       metadata: { name: default }
+       spec:
+         priority: 100
+         subjects: [{ serviceAccount: { name: my-app } }]
+         backendRef: { name: corporate-smtp, kind: ClusterMailBackend }
+         senderRestrictions:
+           allowedSenders: ["noreply@example.com"]
+       YAML
+
+  3. Send a message from any pod whose ServiceAccount is "my-app":
+
+       curl -H "Authorization: Bearer $(cat /var/run/secrets/tokens/sigillum)" \
+            -H "Content-Type: application/json" \
+            -d '{"from":"noreply@example.com","to":["dev@example.com"],"subject":"hi","body":{"text":"hello"}}' \
+            http://{{ include "sigillum.api.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.api.service.port }}/v1/messages

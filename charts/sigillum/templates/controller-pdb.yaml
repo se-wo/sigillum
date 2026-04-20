@@ -1,0 +1,12 @@
+{{- if and .Values.controller.enabled .Values.controller.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sigillum.controller.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "sigillum.controller.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.controller.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels: {{- include "sigillum.controller.selectorLabels" . | nindent 6 }}
+{{- end }}
