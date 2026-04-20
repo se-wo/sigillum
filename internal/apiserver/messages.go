@@ -73,24 +73,54 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	maxBody := int64(32 * 1024 * 1024) // 32 MiB hard ceiling — policy enforces lower limits
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
-	if err != nil {
-		problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
-			"Failed to read request body", err.Error()))
-		return
-	}
-	if int64(len(body)) > maxBody {
-		problem.Write(w, problem.New(problem.TypeMessageTooLarge, http.StatusRequestEntityTooLarge,
-			"Request body exceeds 32MiB ceiling", "use a smaller message or split attachments"))
-		return
-	}
+	const maxBody = 32 * 1024 * 1024 // 32 MiB hard ceiling — policy enforces lower limits
 
 	var req requestBody
-	if err := json.Unmarshal(body, &req); err != nil {
-		problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
-			"Malformed JSON payload", err.Error()))
-		return
+	var atts []driver.Attachment
+	if ct := r.Header.Get("Content-Type"); strings.HasPrefix(ct, "multipart/form-data") {
+		var merr error
+		req, atts, merr = parseMultipartMessage(r, maxBody)
+		if merr != nil {
+			if errors.Is(merr, errBodyTooLarge) {
+				problem.Write(w, problem.New(problem.TypeMessageTooLarge, http.StatusRequestEntityTooLarge,
+					"Request body exceeds 32MiB ceiling", "use a smaller message or split attachments"))
+			} else {
+				problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+					"Failed to parse multipart body", merr.Error()))
+			}
+			return
+		}
+	} else {
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
+		if err != nil {
+			problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+				"Failed to read request body", err.Error()))
+			return
+		}
+		if int64(len(body)) > maxBody {
+			problem.Write(w, problem.New(problem.TypeMessageTooLarge, http.StatusRequestEntityTooLarge,
+				"Request body exceeds 32MiB ceiling", "use a smaller message or split attachments"))
+			return
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+				"Malformed JSON payload", err.Error()))
+			return
+		}
+		for i, att := range req.Attachments {
+			if err := validateAttachmentMeta(att); err != nil {
+				problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+					fmt.Sprintf("Invalid attachment[%d]", i), err.Error()))
+				return
+			}
+		}
+		var decErr error
+		atts, decErr = decodeAttachments(req.Attachments)
+		if decErr != nil {
+			problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+				"Invalid attachment", decErr.Error()))
+			return
+		}
 	}
 
 	msgID := uuid.NewString()
@@ -134,20 +164,6 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	if err := validateRequestHeaders(req.Headers); err != nil {
 		problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 			"Invalid header", err.Error()))
-		return
-	}
-	for i, att := range req.Attachments {
-		if err := validateAttachmentMeta(att); err != nil {
-			problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
-				fmt.Sprintf("Invalid attachment[%d]", i), err.Error()))
-			return
-		}
-	}
-
-	atts, err := decodeAttachments(req.Attachments)
-	if err != nil {
-		problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
-			"Invalid attachment", err.Error()))
 		return
 	}
 
@@ -451,4 +467,67 @@ func validateAttachmentMeta(a requestAttachment) error {
 	return nil
 }
 
-var _ = errors.New // keep import in case future error wrapping is needed
+var errBodyTooLarge = errors.New("aggregate request body exceeds 32 MiB ceiling")
+
+// parseMultipartMessage parses a multipart/form-data request body.
+// The part named "data" must contain a JSON object with message metadata
+// (from, to, cc, bcc, subject, body, headers). The attachments field in that
+// JSON is ignored — file parts are collected from all other named parts.
+func parseMultipartMessage(r *http.Request, maxBytes int64) (requestBody, []driver.Attachment, error) {
+	mr, err := r.MultipartReader()
+	if err != nil {
+		return requestBody{}, nil, fmt.Errorf("multipart: %w", err)
+	}
+
+	var req requestBody
+	var atts []driver.Attachment
+	var total int64
+
+	for {
+		part, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return requestBody{}, nil, fmt.Errorf("multipart part: %w", err)
+		}
+
+		name := part.FormName()
+		filename := part.FileName()
+		ct := part.Header.Get("Content-Type")
+
+		content, readErr := io.ReadAll(io.LimitReader(part, maxBytes-total+1))
+		if readErr != nil {
+			return requestBody{}, nil, fmt.Errorf("reading part %q: %w", name, readErr)
+		}
+		total += int64(len(content))
+		if total > maxBytes {
+			return requestBody{}, nil, errBodyTooLarge
+		}
+
+		if name == "data" {
+			if jsonErr := json.Unmarshal(content, &req); jsonErr != nil {
+				return requestBody{}, nil, fmt.Errorf("data part: %w", jsonErr)
+			}
+			continue
+		}
+
+		// Treat every other named part as a binary file attachment.
+		if filename == "" {
+			filename = name
+		}
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		if metaErr := validateAttachmentMeta(requestAttachment{Filename: filename, ContentType: ct}); metaErr != nil {
+			return requestBody{}, nil, metaErr
+		}
+		atts = append(atts, driver.Attachment{
+			Filename:    filename,
+			ContentType: ct,
+			Content:     content,
+		})
+	}
+
+	return req, atts, nil
+}
