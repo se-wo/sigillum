@@ -10,7 +10,7 @@ The section of a version becomes the notes of its GitHub Release
 (`hack/release-notes.sh`, run by the release workflow). Add entries under
 the version being prepared in the same pull request as the change.
 
-## [0.3.0] - unreleased
+## [0.3.0] - 2026-09-26
 
 Works with off-the-shelf apps and cannot be bypassed (SPEC §8.2).
 
