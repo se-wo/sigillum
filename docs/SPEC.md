@@ -201,7 +201,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - On violation: `403` with problem type `recipient-not-allowed`.
 
 #### US-2.5 — Multi-backend routing **[v0.1.0]**
-**As a** platform engineer **I want** to pick a different backend per policy, **so that** for example test workloads send into MailHog and production workloads into the corporate relay or (later) Microsoft Graph.
+**As a** platform engineer **I want** to pick a different backend per policy, **so that** for example test workloads send into Mailpit and production workloads into the corporate relay or (later) Microsoft Graph.
 
 *Acceptance criteria:*
 - `MailPolicy.spec.backendRef` points at a `MailBackend` (same namespace) or a `ClusterMailBackend`; `kind` distinguishes them and defaults to `ClusterMailBackend`.
@@ -1069,7 +1069,7 @@ These targets are not yet verified by a benchmark in CI.
 
 - Go codebase following Kubernetes code conventions.
 - Unit test coverage ≥ 70 %.
-- Envtest suite for reconcilers and webhooks; E2E smoke test against kind + MailHog (`make e2e`).
+- Envtest suite for reconcilers and webhooks; E2E smoke test against kind + Mailpit (`make e2e`).
 - Semantic versioning; API group `sigillum.dev` graduates `v1alpha1` → `v1beta1` → `v1`.
 
 ### 5.9 Extensibility

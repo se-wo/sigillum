@@ -3,12 +3,12 @@
 // Package e2e runs an end-to-end smoke test against a kind cluster:
 //   1. Assumes a kind cluster is up and the sigillum image is loaded
 //      (both driven by `helm/kind-action` + `make kind-load` in CI).
-//   2. Installs MailHog (a disposable SMTP sink) into the cluster.
+//   2. Installs Mailpit (a disposable SMTP sink) into the cluster.
 //   3. Helm-installs the local chart with a ClusterMailBackend pointing at
-//      MailHog and a permissive MailPolicy.
+//      Mailpit and a permissive MailPolicy.
 //   4. Creates a ServiceAccount, mints a TokenRequest for it, and POSTs a
 //      message to the api-server.
-//   5. Asserts the message landed in MailHog's HTTP inbox and was audited.
+//   5. Asserts the message landed in Mailpit's HTTP inbox and was audited.
 //   6. Sends a second message through the SMTP proxy with AUTH OAUTHBEARER,
 //      checks a spoofed header From is refused, and asserts delivery.
 //
@@ -37,13 +37,13 @@ import (
 
 const (
 	namespace  = "sigillum-e2e"
-	mailhogNS  = "mailhog"
+	mailpitNS  = "mailpit"
 	chartPath  = "charts/sigillum"
 	imageRepo  = "ghcr.io/se-wo/sigillum"
 	imageTag   = "ci"
 	apiPort    = "18443" // local forward port
 	smtpPort   = "12587"
-	mailhogWeb = "18025"
+	mailpitWeb = "18025"
 )
 
 func TestE2E_Smoke(t *testing.T) {
@@ -53,16 +53,16 @@ func TestE2E_Smoke(t *testing.T) {
 	root := repoRoot(t)
 
 	run(t, root, "kubectl", "create", "namespace", namespace)
-	run(t, root, "kubectl", "create", "namespace", mailhogNS)
+	run(t, root, "kubectl", "create", "namespace", mailpitNS)
 	t.Cleanup(func() {
 		run(t, root, "kubectl", "delete", "namespace", namespace, "--ignore-not-found", "--wait=false")
-		run(t, root, "kubectl", "delete", "namespace", mailhogNS, "--ignore-not-found", "--wait=false")
+		run(t, root, "kubectl", "delete", "namespace", mailpitNS, "--ignore-not-found", "--wait=false")
 		run(t, root, "helm", "uninstall", "sigillum", "-n", namespace, "--ignore-not-found")
 	})
 
-	// MailHog (single-pod, unauthenticated SMTP sink).
-	apply(t, root, mailhogManifest)
-	waitForReady(t, mailhogNS, "app=mailhog", 60*time.Second)
+	// Mailpit (single-pod, unauthenticated SMTP sink).
+	apply(t, root, mailpitManifest)
+	waitForReady(t, mailpitNS, "app=mailpit", 60*time.Second)
 
 	// Install the chart. Webhook admission is disabled for E2E — the
 	// envtest suite already covers the validator; here we want the fast
@@ -84,9 +84,9 @@ func TestE2E_Smoke(t *testing.T) {
 	apply(t, root, clusterBackendManifest)
 	apply(t, root, policyManifest)
 
-	// Wait for backend to go Ready (probe will dial MailHog).
+	// Wait for backend to go Ready (probe will dial Mailpit).
 	if err := pollUntil(60*time.Second, func() error {
-		out, err := runOut(t, root, "kubectl", "get", "clustermailbackend", "mailhog", "-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+		out, err := runOut(t, root, "kubectl", "get", "clustermailbackend", "mailpit", "-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
 		if err != nil {
 			return err
 		}
@@ -136,10 +136,10 @@ func TestE2E_Smoke(t *testing.T) {
 		t.Fatalf("want 202, got %d body=%s", resp.StatusCode, b)
 	}
 
-	// Confirm MailHog received the mail via its HTTP v2 API.
-	stop2 := portForward(t, root, mailhogNS, "svc/mailhog", mailhogWeb+":8025")
+	// Confirm Mailpit received the mail via its HTTP API.
+	stop2 := portForward(t, root, mailpitNS, "svc/mailpit", mailpitWeb+":8025")
 	defer stop2()
-	waitForMailHog(t, "e2e hello")
+	waitForMailpit(t, "e2e hello")
 
 	// The accepted request must show up in the audit stream (US-4.3).
 	if err := pollUntil(30*time.Second, func() error {
@@ -184,7 +184,7 @@ func TestE2E_Smoke(t *testing.T) {
 		t.Fatalf("send via smtp proxy: %v", err)
 	}
 	_ = c.Quit()
-	waitForMailHog(t, "e2e smtp hello")
+	waitForMailpit(t, "e2e smtp hello")
 }
 
 func smtpSend(c *smtp.Client, from, to, msg string) error {
@@ -204,21 +204,32 @@ func smtpSend(c *smtp.Client, from, to, msg string) error {
 	return w.Close()
 }
 
-func waitForMailHog(t *testing.T, subject string) {
+func waitForMailpit(t *testing.T, subject string) {
 	t.Helper()
 	if err := pollUntil(30*time.Second, func() error {
-		r, err := http.Get("http://127.0.0.1:" + mailhogWeb + "/api/v2/messages")
+		r, err := http.Get("http://127.0.0.1:" + mailpitWeb + "/api/v1/messages")
 		if err != nil {
 			return err
 		}
 		defer r.Body.Close()
-		b, _ := io.ReadAll(r.Body)
-		if !bytes.Contains(b, []byte(subject)) {
-			return fmt.Errorf("not delivered yet: %s", string(b))
+		var inbox struct {
+			Messages []struct {
+				Subject string `json:"Subject"`
+			} `json:"messages"`
 		}
-		return nil
+		if err := json.NewDecoder(r.Body).Decode(&inbox); err != nil {
+			return fmt.Errorf("decode mailpit inbox: %w", err)
+		}
+		seen := make([]string, 0, len(inbox.Messages))
+		for _, m := range inbox.Messages {
+			if m.Subject == subject {
+				return nil
+			}
+			seen = append(seen, m.Subject)
+		}
+		return fmt.Errorf("not delivered yet; inbox subjects: %q", seen)
 	}); err != nil {
-		t.Fatalf("MailHog never saw %q: %v", subject, err)
+		t.Fatalf("Mailpit never saw %q: %v", subject, err)
 	}
 }
 
@@ -332,23 +343,23 @@ func portForward(t *testing.T, root, ns, target, ports string) func() {
 // Manifests below are small enough to inline. All hostnames resolve inside
 // the cluster.
 
-const mailhogManifest = `---
+const mailpitManifest = `---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mailhog
-  namespace: mailhog
-  labels: { app: mailhog }
+  name: mailpit
+  namespace: mailpit
+  labels: { app: mailpit }
 spec:
   replicas: 1
-  selector: { matchLabels: { app: mailhog } }
+  selector: { matchLabels: { app: mailpit } }
   template:
     metadata:
-      labels: { app: mailhog }
+      labels: { app: mailpit }
     spec:
       containers:
-      - name: mailhog
-        image: mailhog/mailhog:v1.0.1
+      - name: mailpit
+        image: axllent/mailpit:v1.31.2
         ports:
         - { name: smtp, containerPort: 1025 }
         - { name: http, containerPort: 8025 }
@@ -358,10 +369,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: mailhog
-  namespace: mailhog
+  name: mailpit
+  namespace: mailpit
 spec:
-  selector: { app: mailhog }
+  selector: { app: mailpit }
   ports:
   - { name: smtp, port: 1025, targetPort: 1025 }
   - { name: http, port: 8025, targetPort: 8025 }
@@ -371,12 +382,12 @@ const clusterBackendManifest = `---
 apiVersion: sigillum.dev/v1alpha1
 kind: ClusterMailBackend
 metadata:
-  name: mailhog
+  name: mailpit
 spec:
   type: smtp
   smtp:
     endpoints:
-    - host: mailhog.mailhog.svc.cluster.local
+    - host: mailpit.mailpit.svc.cluster.local
       port: 1025
       tls: none
     authType: NONE
@@ -395,7 +406,7 @@ spec:
   - serviceAccount:
       name: billing-mailer
   backendRef:
-    name: mailhog
+    name: mailpit
     kind: ClusterMailBackend
   senderRestrictions:
     allowedSenders:

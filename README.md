@@ -180,7 +180,7 @@ make build              # compile bin/sigillum
 make manifests generate # regenerate CRDs + deepcopy
 make test               # unit + envtest suite
 make vulncheck          # govulncheck against the Go vulnerability database
-make e2e                # kind + MailHog smoke (needs docker)
+make e2e                # kind + Mailpit smoke (needs docker)
 ```
 
 ## Layout
