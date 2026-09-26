@@ -44,7 +44,7 @@ jobs:
       id-token: write      # Sigstore signing certificate (cosign, attest)
       attestations: write  # store the provenance attestation in GitHub
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: compute version and tags
         id: meta
@@ -163,7 +163,7 @@ jobs:
     env:
       CHART: ghcr.io/${{ github.repository_owner }}/charts/sigillum
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-cosign
 
