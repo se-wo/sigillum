@@ -60,32 +60,38 @@ type responseBody struct {
 //	body decode -> address parse -> gateway.Send (policy, rate limit,
 //	backend, audit) -> map Result to 202 / RFC-7807 problem.
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	msgID := uuid.NewString()
+	subject, authenticated := SubjectFrom(ctx)
+	// ev accumulates what is known about the request so that every early
+	// exit still leaves a complete audit record (US-4.3). from/to are filled
+	// in as soon as they are parsed: a payload rejected after that point
+	// (e.g. a header-injection attempt) is exactly what a SIEM wants to see.
+	ev := audit.Event{MessageID: msgID, Transport: gateway.TransportREST}
+	if authenticated {
+		ev.Namespace = subject.Namespace
+		ev.ServiceAccount = subject.ServiceAccount
+		ev.AuthMethod = gateway.AuthOAuthBearer
+	}
+
 	if s.shutting.Load() {
+		s.gw.Reject(ev, "shutting_down")
 		problem.Write(w, problem.New(problem.TypeShuttingDown, http.StatusServiceUnavailable,
 			"Service draining", "the api-server is terminating; retry on a different replica"))
 		return
 	}
-
-	ctx := r.Context()
-	subject, ok := SubjectFrom(ctx)
-	if !ok {
+	if !authenticated { // the auth middleware normally answers first
+		s.gw.Reject(ev, "missing_token")
 		problem.Write(w, problem.New(problem.TypeInvalidToken, http.StatusUnauthorized,
 			"Authentication required", "missing or invalid Bearer token"))
 		return
 	}
 
-	msgID := uuid.NewString()
 	// rejectPayload answers 4xx for a request that never reached the
-	// pipeline and still leaves an audit record (US-4.3).
+	// pipeline and still leaves an audit record.
 	rejectPayload := func(p problem.Problem) {
 		p.MessageID = msgID
-		s.gw.Reject(audit.Event{
-			MessageID:      msgID,
-			Namespace:      subject.Namespace,
-			ServiceAccount: subject.ServiceAccount,
-			AuthMethod:     gateway.AuthOAuthBearer,
-			Transport:      gateway.TransportREST,
-		}, "invalid_payload")
+		s.gw.Reject(ev, "invalid_payload")
 		problem.Write(w, p)
 	}
 
@@ -139,6 +145,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	ev.From = req.From // raw until parsed, so a malformed sender is still recorded
 	from, err := parseAddress(req.From)
 	if err != nil {
 		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
@@ -162,6 +169,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 			"Invalid 'bcc' address", err.Error()))
 		return
+	}
+	ev.From = from.Address
+	for _, list := range [][]mail.Address{to, cc, bcc} {
+		for _, a := range list {
+			ev.To = append(ev.To, a.Address)
+		}
 	}
 	if len(to)+len(cc)+len(bcc) == 0 {
 		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,

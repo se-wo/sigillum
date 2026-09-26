@@ -196,23 +196,36 @@ func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, from strin
 			}
 		}
 	}
+	// From here on the relay is judging the message itself, so a 5xx
+	// reply means retrying the same message cannot succeed.
 	if err := c.Mail(from); err != nil {
-		return err
+		return deliveryError{err}
 	}
 	for _, r := range rcpts {
 		if err := c.Rcpt(r); err != nil {
-			return err
+			return deliveryError{err}
 		}
 	}
 	w, err := c.Data()
 	if err != nil {
-		return err
+		return deliveryError{err}
 	}
 	if _, err := w.Write(body); err != nil {
-		return err
+		return deliveryError{err}
 	}
-	return w.Close()
+	if err := w.Close(); err != nil {
+		return deliveryError{err}
+	}
+	return nil
 }
+
+// deliveryError marks a failure in the MAIL/RCPT/DATA phase, as opposed to
+// connection, STARTTLS or AUTH failures, which reflect the backend's
+// configuration or health rather than the message.
+type deliveryError struct{ err error }
+
+func (e deliveryError) Error() string { return e.err.Error() }
+func (e deliveryError) Unwrap() error { return e.err }
 
 func dial(ctx context.Context, ep driver.SMTPEndpoint, timeout time.Duration) (net.Conn, error) {
 	addr := net.JoinHostPort(ep.Host, strconv.Itoa(int(ep.Port)))
@@ -272,10 +285,16 @@ func (a loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 	}
 }
 
-// isTransient classifies errors so the caller can retry only safely. An
-// upstream 5xx reply is permanent; network failures, timeouts and 4xx
-// replies are transient.
+// isTransient classifies errors so the caller can retry only safely. Only a
+// 5xx reply to MAIL, RCPT or DATA is permanent. A 5xx during the handshake,
+// STARTTLS or AUTH (e.g. rotated relay credentials, "530 must issue
+// STARTTLS") is Sigillum's configuration problem: callers must queue and
+// retry rather than bounce while an operator fixes the backend.
 func isTransient(err error) bool {
+	var de deliveryError
+	if !errors.As(err, &de) {
+		return true
+	}
 	var te *textproto.Error
 	if errors.As(err, &te) {
 		return te.Code < 500

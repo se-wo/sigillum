@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/se-wo/sigillum/internal/audit"
@@ -105,5 +108,50 @@ func TestWriteResult_UnavailableIs503(t *testing.T) {
 	writeResult(w, "m", gateway.Result{Status: gateway.StatusUnavailable, Policy: "p"})
 	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "unavailable") {
 		t.Fatalf("got %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleSendMessage_RejectedPayloadAuditsAddresses(t *testing.T) {
+	s, sink := newTestServer()
+	w := post(s, `{"from":"a@team.example","to":["b@x.example"],"bcc":["c@x.example"],"headers":{"X-Evil":"a\r\nBcc: victim@x.example"}}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d", w.Code)
+	}
+	ev := sink.events[0]
+	if ev.Reason != "invalid_payload" || ev.From != "a@team.example" || len(ev.To) != 2 {
+		t.Fatalf("header-injection reject must record sender and recipients, got %+v", ev)
+	}
+}
+
+func TestHandleSendMessage_DrainingIsAudited(t *testing.T) {
+	s, sink := newTestServer()
+	s.shutting.Store(true)
+	if w := post(s, `{}`); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503, got %d", w.Code)
+	}
+	if len(sink.events) != 1 || sink.events[0].Reason != "shutting_down" || sink.events[0].ServiceAccount != "mailer" {
+		t.Fatalf("unexpected audit events %+v", sink.events)
+	}
+}
+
+func TestRouter_TracesOnlyTheMailAPI(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp)))
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+
+	s, _ := newTestServer()
+	s.cacheSynced.Store(true)
+	h := s.buildRouter()
+	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+	}
+	if n := len(exp.GetSpans()); n != 0 {
+		t.Fatalf("probes and scrapes must not create spans, got %d", n)
+	}
+	// Unauthenticated /v1 request: rejected by auth, but still traced.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
+	if spans := exp.GetSpans(); len(spans) != 1 || spans[0].Name != "http.request" {
+		t.Fatalf("want one http.request span for /v1, got %+v", spans)
 	}
 }

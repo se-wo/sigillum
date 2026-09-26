@@ -83,6 +83,10 @@ type RateLimitsSpec struct {
 
 // MessageLimitsSpec bounds individual message dimensions.
 type MessageLimitsSpec struct {
+	// MaxSizeBytes caps the decoded content of a message: text and HTML
+	// bodies plus decoded attachment bytes. Headers, MIME framing and
+	// transfer-encoding overhead (e.g. base64) are not counted, so REST and
+	// SMTP submissions of the same mail measure the same.
 	// +kubebuilder:default=10485760
 	// +kubebuilder:validation:Minimum=1
 	MaxSizeBytes int64 `json:"maxSizeBytes,omitempty"`

@@ -65,6 +65,11 @@ const testMessage = "From: App <app@billing.example>\r\nTo: a@x.example\r\nSubje
 // startProxy runs the proxy on a random port and returns its address.
 func startProxy(t *testing.T, b *Backend) string {
 	t.Helper()
+	return startProxyWith(t, b, nil)
+}
+
+func startProxyWith(t *testing.T, b *Backend, tweak func(*smtp.Server)) string {
+	t.Helper()
 	b.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	if b.AuthTimeout == 0 {
 		b.AuthTimeout = time.Second
@@ -74,6 +79,9 @@ func startProxy(t *testing.T, b *Backend) string {
 		t.Fatal(err)
 	}
 	srv := NewServer(o, b, nil)
+	if tweak != nil {
+		tweak(srv)
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -284,4 +292,94 @@ func TestDeniedMessageOverTheWire(t *testing.T) {
 	if err := send(c, "app@billing.example", []string{"a@x.example"}, testMessage); err != nil {
 		t.Fatalf("second message: %v", err)
 	}
+}
+
+func authed(t *testing.T, addr string) *smtp.Client {
+	t.Helper()
+	c := dial(t, addr)
+	if err := c.Auth(sasl.NewOAuthBearerClient(&sasl.OAuthBearerOptions{Token: "good-token"})); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestDuplicateFromHeaderIsRejected(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	c := authed(t, startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{}}))
+	msg := "From: app@billing.example\r\nFrom: ceo@bank.example\r\nTo: a@x.example\r\nSubject: x\r\n\r\nbody\r\n"
+	err := send(c, "app@billing.example", []string{"a@x.example"}, msg)
+	if smtpCode(err) != 550 || len(sender.reqs) != 0 {
+		t.Fatalf("a second From field must be refused before policy evaluation, got %v (reqs=%d)", err, len(sender.reqs))
+	}
+	if len(sender.rejects) != 1 || sender.rejects[0] != "invalid_payload" {
+		t.Fatalf("want one audited reject, got %v", sender.rejects)
+	}
+}
+
+func TestNullSenderIsRejectedAndAudited(t *testing.T) {
+	sender := &stubSender{}
+	c := authed(t, startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{}}))
+	if err := c.Mail("", nil); smtpCode(err) != 550 {
+		t.Fatalf("want 550 for MAIL FROM:<>, got %v", err)
+	}
+	if len(sender.rejects) != 1 || sender.rejects[0] != "null_sender" {
+		t.Fatalf("unexpected rejects %v", sender.rejects)
+	}
+}
+
+func TestMalformedRecipientIsAudited(t *testing.T) {
+	sender := &stubSender{}
+	c := authed(t, startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{}}))
+	if err := c.Mail("app@billing.example", nil); err != nil {
+		t.Fatal(err)
+	}
+	// Passes go-smtp's path parser, fails RFC 5322 (consecutive dots).
+	if err := c.Rcpt("a..b@x.example", nil); smtpCode(err) != 553 {
+		t.Fatalf("want a reject for a malformed recipient, got %v", err)
+	}
+	if len(sender.rejects) != 1 || sender.rejects[0] != "invalid_payload" {
+		t.Fatalf("unexpected rejects %v", sender.rejects)
+	}
+}
+
+func TestOversizedMessageIsAudited(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	addr := startProxyWith(t, &Backend{Sender: sender, Tokens: stubTokens{}},
+		func(s *smtp.Server) { s.MaxMessageBytes = 256 })
+	c := authed(t, addr)
+	big := testMessage + strings.Repeat("x", 1024) + "\r\n"
+	if err := send(c, "app@billing.example", []string{"a@x.example"}, big); smtpCode(err) != 552 {
+		t.Fatalf("want 552 from go-smtp, got %v", err)
+	}
+	if len(sender.reqs) != 0 || len(sender.rejects) != 1 || sender.rejects[0] != "message_too_large" {
+		t.Fatalf("oversized message must be audited, got reqs=%d rejects=%v", len(sender.reqs), sender.rejects)
+	}
+}
+
+func TestSizeIsMeasuredLikeREST(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	c := authed(t, startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{}}))
+	attachment := strings.Repeat("A", 3000)
+	msg := "From: app@billing.example\r\nTo: a@x.example\r\nMIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/mixed; boundary=b1\r\n\r\n" +
+		"--b1\r\nContent-Type: text/plain\r\n\r\nhello\r\n" +
+		"--b1\r\nContent-Type: application/pdf\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+		wrap76(base64.StdEncoding.EncodeToString([]byte(attachment))) + "\r\n--b1--\r\n"
+	if err := send(c, "app@billing.example", []string{"a@x.example"}, msg); err != nil {
+		t.Fatal(err)
+	}
+	// "hello" plus CRLF before the boundary, plus the 3000 decoded attachment bytes.
+	if got := sender.reqs[0].SizeBytes; got != int64(len("hello")+3000) {
+		t.Fatalf("want decoded content size %d, got %d (raw %d)", len("hello")+3000, got, len(msg))
+	}
+}
+
+func wrap76(s string) string {
+	var b strings.Builder
+	for len(s) > 76 {
+		b.WriteString(s[:76] + "\r\n")
+		s = s[76:]
+	}
+	b.WriteString(s)
+	return b.String()
 }

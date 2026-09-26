@@ -334,3 +334,36 @@ func TestSMTPDriver_UpstreamReplyClassification(t *testing.T) {
 		t.Fatalf("4xx must be transient, got %v", err)
 	}
 }
+
+// rejectingServer greets with a 5xx, as a misconfigured or hostile relay would.
+func rejectingServer(t *testing.T, greeting string) int32 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte(greeting + "\r\n"))
+			_ = c.Close()
+		}
+	}()
+	_, p, _ := net.SplitHostPort(ln.Addr().String())
+	var n int
+	fmt.Sscanf(p, "%d", &n)
+	return int32(n)
+}
+
+func TestSMTPDriver_HandshakeRejectionIsTransient(t *testing.T) {
+	d := newTestDriver(t, rejectingServer(t, "554 5.7.1 go away"))
+	_, err := d.(driver.RawSender).SendRaw(context.Background(), "a@x.example", []string{"b@x.example"},
+		[]byte("Subject: x\r\n\r\nbody\r\n"))
+	if !errors.Is(err, driver.ErrUpstreamTransient) {
+		t.Fatalf("a 5xx before MAIL reflects backend config, not the message; want transient, got %v", err)
+	}
+}

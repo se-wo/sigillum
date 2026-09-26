@@ -22,6 +22,10 @@ import (
 //
 // Returns {1, 0} when allowed, {0, retryAfterMs} when rejected.
 var slidingWindow = redis.NewScript(`
+-- Redis < 5 replicates scripts verbatim and refuses writes after the
+-- non-deterministic TIME; effects replication fixes that. Redis >= 5 does
+-- this by default (and 7.0 turned the call into a no-op).
+if redis.replicate_commands then redis.replicate_commands() end
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 local perMinute = tonumber(ARGV[1])
@@ -102,11 +106,6 @@ func (l *RedisLimiter) Allow(ctx context.Context, key string, perMinute, perHour
 		return true, 0, nil
 	}
 	return false, ceilToSecond(time.Duration(res[1]) * time.Millisecond), nil
-}
-
-// Ping checks connectivity; used by readiness probes.
-func (l *RedisLimiter) Ping(ctx context.Context) error {
-	return l.client.Ping(ctx).Err()
 }
 
 // member returns a unique sorted-set member so concurrent hits in the same

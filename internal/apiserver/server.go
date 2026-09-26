@@ -219,7 +219,6 @@ func (s *Server) buildRouter() http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
-	r.Use(telemetry.HTTPMiddleware)
 	r.Use(s.requestLogger)
 
 	r.Get("/healthz", s.handleHealthz)
@@ -227,6 +226,10 @@ func (s *Server) buildRouter() http.Handler {
 	r.Handle("/metrics", promhttp.HandlerFor(telemetry.Registry, promhttp.HandlerOpts{}))
 
 	r.Route("/v1", func(r chi.Router) {
+		// Trace the mail API only: probes and scrapes would otherwise emit
+		// a root span each. Ahead of auth so auth.tokenreview nests under
+		// http.request.
+		r.Use(telemetry.HTTPMiddleware)
 		r.Use(s.authMiddleware)
 		r.Post("/messages", s.handleSendMessage)
 	})
