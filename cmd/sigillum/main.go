@@ -7,6 +7,7 @@ import (
 
 	"github.com/se-wo/sigillum/internal/apiserver"
 	"github.com/se-wo/sigillum/internal/controller"
+	"github.com/se-wo/sigillum/internal/smtpproxy"
 	"github.com/se-wo/sigillum/internal/telemetry"
 )
 
@@ -37,8 +38,13 @@ func main() {
 			logger.Error("controller exited with error", "err", err)
 			os.Exit(1)
 		}
+	case "smtp":
+		if err := smtpproxy.Run(logger); err != nil {
+			logger.Error("smtp proxy exited with error", "err", err)
+			os.Exit(1)
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "must pass --mode=api or --mode=controller\n")
+		fmt.Fprintf(os.Stderr, "must pass --mode=api, --mode=controller or --mode=smtp\n")
 		os.Exit(2)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/smtp"
+	"net/textproto"
 	"strconv"
 	"sync"
 	"time"
@@ -117,12 +118,23 @@ func (d *Driver) Send(ctx context.Context, msg *driver.Message) (*driver.SendRes
 		return nil, fmt.Errorf("%w: %v", driver.ErrUpstreamPermanent, err)
 	}
 	allRecipients := append(append(append([]driver.Address{}, msg.To...), msg.Cc...), msg.Bcc...)
-	rcpts := extractAddrs(allRecipients)
+	return d.sendBody(ctx, msg.From.Address, extractAddrs(allRecipients), body, msgID)
+}
 
+// SendRaw implements driver.RawSender: raw is relayed as-is (net/smtp's
+// DATA writer handles dot-stuffing and CRLF normalisation).
+func (d *Driver) SendRaw(ctx context.Context, envelopeFrom string, recipients []string, raw []byte) (*driver.SendResult, error) {
+	if len(recipients) == 0 {
+		return nil, fmt.Errorf("%w: at least one recipient required", driver.ErrUpstreamPermanent)
+	}
+	return d.sendBody(ctx, envelopeFrom, recipients, raw, "")
+}
+
+func (d *Driver) sendBody(ctx context.Context, from string, rcpts []string, body []byte, msgID string) (*driver.SendResult, error) {
 	var lastErr error
 	transient := true
 	for _, ep := range d.cfg.SMTP.Endpoints {
-		if err := d.sendVia(ctx, ep, msg.From.Address, rcpts, body); err != nil {
+		if err := d.sendVia(ctx, ep, from, rcpts, body); err != nil {
 			lastErr = err
 			if !isTransient(err) {
 				transient = false
@@ -260,15 +272,13 @@ func (a loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 	}
 }
 
-// isTransient classifies errors so the caller can retry only safely.
-// Any net.OpError, timeout, EOF or temporary error is transient.
+// isTransient classifies errors so the caller can retry only safely. An
+// upstream 5xx reply is permanent; network failures, timeouts and 4xx
+// replies are transient.
 func isTransient(err error) bool {
-	var ne net.Error
-	if errors.As(err, &ne) {
-		return ne.Timeout() || ne.Temporary()
-	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return true
+	var te *textproto.Error
+	if errors.As(err, &te) {
+		return te.Code < 500
 	}
 	return true
 }

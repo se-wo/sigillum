@@ -23,6 +23,21 @@ Common helpers for the sigillum chart.
 {{ include "sigillum.fullname" . }}-api
 {{- end -}}
 
+{{- define "sigillum.smtp.fullname" -}}
+{{ include "sigillum.fullname" . }}-smtp
+{{- end -}}
+
+{{- define "sigillum.smtp.labels" -}}
+{{ include "sigillum.labels" . }}
+app.kubernetes.io/component: smtp
+{{- end -}}
+
+{{- define "sigillum.smtp.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "sigillum.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: smtp
+{{- end -}}
+
 {{- define "sigillum.controller.fullname" -}}
 {{ include "sigillum.fullname" . }}-controller
 {{- end -}}

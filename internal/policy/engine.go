@@ -46,9 +46,13 @@ func NeedsSALabels(policies []sigv1.MailPolicy) bool {
 
 // MessageView is the subset of the inbound payload the engine needs to decide.
 type MessageView struct {
-	From       string
-	Recipients []string // To + Cc + Bcc
-	SizeBytes  int64
+	From string
+	// EnvelopeFrom is the SMTP MAIL FROM address, when it differs from the
+	// header From. Both must satisfy senderRestrictions, otherwise a client
+	// could pass the check with one and spoof the other.
+	EnvelopeFrom string
+	Recipients   []string // To + Cc + Bcc
+	SizeBytes    int64
 }
 
 // DenyReason is the slug used both for metrics labels and for problem types.
@@ -154,9 +158,15 @@ func Evaluate(p *sigv1.MailPolicy, msg MessageView) Decision {
 		}
 	}
 	if p.Spec.SenderRestrictions != nil {
-		if !senderAllowed(msg.From, p.Spec.SenderRestrictions.AllowedSenders) {
-			return Decision{Policy: p, DenyReason: DenySenderNotAllowed,
-				DenyDetail: "sender '" + msg.From + "' not in allowedSenders"}
+		senders := []string{msg.From}
+		if msg.EnvelopeFrom != "" {
+			senders = append(senders, msg.EnvelopeFrom)
+		}
+		for _, from := range senders {
+			if !senderAllowed(from, p.Spec.SenderRestrictions.AllowedSenders) {
+				return Decision{Policy: p, DenyReason: DenySenderNotAllowed,
+					DenyDetail: "sender '" + from + "' not in allowedSenders"}
+			}
 		}
 	}
 	if p.Spec.RecipientRestrictions != nil {

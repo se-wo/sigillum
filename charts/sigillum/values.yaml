@@ -53,6 +53,54 @@ api:
     secretName: ""
   extraArgs: []
 
+## SMTP proxy for legacy workloads (US-1.2) ##
+# Disabled by default; REST-only deployments do not need it.
+smtp:
+  enabled: false
+  replicas: 2
+  service:
+    type: ClusterIP
+    port: 587
+  # The container runs unprivileged and cannot bind < 1024; the Service maps
+  # service.port onto this port.
+  containerPort: 2587
+  metricsPort: 9090
+  domain: sigillum
+  # oauthbearer: AUTH OAUTHBEARER with a projected ServiceAccount token
+  #              (audience api.tokenAudience) — the recommended mode.
+  # podip:       legacy fallback identifying unauthenticated clients by pod
+  #              IP. Grants the proxy cluster-wide pod list/watch, and still
+  #              only matches policies with legacyAuth.podIPFallback: true.
+  #              Requires that the proxy sees the caller's pod IP as source
+  #              address (no SNAT/masquerading between caller and proxy).
+  authModes: [oauthbearer]
+  # Allow AUTH on connections without STARTTLS. Tokens then travel in clear
+  # text inside the cluster: keep true only behind a mesh with mTLS, or set
+  # tls.secretName and false.
+  allowInsecureAuth: true
+  tls:
+    secretName: ""    # enables STARTTLS with tls.crt / tls.key
+  maxMessageBytes: 33554432
+  maxRecipients: 100
+  shutdownTimeout: 25s
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  extraArgs: []
+
 ## controller (reconcilers + validating webhook) ##
 controller:
   enabled: true

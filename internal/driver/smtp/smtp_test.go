@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -89,6 +90,14 @@ func (f *fakeSMTP) serve(c net.Conn) {
 		case strings.HasPrefix(up, "RCPT TO:"):
 			rcpt := strings.TrimSpace(line[len("RCPT TO:"):])
 			rcpt = strings.Trim(rcpt, "<>")
+			switch {
+			case strings.HasPrefix(rcpt, "reject@"):
+				w("550 5.1.1 no such user")
+				continue
+			case strings.HasPrefix(rcpt, "busy@"):
+				w("451 4.3.0 try later")
+				continue
+			}
 			env.to = append(env.to, rcpt)
 			w("250 OK")
 		case up == "DATA":
@@ -273,3 +282,55 @@ func TestSMTPDriver_AllDownReturnsTransient(t *testing.T) {
 }
 
 var _ = io.EOF
+
+func newTestDriver(t *testing.T, port int32) driver.Driver {
+	t.Helper()
+	d, err := driver.New(driver.Config{
+		Type: driver.TypeSMTP,
+		SMTP: &driver.SMTPConfig{
+			Endpoints: []driver.SMTPEndpoint{{Host: "127.0.0.1", Port: port, TLS: "none"}},
+			AuthType:  "NONE",
+			Timeout:   5,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func TestSMTPDriver_SendRawRelaysUnchanged(t *testing.T) {
+	srv := newFakeSMTP(t)
+	defer srv.close()
+	d := newTestDriver(t, srv.port())
+
+	raw := []byte("From: legacy@app.example\r\nTo: a@x.example\r\nSubject: raw\r\nX-Custom: kept\r\n\r\n.leading dot\r\nbody\r\n")
+	if _, err := d.(driver.RawSender).SendRaw(context.Background(), "bounce@app.example",
+		[]string{"a@x.example", "hidden@x.example"}, raw); err != nil {
+		t.Fatalf("SendRaw: %v", err)
+	}
+	env, _ := srv.lastEnvelope()
+	if env.from != "bounce@app.example" || len(env.to) != 2 {
+		t.Fatalf("envelope not preserved: %+v", env)
+	}
+	// The fake server does not undo dot-stuffing, so the leading dot arrives doubled.
+	if !bytes.Contains(env.data, []byte("X-Custom: kept")) || !bytes.Contains(env.data, []byte("..leading dot")) {
+		t.Fatalf("raw message altered: %q", env.data)
+	}
+}
+
+func TestSMTPDriver_UpstreamReplyClassification(t *testing.T) {
+	srv := newFakeSMTP(t)
+	defer srv.close()
+	d := newTestDriver(t, srv.port())
+	raw := []byte("Subject: x\r\n\r\nbody\r\n")
+
+	_, err := d.(driver.RawSender).SendRaw(context.Background(), "a@x.example", []string{"reject@x.example"}, raw)
+	if !errors.Is(err, driver.ErrUpstreamPermanent) {
+		t.Fatalf("5xx must be permanent, got %v", err)
+	}
+	_, err = d.(driver.RawSender).SendRaw(context.Background(), "a@x.example", []string{"busy@x.example"}, raw)
+	if !errors.Is(err, driver.ErrUpstreamTransient) {
+		t.Fatalf("4xx must be transient, got %v", err)
+	}
+}

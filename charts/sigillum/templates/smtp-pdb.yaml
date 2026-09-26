@@ -1,0 +1,12 @@
+{{- if and .Values.smtp.enabled .Values.smtp.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sigillum.smtp.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "sigillum.smtp.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.smtp.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels: {{- include "sigillum.smtp.selectorLabels" . | nindent 6 }}
+{{- end }}

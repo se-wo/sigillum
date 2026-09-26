@@ -1,0 +1,101 @@
+{{- if .Values.smtp.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sigillum.smtp.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "sigillum.smtp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.smtp.replicas }}
+  selector:
+    matchLabels: {{- include "sigillum.smtp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sigillum.smtp.selectorLabels" . | nindent 8 }}
+        {{- with .Values.smtp.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
+      annotations:
+        {{- with .Values.smtp.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ include "sigillum.smtp.fullname" . }}
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: sigillum
+          image: {{ include "sigillum.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --mode=smtp
+            - --listen=:{{ .Values.smtp.containerPort }}
+            - --metrics-listen=:{{ .Values.smtp.metricsPort }}
+            - --domain={{ .Values.smtp.domain }}
+            - --auth-modes={{ join "," .Values.smtp.authModes }}
+            - --allow-insecure-auth={{ .Values.smtp.allowInsecureAuth }}
+            - --max-message-bytes={{ int64 .Values.smtp.maxMessageBytes }}
+            - --max-recipients={{ .Values.smtp.maxRecipients }}
+            - --token-audience={{ .Values.api.tokenAudience }}
+            - --token-cache-size={{ .Values.api.tokenCacheSize }}
+            - --token-cache-ttl={{ .Values.api.tokenCacheTTL }}
+            - --shutdown-timeout={{ .Values.smtp.shutdownTimeout }}
+            - --audit-log={{ .Values.audit.output }}
+            {{- include "sigillum.ratelimitArgs" . | nindent 12 }}
+            {{- range .Values.smtp.extraArgs }}
+            - {{ . }}
+            {{- end }}
+          env:
+            - name: SIGILLUM_LOG_LEVEL
+              value: {{ .Values.logLevel }}
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            {{- include "sigillum.ratelimitEnv" . | nindent 12 }}
+            {{- include "sigillum.tracingEnv" (dict "root" . "service" "sigillum-smtp") | nindent 12 }}
+            {{- if .Values.smtp.tls.secretName }}
+            - name: SIGILLUM_TLS_CERT
+              value: /etc/sigillum/tls/tls.crt
+            - name: SIGILLUM_TLS_KEY
+              value: /etc/sigillum/tls/tls.key
+            {{- end }}
+          ports:
+            - name: smtp
+              containerPort: {{ .Values.smtp.containerPort }}
+            - name: metrics
+              containerPort: {{ .Values.smtp.metricsPort }}
+          readinessProbe:
+            httpGet: { path: /readyz, port: metrics }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources: {{- toYaml .Values.smtp.resources | nindent 12 }}
+          securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          {{- if .Values.smtp.tls.secretName }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/sigillum/tls
+              readOnly: true
+          {{- end }}
+      {{- if .Values.smtp.tls.secretName }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.smtp.tls.secretName }}
+      {{- end }}
+      {{- with .Values.smtp.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.smtp.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.smtp.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.smtp.topologySpreadConstraints }}
+      topologySpreadConstraints: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

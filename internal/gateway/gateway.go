@@ -10,6 +10,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -78,8 +79,15 @@ type Request struct {
 	// MessageID is the Sigillum-assigned ID (also used as the RFC 5322
 	// Message-ID local part).
 	MessageID string
-	Message   *driver.Message
-	SizeBytes int64
+	// Message drives policy evaluation. On the REST path it is also what the
+	// driver assembles and sends.
+	Message *driver.Message
+	// Raw, when set, is relayed verbatim instead of assembling Message
+	// (SMTP path). Message.To then holds the envelope recipients.
+	Raw []byte
+	// EnvelopeFrom is the SMTP MAIL FROM address (Raw only).
+	EnvelopeFrom string
+	SizeBytes    int64
 }
 
 // Status classifies a Result so transports can pick a status code.
@@ -104,6 +112,9 @@ type Result struct {
 	DenyReason policy.DenyReason // StatusDenied only
 	Detail     string
 	RetryAfter time.Duration // StatusRateLimited only
+	// Permanent marks an upstream rejection that will not succeed on retry
+	// (StatusUpstreamError only). SMTP maps it to 5xx instead of 4xx.
+	Permanent  bool
 	UpstreamID string
 	AcceptedAt time.Time
 }
@@ -135,9 +146,10 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 		logger = logger.With("trace_id", tid)
 	}
 	view := policy.MessageView{
-		From:       req.Message.From.Address,
-		Recipients: Recipients(req.Message),
-		SizeBytes:  req.SizeBytes,
+		From:         req.Message.From.Address,
+		EnvelopeFrom: req.EnvelopeFrom,
+		Recipients:   Recipients(req.Message),
+		SizeBytes:    req.SizeBytes,
 	}
 	ev := audit.Event{
 		MessageID:      req.MessageID,
@@ -221,7 +233,17 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 	sendCtx, sendSpan := telemetry.Tracer().Start(ctx, "backend.send", trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(attribute.String("sigillum.backend", backendKey), attribute.String("sigillum.policy", p.Name)))
 	start := time.Now()
-	res, err := d.Send(sendCtx, req.Message)
+	var res *driver.SendResult
+	if req.Raw != nil {
+		rs, ok := d.(driver.RawSender)
+		if !ok {
+			err = fmt.Errorf("%w: backend %s cannot relay raw messages", driver.ErrUpstreamPermanent, backendKey)
+		} else {
+			res, err = rs.SendRaw(sendCtx, req.EnvelopeFrom, view.Recipients, req.Raw)
+		}
+	} else {
+		res, err = d.Send(sendCtx, req.Message)
+	}
 	dur := time.Since(start).Seconds()
 	if err != nil {
 		sendSpan.SetStatus(codes.Error, err.Error())
@@ -235,7 +257,8 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 		logger.Error("upstream send failed", "policy", p.Name, "backend", backendKey, "err", err, "result", resultLabel)
 		ev.Decision, ev.Reason = audit.DecisionReject, "upstream_error"
 		g.Audit.Record(ev)
-		return Result{Status: StatusUpstreamError, Policy: p.Name, Backend: backendKey, Detail: err.Error()}
+		return Result{Status: StatusUpstreamError, Policy: p.Name, Backend: backendKey, Detail: err.Error(),
+			Permanent: errors.Is(err, driver.ErrUpstreamPermanent)}
 	}
 	const resultLabel = "ok"
 	telemetry.BackendDurationSeconds.WithLabelValues(p.Namespace, p.Name, backendKey, resultLabel).Observe(dur)

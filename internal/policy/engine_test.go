@@ -260,3 +260,19 @@ func TestMatch_PodIPLegacyRequiresOptIn(t *testing.T) {
 		t.Fatal("SA subject in opted-in policy must match pod-IP caller")
 	}
 }
+
+func TestEvaluate_EnvelopeSenderAlsoChecked(t *testing.T) {
+	p := policy("p", "ns", 1, "sa", "*@app.example")
+	ok := Evaluate(&p, MessageView{From: "a@app.example", EnvelopeFrom: "bounce@app.example", Recipients: []string{"x@y"}})
+	if !ok.Allowed {
+		t.Fatalf("both senders allowed, got %+v", ok)
+	}
+	spoof := Evaluate(&p, MessageView{From: "ceo@other.example", EnvelopeFrom: "a@app.example", Recipients: []string{"x@y"}})
+	if spoof.Allowed || spoof.DenyReason != DenySenderNotAllowed {
+		t.Fatalf("header From must be checked even if envelope passes, got %+v", spoof)
+	}
+	env := Evaluate(&p, MessageView{From: "a@app.example", EnvelopeFrom: "x@other.example", Recipients: []string{"x@y"}})
+	if env.Allowed {
+		t.Fatal("envelope sender must be checked too")
+	}
+}
