@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net/mail"
 	"net/textproto"
 	"sort"
 	"strings"
@@ -19,11 +20,14 @@ import (
 const crlf = "\r\n"
 
 // formatAddress produces an RFC-5322 address with optional display name.
+// net/mail quotes the name, or encodes it as an RFC 2047 phrase, so quotes,
+// '<', ',' and similar in a name cannot end it early and show a different
+// address.
 func formatAddress(a driver.Address) string {
 	if a.Name == "" {
 		return a.Address
 	}
-	return mime.QEncoding.Encode("utf-8", a.Name) + " <" + a.Address + ">"
+	return (&mail.Address{Name: a.Name, Address: a.Address}).String()
 }
 
 func formatAddressList(addrs []driver.Address) string {

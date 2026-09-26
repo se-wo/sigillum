@@ -261,3 +261,28 @@ func readAll(t *testing.T, m *mail.Message) string {
 	}
 	return buf.String()
 }
+
+func TestAssemble_DisplayNamesStayInsideTheirAddress(t *testing.T) {
+	for _, name := range []string{
+		`x@evil.example, y`,
+		`Jörg "J" <x>`,
+		`Alerts (ops)`,
+		`Grüße`,
+		`plain`,
+	} {
+		raw, _, err := AssembleMessage(&driver.Message{
+			From: driver.Address{Name: name, Address: "from@example.com"},
+			To:   []driver.Address{{Name: name, Address: "to@example.com"}},
+		}, "example.com")
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, _ := parseMessage(t, raw)
+		for k, want := range map[string]string{"From": "from@example.com", "To": "to@example.com"} {
+			list, err := m.Header.AddressList(k)
+			if err != nil || len(list) != 1 || list[0].Address != want || list[0].Name != name {
+				t.Errorf("name %q: %s = %v, %v; header %q", name, k, list, err, m.Header.Get(k))
+			}
+		}
+	}
+}
