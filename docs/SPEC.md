@@ -299,16 +299,28 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - With the default, **everyone holding `edit` in a namespace can author `MailPolicy` there.** Platforms that reserve policy authoring for the platform or security team set `rbac.aggregateClusterRoles: false` and bind their own roles (§4.9).
 
 #### US-3.7 — Sigillum-issued SMTP credentials **[planned v0.3.0]**
-**As a** developer running off-the-shelf software (Grafana, Alertmanager, Gitea, Nextcloud, Keycloak, …) **I want** to authenticate to the SMTP proxy with a username and password, **so that** apps that support nothing but `AUTH PLAIN` / `LOGIN` can send through Sigillum without falling back to pod-IP trust.
+**As a** developer running off-the-shelf software (Grafana, Alertmanager, Gitea, Nextcloud, Keycloak, Argo CD notifications, …) **I want** to authenticate to the SMTP proxy with a username and password, **so that** apps that support nothing but `AUTH PLAIN` / `LOGIN` can send through Sigillum without falling back to pod-IP trust.
 
 *Acceptance criteria:*
-- A namespace-scoped `MailCredential` (§4.3.4) binds a username to one ServiceAccount in its namespace. Authenticating with it gives exactly the identity of that ServiceAccount; policy matching is unchanged.
-- The SMTP proxy offers `AUTH PLAIN` and `AUTH LOGIN` when at least one credential mode is enabled (`--auth-modes` gains `credential`). Only over TLS, unless `allowInsecureAuth` is set (US-3.4 rules apply).
-- Sigillum stores only a password hash (argon2id or bcrypt) in the `MailCredential`; it never needs write access to Secrets. The plaintext lives in a Secret the user creates, for example with the CLI helper (US-7.2) or External Secrets.
-- Rotation: replace the hash (and the Secret). Revocation: delete the `MailCredential`; takes effect within the informer resync, no cache.
-- Log and audit `auth_method`: `smtp_credential`. Failed attempts answer `535 5.7.8` and are audited; repeated failures per username are rate-limited.
+- A namespace-scoped `MailCredential` (§4.3.4) binds a username to one ServiceAccount in its namespace. Authenticating with it gives exactly the identity of that ServiceAccount; policy matching, rate limits and audit are unchanged. Policies need no opt-in for credential callers.
+- Two mutually exclusive modes:
+  - **Generated (default).** The controller generates a 256-bit random password, writes it to a Secret in the credential's namespace (`spec.secretName`), and records only a SHA-256 hash in `status`. Nothing secret is committed to Git; the team only commits the `MailCredential`.
+  - **Bring your own hash.** The user sets `spec.passwordHash` (argon2id) and delivers the Secret themselves (Vault, External Secrets, `kubectl sigillum credential create`). The controller touches no Secret. For teams that do not want Sigillum to write Secrets in their namespace.
+- Generated credentials are available in **all namespaces except excluded ones** (chart `credentials.excludeNamespaces`, default `kube-*`; the Sigillum release namespace is always excluded). Details and the guard that keeps this safe: §4.10.
+- The SMTP proxy offers `AUTH PLAIN` and `AUTH LOGIN` when mode `credential` is enabled (`--auth-modes`, chart `smtp.authModes`). Credential authentication **requires TLS** (STARTTLS, or implicit TLS from v0.4.0); plaintext is only possible with an explicit `smtp.allowInsecureAuth: true` (for example with mesh mTLS). Unlike tokens, a static password can be replayed for months.
+- The proxy verifies credentials from its informer cache of `MailCredential` objects and needs no Secret access.
+- **Rotation (generated mode):** on `spec.rotation.interval` or on demand (annotation `sigillum.dev/rotate`, or `kubectl sigillum credential rotate`), the controller writes a new password to the Secret and keeps the old hash valid for `spec.rotation.gracePeriod` (default 24 h). Apps that read the password only at startup are restarted by [Stakater Reloader](https://github.com/stakater/Reloader) (recipe, v0.3.0). The audit record notes when the previous password was used, so stragglers can be found before the grace period ends.
+- **Revocation:** delete the `MailCredential` (the owned Secret is garbage-collected). Takes effect as soon as the proxy's informer sees the deletion; there is no additional cache.
+- Log and audit `auth_method`: `smtp_credential`. Failed attempts answer `535 5.7.8` and are audited; repeated failures per username and per source IP are rate-limited.
 - No privilege escalation: whoever can create a `MailCredential` for a ServiceAccount could already run a pod as that ServiceAccount (`edit` role).
 - Priority rationale: without this, the most common SMTP clients in a cluster can only use the weakest mode (US-3.5). There is no workaround outside Sigillum.
+
+*Workflow (generated mode):*
+1. Platform team, once: enable mode `credential` and STARTTLS in the chart. All namespaces except the excluded ones can use credentials immediately.
+2. Team commits a `MailCredential` (and its `MailPolicy`) to Git.
+3. The controller creates the Secret (`username`, `password`, `host`, `port`) in the team's namespace and records the hash.
+4. The app references the Secret the same way as any SMTP Secret, for example Grafana's `smtp.existingSecret`.
+5. On `AUTH PLAIN`, the proxy maps the username to the `MailCredential`, checks the hash, and continues as that ServiceAccount.
 
 ---
 
@@ -507,7 +519,8 @@ This epic describes *architectural constraints*, not features to build now. The 
   - `send`: send a test message as the current user or `--as-sa <sa>` (requests a token via the TokenRequest API with the user's own permissions).
   - `whoami`: show the resolved identity and the policy that would match.
   - `explain`: run preflight and print every candidate policy with the rule that accepted or rejected the message.
-  - `credential create`: generate a password, create the Secret and the `MailCredential` (US-3.7) with the user's own permissions.
+  - `credential create`: bring-your-own-hash mode; generate a password, then create the Secret and the `MailCredential` (US-3.7) with the user's own permissions.
+  - `credential rotate`: trigger a rotation of a generated credential.
 
 #### US-7.3 — OpenAPI description **[planned v0.4.0]**
 **As a** developer **I want** a machine-readable API description, **so that** I can generate a client in my language.
@@ -711,7 +724,9 @@ spec:
 
 #### 4.3.4 MailCredential (namespace-scoped) **[planned v0.3.0]**
 
-A Sigillum-issued SMTP credential for clients that only support `AUTH PLAIN` / `LOGIN` (US-3.7). Draft shape:
+A Sigillum-issued SMTP credential for clients that only support `AUTH PLAIN` / `LOGIN` (US-3.7).
+
+Generated mode (default):
 
 ```yaml
 apiVersion: sigillum.dev/v1alpha1
@@ -721,18 +736,49 @@ metadata:
   namespace: monitoring
 spec:
   serviceAccountName: grafana     # identity the credential authenticates as (same namespace)
-  passwordHash: "$argon2id$v=19$m=65536,t=3,p=2$…"   # only the hash; plaintext stays in the user's Secret
+  secretName: grafana-smtp        # created and owned by the controller
+  rotation:
+    interval: 90d                 # optional; unset = rotate only on demand
+    gracePeriod: 24h              # previous password stays valid this long (default 24h)
 status:
   username: grafana.monitoring    # <name>.<namespace>, unique cluster-wide
+  current:
+    hash: "sha256:…"              # of a 256-bit random password; never the plaintext
+    createdAt: "2026-10-01T08:00:00Z"
+  previous:                       # present only during a rotation's grace period
+    hash: "sha256:…"
+    validUntil: "2026-10-02T08:00:00Z"
   conditions:
-    - type: Ready                 # False if the ServiceAccount does not exist or the hash is malformed
-      status: "True"
-  lastRotationTime: "2026-10-01T08:00:00Z"   # last change of passwordHash
+    - type: Ready                 # False: ServiceAccount missing, namespace excluded,
+      status: "True"              #        SecretConflict, guard missing, …
 ```
 
-The webhook rejects plaintext-looking values and unknown hash formats. Design questions: Q-11.
+The generated Secret:
 
-### 4.4 REST API (v1)
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-smtp
+  namespace: monitoring
+  labels: { sigillum.dev/credential: grafana }
+  ownerReferences: [{ kind: MailCredential, name: grafana, controller: true, … }]
+type: Opaque
+stringData:
+  username: grafana.monitoring
+  password: <256-bit random, base64url>
+  host: sigillum-smtp.sigillum-system.svc
+  port: "587"
+```
+
+Bring-your-own-hash mode: set `spec.passwordHash` (argon2id, PHC string format) instead of `spec.secretName` and `spec.rotation`. The webhook rejects specs that set both, plaintext-looking values, and unknown hash formats. User-chosen passwords may be weak, so this mode uses a deliberately slow hash; generated passwords are high-entropy, so a fast hash is safe and keeps authentication cheap.
+
+Controller behavior in generated mode:
+- The Secret is written with server-side apply. If a Secret of that name exists and is not owned by this `MailCredential`, the controller does not touch it (`Ready=False`, reason `SecretConflict`).
+- The controller cannot read Secrets (§4.10), so it neither notices nor restores a deleted Secret. A rotation (`sigillum.dev/rotate`) recreates it with a new password. The app's failing logins show up in the audit stream and the auth-failure metric.
+- A `MailCredential` in an excluded namespace is rejected by the webhook, and ignored by the controller if it exists anyway.
+
+### 4.4 REST API### 4.4 REST API (v1)
 
 **Base path:** `/v1`
 **Content type:** `application/json`, or `multipart/form-data` for attachments (US-1.3)
@@ -893,7 +939,7 @@ Drivers register a factory per type in a process-wide registry. The webhook reje
 ### 4.6 SMTP proxy behavior **[v0.2.0]**
 
 - Listens on container port 2587; the Service exposes 587 (submission).
-- **Authentication:** `AUTH OAUTHBEARER` (US-3.4) is offered whenever mode `oauthbearer` is enabled (default). `AUTH PLAIN` / `LOGIN` with a `MailCredential` (US-3.7) follows in v0.3.0 as mode `credential`. A client that sends `MAIL FROM` without authenticating is identified by pod IP only if mode `podip` is enabled (US-3.5); otherwise it gets `530 5.7.0 Authentication required`.
+- **Authentication:** `AUTH OAUTHBEARER` (US-3.4) is offered whenever mode `oauthbearer` is enabled (default). `AUTH PLAIN` / `LOGIN` with a `MailCredential` (US-3.7) follows in v0.3.0 as mode `credential`, offered only after STARTTLS unless `allowInsecureAuth` is set. A client that sends `MAIL FROM` without authenticating is identified by pod IP only if mode `podip` is enabled (US-3.5); otherwise it gets `530 5.7.0 Authentication required`.
 - STARTTLS is offered when `smtp.tls.secretName` is set. AUTH on plaintext connections follows `smtp.allowInsecureAuth` (US-3.4).
 - **Envelope rules:** the null sender `<>` is refused (`550 5.7.1`). `MAIL FROM` and `RCPT TO` must be plain mailbox addresses (US-2.4 local-part rules); otherwise `553`.
 - **Message rules** (checked at the end of `DATA`): exactly one `From` field holding exactly one address; at most one `Sender` field (holding exactly one address) and at most one `Reply-To` field; no `Resent-*` fields; display names per US-2.3. Violations answer `550 5.6.0`.
@@ -969,10 +1015,34 @@ The record never contains subject, body, attachment content, header values other
 | Component | Kubernetes permissions |
 |---|---|
 | api-server | read Sigillum CRs and ServiceAccounts (cluster-wide); read Secrets in the release namespace and `rbac.allowedSecretNamespaces`; create `TokenReview` |
-| smtp-proxy | as api-server, plus `list`/`watch` Pods cluster-wide when `podip` is enabled |
-| controller | read/watch Sigillum CRs, update their status; read Secrets as above; leader-election leases; create events; serves the webhook |
+| smtp-proxy | as api-server; plus `list`/`watch` Pods cluster-wide when `podip` is enabled. Reads `MailCredential` objects for mode `credential`, never the credential Secrets. |
+| controller | read/watch Sigillum CRs, update their status; read Secrets as above; leader-election leases; create events; serves the webhook. With generated credentials (v0.3.0): `create` and `patch` on Secrets cluster-wide, **without** `get`, `list` or `watch`, restricted by the credential guard below. |
 
 The api-server and SMTP proxy read backend credentials themselves on the send path, so a `MailBackend` in a team namespace works only if that namespace is listed in `rbac.allowedSecretNamespaces`.
+
+**Credential Secret guard [planned v0.3.0].** Generated credentials (US-3.7) are available in all namespaces by default, so the controller needs to write Secrets anywhere. RBAC cannot narrow `create` by name or label, so the chart ships a `ValidatingAdmissionPolicy` and binding that apply to requests from the controller's ServiceAccount only:
+
+- The Secret must carry the label `sigillum.dev/credential` and an owner reference to a `MailCredential`, both in the new object and (on update) in the existing one. The controller therefore cannot modify or take over any other Secret, such as TLS certificates or database passwords.
+- The namespace must not match `credentials.excludeNamespaces`, and must not be the release namespace (which holds the relay credentials).
+- `DELETE` is not needed: owned Secrets are garbage-collected with their `MailCredential`.
+
+Without `get`, `list` or `watch`, the controller cannot read any Secret outside the backend-credential namespaces it already had. Worst case, a compromised controller can overwrite or create mail-credential Secrets; it cannot read or change anything else.
+
+The guard is mandatory for generated mode:
+- The chart only renders the controller's Secret-write permission when the cluster serves `admissionregistration.k8s.io/v1` `ValidatingAdmissionPolicy` (Kubernetes ≥ 1.30), and always renders it together with the guard.
+- At startup the controller checks that the guard policy and binding exist and are unchanged. If not, it refuses to manage Secrets and reports it (condition on every generated `MailCredential`, log, metric). Bring-your-own-hash mode keeps working.
+
+Chart values (sketch):
+
+```yaml
+credentials:
+  enabled: true              # generated mode; false = bring-your-own-hash only
+  excludeNamespaces:         # exact names, or prefixes ending in "*"
+    - "kube-*"               # kube-system, kube-public, kube-node-lease, …
+  # The release namespace is always excluded. Add platform namespaces you
+  # never want to hold mail credentials, for example cert-manager or
+  # istio-system.
+```
 
 ### 4.11 Request flow (REST)
 
@@ -1151,7 +1221,7 @@ Goal: a small team can route *all* cluster mail through Sigillum, including thir
 
 | Item | Type | Ref |
 |---|---|---|
-| Sigillum-issued SMTP credentials (`MailCredential`, `AUTH PLAIN` / `LOGIN`) | Feature | US-3.7, §4.3.4 |
+| Sigillum-issued SMTP credentials (`MailCredential`, `AUTH PLAIN` / `LOGIN`), generated in all non-excluded namespaces, with rotation and the credential Secret guard | Feature | US-3.7, §4.3.4, §4.10 |
 | Per-address recipient allowlist (`allowedRecipients`) | Feature | US-2.4 |
 | Cluster name in audit, logs and metrics | Feature | US-4.5 |
 | Token cache bounded by token expiry | Gap fix | G-5 |
@@ -1159,7 +1229,8 @@ Goal: a small team can route *all* cluster mail through Sigillum, including thir
 | `preStop` delay before draining | Gap fix | G-3 |
 | Egress and admission recipes (NetworkPolicy, Cilium, Kyverno, `ValidatingAdmissionPolicy`) | Recipe | US-5.7 |
 | Local development recipe with Mailpit | Recipe | US-7.1 |
-| Provider recipes: Microsoft 365, Google Workspace, Amazon SES, Mailgun, Postmark, Brevo via SMTP; Grafana, Alertmanager, Gitea, Nextcloud, Keycloak as clients | Recipe | §8.0 rule 2 |
+| Provider recipes: Microsoft 365, Google Workspace, Amazon SES, Mailgun, Postmark, Brevo via SMTP; Grafana, Alertmanager, Gitea, Nextcloud, Keycloak, Argo CD notifications as clients | Recipe | §8.0 rule 2 |
+| Restart apps on credential rotation with Stakater Reloader | Recipe | US-3.7 |
 
 ### 8.3 v0.4.0 — Easy to run, easy to debug
 
@@ -1168,7 +1239,7 @@ Goal: one-command install on a small cluster, and developers can answer "why was
 | Item | Type | Ref |
 |---|---|---|
 | Webhook certificates without cert-manager | Feature | US-5.6 |
-| Preflight endpoint and `kubectl sigillum` plugin (`send`, `whoami`, `explain`, `credential create`) | Feature | US-7.2, §4.4.2 |
+| Preflight endpoint and `kubectl sigillum` plugin (`send`, `whoami`, `explain`, `credential create` / `rotate`) | Feature | US-7.2, §4.4.2 |
 | SMTPS (implicit TLS, port 465) on the proxy | Feature | US-1.5 |
 | OpenAPI 3.1 description | Feature | US-7.3 |
 | Grafana dashboard and `PrometheusRule` alerts | Feature | US-4.6 |
@@ -1215,7 +1286,8 @@ Every candidate that has been discussed, with its decision and the reason.
 
 | Feature | Decision | Reason |
 |---|---|---|
-| Sigillum-issued SMTP credentials | v0.3.0 | Most off-the-shelf apps only do `PLAIN` / `LOGIN`; the only alternative is pod-IP trust. No workaround outside Sigillum. |
+| Sigillum-issued SMTP credentials | v0.3.0 | Most off-the-shelf apps only do `PLAIN` / `LOGIN`; the only alternative is pod-IP trust. No workaround outside Sigillum. Generated by default in all non-excluded namespaces, so small teams have nothing to maintain per namespace. |
+| Restarting apps after rotation | Recipe, v0.3.0 | Stakater Reloader already does it. |
 | Egress enforcement (block direct access to relays) | Recipe, v0.3.0 | NetworkPolicy / CiliumNetworkPolicy do it; essential, but not Sigillum code. |
 | Policy guardrails (sender domains per team, allowed namespaces per `ClusterMailBackend`, no pod-IP in production) | Recipe, v0.3.0 | Kyverno / `ValidatingAdmissionPolicy` do it (§4.9). Resolves Q-8. |
 | Per-address recipient allowlist | v0.3.0 | Common staging need ("only the QA inbox"); no workaround with domain lists. |
@@ -1260,7 +1332,8 @@ Every candidate that has been discussed, with its decision and the reason.
 |---|---|
 | Workloads bypass Sigillum and talk to the relay directly | Egress recipe (US-5.7); relay credentials exist only in the Sigillum namespace |
 | TokenReview load on kube-apiserver | LRU cache with TTL; projected tokens with audience binding |
-| Static SMTP credentials (US-3.7) leak | Scoped to one ServiceAccount and its policies; hash only in Sigillum; audited; instant revocation by deleting the `MailCredential` |
+| Static SMTP credentials (US-3.7) leak | Scoped to one ServiceAccount and its policies; 256-bit random; TLS required; hash only in Sigillum; audited; rotation with grace period; instant revocation by deleting the `MailCredential` |
+| Controller write access to Secrets in all namespaces (generated credentials) | No read verbs; mandatory `ValidatingAdmissionPolicy` guard limits writes to labelled Secrets owned by a `MailCredential`; excluded namespaces (default `kube-*` and always the release namespace); controller refuses to write when the guard is missing; bring-your-own-hash mode for teams that want no Secret writes (§4.10) |
 | Redis as single point of failure | Sentinel / Cluster; fail closed (`503`) by default, `failOpen` as explicit opt-in |
 | Rate limits multiplied by replica count | Documented (§4.7, US-5.2); Redis for multi-replica installs |
 | Pod-IP ambiguity for SMTP legacy auth | OAUTHBEARER default, credentials from v0.3.0; pod-IP is a double opt-in; ambiguous IPs rejected; `UsingLegacyAuth` condition |
@@ -1286,7 +1359,7 @@ Every candidate that has been discussed, with its decision and the reason.
 | Q-8 | Should `ClusterMailBackend` restrict which namespaces may reference it natively? | Decided for now: no, use the admission recipe (US-5.7). Revisit if users find the recipe too hard. |
 | Q-9 | What should `MailPolicy.status.matchedSubjects` count, or should it be removed? | See G-4; decide by v0.6.0. |
 | Q-10 | Should the webhook warn when `senderRestrictions` is present with an empty `allowedSenders` list? | That configuration denies every sender and is almost always a mistake (US-2.3). A warning does not change behavior. |
-| Q-11 | `MailCredential` details: hash algorithm and cost; should policies opt in to credential callers (like `legacyAuth.podIPFallback`)? Should the controller optionally generate the Secret itself (needs Secret write access)? | Draft in §4.3.4 assumes user-supplied hash, no opt-in, no Secret writes. |
+| Q-11 | `MailCredential` design | **Decided:** controller-generated Secrets by default in all namespaces except `credentials.excludeNamespaces` (default `kube-*`, release namespace always), guarded as in §4.10; bring-your-own argon2id hash as alternative; SHA-256 for generated passwords; no per-policy opt-in; TLS required by default (US-3.7, §4.3.4). |
 
 Settled: a backend can define several endpoints as a failover group (`spec.smtp.endpoints`).
 
@@ -1319,7 +1392,7 @@ Specified behavior the current release (v0.2.1) does not meet yet:
 | **Gateway pipeline** | Transport-agnostic send path shared by REST and SMTP: policy, backend, rate limit, send, audit |
 | **Policy subject** | Caller identity (ServiceAccount, pod) a policy matches |
 | **Preflight** | Dry-run validation of a message without delivery |
-| **MailCredential** | Sigillum-issued username / password bound to one ServiceAccount, for SMTP clients without token support (US-3.7) |
+| **MailCredential** | Sigillum-issued username / password bound to one ServiceAccount, for SMTP clients without token support; generated into a Secret by the controller or backed by a user-supplied hash (US-3.7) |
 | **Recipe** | Tested configuration of a standard tool (NetworkPolicy, Kyverno, Mailpit, …) shipped instead of a Sigillum feature (§8.0) |
 
 ---
