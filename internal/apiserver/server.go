@@ -135,8 +135,12 @@ func init() {
 		}()
 		logger.Info("tracing", "enabled", tracingOn)
 
+		// The cache outlives SIGTERM: requests are still served during the
+		// shutdown delay and drain, and must see policy changes.
+		cacheCtx, stopCache := context.WithCancel(context.Background())
+		defer stopCache()
 		go func() {
-			if startErr := cl.Start(ctx); startErr != nil {
+			if startErr := cl.Start(cacheCtx); startErr != nil {
 				logger.Error("informer cache stopped with error", "err", startErr)
 			}
 		}()
@@ -170,7 +174,7 @@ func init() {
 		s.router = s.buildRouter()
 
 		go func() {
-			if cl.GetCache().WaitForCacheSync(ctx) {
+			if cl.GetCache().WaitForCacheSync(cacheCtx) {
 				s.cacheSynced.Store(true)
 				logger.Info("informer cache synced")
 			}

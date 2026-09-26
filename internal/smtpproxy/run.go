@@ -244,14 +244,18 @@ func Run(logger *slog.Logger) error {
 		Limiter:  limiter,
 	}
 
+	// The cache outlives SIGTERM: sessions are still served during the
+	// shutdown delay and drain, and must see policy and credential changes.
+	cacheCtx, stopCache := context.WithCancel(context.Background())
+	defer stopCache()
 	go func() {
-		if err := cl.Start(ctx); err != nil {
+		if err := cl.Start(cacheCtx); err != nil {
 			logger.Error("informer cache stopped with error", "err", err)
 		}
 	}()
 	var synced, draining atomic.Bool
 	go func() {
-		if cl.GetCache().WaitForCacheSync(ctx) {
+		if cl.GetCache().WaitForCacheSync(cacheCtx) {
 			synced.Store(true)
 			logger.Info("informer cache synced")
 		}

@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -86,6 +87,9 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		reason   string
 		message  string
 		finished bool
+		// secretWritten: a new password is in the Secret, so its hash must
+		// reach status even if the first status write conflicts.
+		secretWritten bool
 	)
 	fail := func(rsn, msg string) { reason, message, finished = rsn, msg, true }
 
@@ -170,7 +174,12 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			default:
 				if st.Current != nil && grace > 0 {
 					st.Previous = &sigv1.PreviousCredentialHash{Hash: st.Current.Hash, ValidUntil: metav1.NewTime(now.Add(grace))}
+				} else {
+					// No grace: an older Previous must not outlive the
+					// password that was just rotated out.
+					st.Previous = nil
 				}
+				secretWritten = true
 				st.Current = &sigv1.CredentialHash{Hash: credential.HashGenerated(password), CreatedAt: metav1.NewTime(now)}
 				st.SecretName = mc.Spec.SecretName
 				st.LastRotateRequest = mc.Annotations[sigv1.RotateAnnotation]
@@ -207,10 +216,34 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		Reason:             reason,
 		Message:            message,
 	})
-	if err := r.Status().Update(ctx, &mc); err != nil {
+	if err := r.updateStatus(ctx, &mc, secretWritten); err != nil {
 		return ctrl.Result{}, err
 	}
 	return result, retErr
+}
+
+// updateStatus writes mc.Status. After a new password was written to the
+// Secret (secretWritten), a conflict is retried against the latest object:
+// giving up would drop the hash of the password now in the Secret, and the
+// next reconcile would rotate again, so apps that already read it would be
+// locked out without a grace period.
+func (r *MailCredentialReconciler) updateStatus(ctx context.Context, mc *sigv1.MailCredential, secretWritten bool) error {
+	err := r.Status().Update(ctx, mc)
+	if !secretWritten || !apierrors.IsConflict(err) {
+		return err
+	}
+	status := *mc.Status.DeepCopy()
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		var latest sigv1.MailCredential
+		if err := r.Get(ctx, client.ObjectKeyFromObject(mc), &latest); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if latest.UID != mc.UID {
+			return nil // recreated; the Secret belongs to the old object
+		}
+		latest.Status = status
+		return r.Status().Update(ctx, &latest)
+	})
 }
 
 // rotationDue returns why the generated password must be (re)written, or
