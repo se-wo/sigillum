@@ -251,6 +251,26 @@ func TestGeneratedNameTooLongIsInvalid(t *testing.T) {
 	}
 }
 
+// Review of #20: with the webhook disabled, a typo such as "90s" must not
+// rotate the password every 90 seconds.
+func TestShortRotationIntervalIsInvalid(t *testing.T) {
+	mc := issuedCredential("1h")
+	mc.Spec.Rotation.Interval = "90s"
+	r, c := credReconciler(t, mc, interceptor.Funcs{})
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: credKey})
+	if err != nil || res.RequeueAfter != 0 {
+		t.Fatalf("an invalid interval is not retried: %v, %+v", err, res)
+	}
+	got := getCredential(t, c)
+	ready := meta.FindStatusCondition(got.Status.Conditions, sigv1.ConditionReady)
+	if ready == nil || ready.Reason != sigv1.ReasonInvalidConfiguration || !strings.Contains(ready.Message, "at least 1h") {
+		t.Fatalf("want InvalidConfiguration, got %+v", ready)
+	}
+	if !credential.VerifyGenerated(got.Status.Current.Hash, "current") {
+		t.Fatal("no rotation may happen")
+	}
+}
+
 // Missing RBAC is a write failure, not a foreign Secret; the issued
 // password stays valid.
 func TestForbiddenSecretWriteIsNotAConflict(t *testing.T) {
@@ -314,6 +334,9 @@ func TestRotationDecidedOnFreshObjectNotStaleCache(t *testing.T) {
 	// before the first rotation.
 	staleCache = true
 	_, _ = r.Reconcile(context.Background(), req)
+	if len(passwords) != 1 {
+		t.Fatal("rotated a second time from a stale cache: apps that read p1 lose it without a grace period")
+	}
 
 	var sec corev1.Secret
 	if err := base.Get(context.Background(), types.NamespacedName{Namespace: credKey.Namespace, Name: "grafana-smtp"}, &sec); err != nil {
@@ -322,6 +345,27 @@ func TestRotationDecidedOnFreshObjectNotStaleCache(t *testing.T) {
 	mc := getCredential(t, base)
 	if !credential.VerifyGenerated(mc.Status.Current.Hash, string(sec.Data["password"])) {
 		t.Fatalf("status must accept the password in the Secret (%q); rotated twice from a stale cache", sec.Data["password"])
+	}
+}
+
+// Review of #20: reconciles with nothing to rotate read from the cache;
+// only a rotation is decided on an uncached read.
+func TestSteadyStateReconcileSkipsAPIReader(t *testing.T) {
+	mc := issuedCredential("1h")
+	mc.Annotations = nil
+	r, base := credReconciler(t, mc, interceptor.Funcs{})
+	uncached := 0
+	r.APIReader = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			uncached++
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: credKey}); err != nil {
+		t.Fatal(err)
+	}
+	if uncached != 0 {
+		t.Fatalf("a credential with nothing due must not be read uncached, got %d reads", uncached)
 	}
 }
 

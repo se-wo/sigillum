@@ -29,10 +29,10 @@ import (
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 	"github.com/se-wo/sigillum/internal/apiserver/auth"
 	"github.com/se-wo/sigillum/internal/audit"
-	"github.com/se-wo/sigillum/internal/controller"
 	"github.com/se-wo/sigillum/internal/crdcheck"
 	"github.com/se-wo/sigillum/internal/credential"
 	"github.com/se-wo/sigillum/internal/gateway"
+	"github.com/se-wo/sigillum/internal/kubecache"
 	"github.com/se-wo/sigillum/internal/policy/ratelimit"
 	"github.com/se-wo/sigillum/internal/telemetry"
 
@@ -179,7 +179,7 @@ func Run(logger *slog.Logger) error {
 		// The pod informer (pod-IP mode) spans the cluster; drop managed
 		// fields to keep its memory footprint down.
 		co.Cache.DefaultTransform = cache.TransformStripManagedFields()
-		controller.RestrictSecretCache(&co.Cache, controller.SecretNamespaces(o.SecretNamespaces))
+		kubecache.RestrictSecretCache(&co.Cache, kubecache.SecretNamespaces(o.SecretNamespaces))
 	})
 	if err != nil {
 		return err

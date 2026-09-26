@@ -111,7 +111,18 @@ func args(t *testing.T, objs []unstructured.Unstructured, name string) map[strin
 // same code the controller runs at startup, configured from the flags the
 // chart passes it.
 func TestChartGuardMatchesController(t *testing.T) {
-	objs := render(t, "--set", "credentials.excludeNamespaces={kube-*,cert-manager,istio-*}")
+	testChartGuardMatchesController(t, "--set", "credentials.excludeNamespaces={kube-*,cert-manager,istio-*}")
+}
+
+// Review of #20: the controller trims the exclusion list, so the chart must
+// render the same guard for entries with spaces or empty entries.
+func TestChartGuardMatchesControllerWithSpaces(t *testing.T) {
+	testChartGuardMatchesController(t, "--set-json", `credentials.excludeNamespaces=["kube-*"," cert-manager ",""," istio-*"]`)
+}
+
+func testChartGuardMatchesController(t *testing.T, set ...string) {
+	t.Helper()
+	objs := render(t, set...)
 	ctrlArgs := args(t, objs, "t-sigillum-controller")
 	guard := credential.Guard{
 		Name:               ctrlArgs["credential-guard-name"],

@@ -223,6 +223,10 @@ func ParseDuration(s string) (time.Duration, error) {
 // DefaultGracePeriod applies when spec.rotation.gracePeriod is unset.
 const DefaultGracePeriod = 24 * time.Hour
 
+// MinRotationInterval keeps a typo ("90s" for "90d") from rotating the
+// password every few seconds and restarting the app each time.
+const MinRotationInterval = time.Hour
+
 // Exclusions decides which namespaces may hold generated credentials.
 type Exclusions struct {
 	// Patterns are exact namespace names, or prefixes ending in "*".

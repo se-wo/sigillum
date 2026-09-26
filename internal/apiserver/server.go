@@ -31,9 +31,9 @@ import (
 	"github.com/se-wo/sigillum/internal/apiserver/auth"
 	"github.com/se-wo/sigillum/internal/apiserver/problem"
 	"github.com/se-wo/sigillum/internal/audit"
-	"github.com/se-wo/sigillum/internal/controller"
 	"github.com/se-wo/sigillum/internal/crdcheck"
 	"github.com/se-wo/sigillum/internal/gateway"
+	"github.com/se-wo/sigillum/internal/kubecache"
 	"github.com/se-wo/sigillum/internal/policy/ratelimit"
 	"github.com/se-wo/sigillum/internal/telemetry"
 
@@ -124,7 +124,7 @@ func init() {
 		}
 		cl, err := cluster.New(cfg, func(o *cluster.Options) {
 			o.Scheme = scheme
-			controller.RestrictSecretCache(&o.Cache, controller.SecretNamespaces(secretNs))
+			kubecache.RestrictSecretCache(&o.Cache, kubecache.SecretNamespaces(secretNs))
 		})
 		if err != nil {
 			return err

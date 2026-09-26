@@ -2,11 +2,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -72,10 +74,19 @@ func (g *GuardChecker) OK() (bool, string) {
 // Events feeds requeues into the MailCredential controller.
 func (g *GuardChecker) Events() <-chan event.GenericEvent { return g.events }
 
-// Check verifies the guard now and reports whether the verdict changed.
+// Check verifies the guard now and reports whether the verdict changed. A
+// lookup that fails for another reason than a missing, forbidden or
+// changed guard (a timeout, an API server restart) keeps the last verdict,
+// so one failed GET does not flip every credential's condition.
 func (g *GuardChecker) Check(ctx context.Context) bool {
 	err := g.Guard.Verify(ctx, g.Reader)
 	g.mu.Lock()
+	if err != nil && g.checked && !definitive(err) {
+		g.mu.Unlock()
+		g.Log.Info("could not verify the credential Secret guard; keeping the last verdict",
+			"guard", g.Guard.Name, "err", err.Error())
+		return false
+	}
 	changed := !g.checked || (g.err == nil) != (err == nil)
 	g.checked, g.err = true, err
 	g.mu.Unlock()
@@ -100,6 +111,12 @@ func (g *GuardChecker) Check(ctx context.Context) bool {
 	return changed
 }
 
+// definitive reports whether err says the guard is missing or changed, as
+// opposed to a lookup that could not be completed.
+func definitive(err error) bool {
+	return errors.Is(err, credential.ErrGuardChanged) || apierrors.IsNotFound(err) || apierrors.IsForbidden(err)
+}
+
 // retryInterval re-checks a missing guard sooner than Interval: Helm
 // creates the policy after the Deployments (an unknown kind to Helm), so
 // the controller may start before it exists.
@@ -109,7 +126,7 @@ const retryInterval = 30 * time.Second
 func (g *GuardChecker) Start(ctx context.Context) error {
 	for {
 		wait := g.Interval
-		if ok, _ := g.OK(); !ok && retryInterval < wait {
+		if ok, _ := g.OK(); (!ok && retryInterval < wait) || wait <= 0 {
 			wait = retryInterval
 		}
 		select {

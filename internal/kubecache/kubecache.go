@@ -1,4 +1,5 @@
-package controller
+// Package kubecache holds informer cache settings shared by all modes.
+package kubecache
 
 import (
 	"os"

@@ -7,10 +7,14 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	admv1 "k8s.io/api/admissionregistration/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 	"github.com/se-wo/sigillum/internal/credential"
@@ -58,5 +62,51 @@ func TestGuardRequeuerDeliversEveryGeneratedCredential(t *testing.T) {
 	}
 	if ok, _ := g.OK(); ok {
 		t.Fatal("a missing guard must not verify")
+	}
+}
+
+// Review of #20: a failed lookup (timeout, API server restart) keeps the
+// last verdict; only a missing, forbidden or changed guard flips it.
+func TestGuardCheckKeepsVerdictOnTransientErrors(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := admv1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	guard := credential.Guard{Name: "guard", ControllerUsername: "system:serviceaccount:sigillum-system:controller",
+		Exclusions: credential.ParseExclusions("kube-*", "sigillum-system")}
+	base := fake.NewClientBuilder().WithScheme(s).WithObjects(guard.Policy(), guard.Binding()).Build()
+	var failWith error
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if failWith != nil {
+				return failWith
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	g := NewGuardChecker(guard, c, c, time.Hour, logr.Discard())
+	ctx := context.Background()
+	if !g.Check(ctx) {
+		t.Fatal("first check sets the verdict")
+	}
+	if ok, msg := g.OK(); !ok {
+		t.Fatalf("guard must verify: %s", msg)
+	}
+
+	failWith = apierrors.NewTimeoutError("etcd leader change", 1)
+	if g.Check(ctx) {
+		t.Fatal("a timeout must not change the verdict")
+	}
+	if ok, _ := g.OK(); !ok {
+		t.Fatal("a timeout must keep the guard verified")
+	}
+
+	failWith = apierrors.NewNotFound(schema.GroupResource{Group: "admissionregistration.k8s.io",
+		Resource: "validatingadmissionpolicies"}, guard.Name)
+	if !g.Check(ctx) {
+		t.Fatal("a deleted guard changes the verdict")
+	}
+	if ok, _ := g.OK(); ok {
+		t.Fatal("a deleted guard must not verify")
 	}
 }

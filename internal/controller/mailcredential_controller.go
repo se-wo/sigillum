@@ -74,21 +74,31 @@ type MailCredentialReconciler struct {
 // +kubebuilder:rbac:groups=sigillum.dev,resources=mailcredentials,verbs=get;list;watch
 // +kubebuilder:rbac:groups=sigillum.dev,resources=mailcredentials/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=create;patch
+// Secret create/patch is deliberately not a marker: controller-gen would
+// merge it into the one generated role next to the backend reconciler's
+// Secret read. The chart grants it in a separate ClusterRole, only together
+// with the credential Secret guard (templates/rbac-controller.yaml).
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingadmissionpolicies;validatingadmissionpolicybindings,verbs=get
 
 func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	// Read from the API server, not the informer cache. A key re-queued
-	// while the previous reconcile ran can start before the cache holds the
-	// status that reconcile wrote; deciding on that stale copy would rotate
-	// again, putting a second password into the Secret while status keeps
-	// only the first, and the controller cannot read Secrets to notice.
+	now := r.now()
 	var mc sigv1.MailCredential
-	if err := r.apiReader().Get(ctx, req.NamespacedName, &mc); err != nil {
+	if err := r.Get(ctx, req.NamespacedName, &mc); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	now := r.now()
+	// A key re-queued while the previous reconcile ran can start before the
+	// cache holds the status that reconcile wrote. Rotating on that stale
+	// copy would put a second password into the Secret while status keeps
+	// only the first, and the controller cannot read Secrets to notice. So
+	// when the cached copy says a password is due, decide on a fresh read
+	// from the API server. Other reconciles write status with the cached
+	// resourceVersion; a stale one conflicts and is retried.
+	if rotationLooksDue(&mc, now) {
+		if err := r.apiReader().Get(ctx, req.NamespacedName, &mc); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+	}
 	st := &mc.Status
 	accepted := st.Current // keeps CreatedAt of an unchanged bring-your-own hash
 	st.Username = credential.Username(mc.Name, mc.Namespace)
@@ -283,6 +293,16 @@ func (r *MailCredentialReconciler) updateStatus(ctx context.Context, mc *sigv1.M
 // API server restart.
 var statusRetryBackoff = wait.Backoff{Steps: 6, Duration: 100 * time.Millisecond, Factor: 3, Jitter: 0.1}
 
+// rotationLooksDue reports whether mc, as cached, may need a password
+// written.
+func rotationLooksDue(mc *sigv1.MailCredential, now time.Time) bool {
+	if !mc.Generated() {
+		return false
+	}
+	interval, _, _ := rotationSettings(mc.Spec.Rotation)
+	return rotationDue(mc, now, interval) != ""
+}
+
 // rotationDue returns why the generated password must be (re)written, or
 // "" if it need not.
 func rotationDue(mc *sigv1.MailCredential, now time.Time, interval time.Duration) string {
@@ -309,6 +329,10 @@ func rotationSettings(rot *sigv1.CredentialRotation) (interval, grace time.Durat
 	}
 	if interval, err = credential.ParseDuration(rot.Interval); err != nil {
 		return 0, 0, fmt.Errorf("spec.rotation.interval: %w", err)
+	}
+	// Also checked by the webhook, which may be disabled.
+	if interval != 0 && interval < credential.MinRotationInterval {
+		return 0, 0, fmt.Errorf("spec.rotation.interval: must be at least 1h")
 	}
 	if rot.GracePeriod != "" {
 		if grace, err = credential.ParseDuration(rot.GracePeriod); err != nil {

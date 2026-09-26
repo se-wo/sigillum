@@ -24,6 +24,7 @@ import (
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 	"github.com/se-wo/sigillum/internal/crdcheck"
 	"github.com/se-wo/sigillum/internal/credential"
+	"github.com/se-wo/sigillum/internal/kubecache"
 	whv1 "github.com/se-wo/sigillum/internal/webhook"
 
 	// pull in the SMTP driver so the registry has it at startup
@@ -97,6 +98,10 @@ func init() {
 			return err
 		}
 
+		if credentialGuardCheck <= 0 {
+			return fmt.Errorf("--credential-guard-check-interval must be positive, got %s", credentialGuardCheck)
+		}
+
 		zlog := zap.New(zap.UseDevMode(false))
 		if clusterName != "" {
 			zlog = zlog.WithValues("cluster", clusterName)
@@ -115,7 +120,7 @@ func init() {
 			LeaderElectionID:        leaderElectionID,
 			LeaderElectionNamespace: releaseNs,
 		}
-		RestrictSecretCache(&opts.Cache, SecretNamespaces(secretNamespaces))
+		kubecache.RestrictSecretCache(&opts.Cache, kubecache.SecretNamespaces(secretNamespaces))
 		if !disableWebhook {
 			opts.WebhookServer = webhook.NewServer(webhook.Options{
 				Port:    webhookPort,

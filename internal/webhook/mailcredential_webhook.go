@@ -3,7 +3,6 @@ package webhook
 import (
 	"context"
 	"fmt"
-	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -46,10 +45,6 @@ func (v *MailCredentialValidator) ValidateUpdate(_ context.Context, _, newObj *s
 func (v *MailCredentialValidator) ValidateDelete(_ context.Context, _ *sigv1.MailCredential) (admission.Warnings, error) {
 	return nil, nil
 }
-
-// minRotationInterval keeps a typo ("90s" for "90d") from rotating the
-// password every few seconds and restarting the app each time.
-const minRotationInterval = time.Hour
 
 func (v *MailCredentialValidator) validate(mc *sigv1.MailCredential) (admission.Warnings, error) {
 	gk := schema.GroupKind{Group: sigv1.GroupVersion.Group, Kind: "MailCredential"}
@@ -100,7 +95,7 @@ func (v *MailCredentialValidator) validate(mc *sigv1.MailCredential) (admission.
 			rPath := spec.Child("rotation")
 			if d, err := credential.ParseDuration(rot.Interval); err != nil {
 				errs = append(errs, field.Invalid(rPath.Child("interval"), rot.Interval, err.Error()))
-			} else if d != 0 && d < minRotationInterval {
+			} else if d != 0 && d < credential.MinRotationInterval {
 				errs = append(errs, field.Invalid(rPath.Child("interval"), rot.Interval, "must be at least 1h"))
 			}
 			if _, err := credential.ParseDuration(rot.GracePeriod); err != nil {

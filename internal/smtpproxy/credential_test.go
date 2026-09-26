@@ -300,6 +300,40 @@ func TestCredential_RevokedSessionDoesNotFallBackToPodIP(t *testing.T) {
 	}
 }
 
+// Review of #20: a transaction started before the revocation must not be
+// relayed; the credential is checked again before the message goes out.
+func TestCredential_RevokedBeforeDataIsNotRelayed(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	mc := readyCredential(credPassword)
+	cl := credentialClient(t, mc)
+	addr := startProxy(t, &Backend{Sender: sender, AllowInsecureCredentialAuth: true,
+		Credentials: credential.NewVerifier(cl, 1)})
+	c := dial(t, addr)
+	if err := c.Auth(sasl.NewPlainClient("", credUser, credPassword)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Mail("grafana@monitoring.example", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Rcpt("ops@example.com", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Delete(context.Background(), mc); err != nil {
+		t.Fatal(err)
+	}
+	w, err := c.Data()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(w, "From: grafana@monitoring.example\r\nTo: ops@example.com\r\nSubject: x\r\n\r\nbody\r\n")
+	if err := w.Close(); smtpCode(err) != 530 {
+		t.Fatalf("want 530 at the end of DATA, got %v", err)
+	}
+	if len(sender.reqs) != 0 {
+		t.Fatalf("a revoked credential's message must not be relayed: %+v", sender.reqs)
+	}
+}
+
 // Review of #20: a failed lookup is a temporary failure, not a revocation.
 func TestCredential_LookupErrorIsTemporary(t *testing.T) {
 	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}

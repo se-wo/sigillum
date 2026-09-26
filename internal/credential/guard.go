@@ -3,6 +3,7 @@ package credential
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -127,6 +128,10 @@ func (g Guard) Binding() *admv1.ValidatingAdmissionPolicyBinding {
 	}
 }
 
+// ErrGuardChanged marks a guard that exists but no longer enforces what
+// Policy and Binding describe.
+var ErrGuardChanged = errors.New("guard changed")
+
 // Verify checks that the guard policy and binding exist in the cluster and
 // enforce what Policy and Binding describe. Messages, audit annotations and
 // server-side defaults are ignored; anything that could narrow or weaken
@@ -141,10 +146,10 @@ func (g Guard) Verify(ctx context.Context, c client.Reader) error {
 		return fmt.Errorf("ValidatingAdmissionPolicyBinding %s: %w", g.Name, err)
 	}
 	if err := g.verifyPolicy(&vap.Spec); err != nil {
-		return fmt.Errorf("ValidatingAdmissionPolicy %s: %w", g.Name, err)
+		return fmt.Errorf("%w: ValidatingAdmissionPolicy %s: %w", ErrGuardChanged, g.Name, err)
 	}
 	if err := g.verifyBinding(&vapb.Spec); err != nil {
-		return fmt.Errorf("ValidatingAdmissionPolicyBinding %s: %w", g.Name, err)
+		return fmt.Errorf("%w: ValidatingAdmissionPolicyBinding %s: %w", ErrGuardChanged, g.Name, err)
 	}
 	return nil
 }
