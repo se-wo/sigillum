@@ -7,8 +7,8 @@ description: |
   + validating admission webhook) and, optionally, the SMTP submission proxy
   as Deployments sharing a single image.
 type: application
-version: 0.2.0
-appVersion: "0.2.0"
+version: 0.2.1
+appVersion: "0.2.1"
 icon: ""
 home: https://github.com/se-wo/sigillum
 sources:

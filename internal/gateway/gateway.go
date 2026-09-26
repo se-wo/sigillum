@@ -87,7 +87,11 @@ type Request struct {
 	Raw []byte
 	// EnvelopeFrom is the SMTP MAIL FROM address (Raw only).
 	EnvelopeFrom string
-	SizeBytes    int64
+	// Sender and ReplyTo are the addresses of the Sender and Reply-To
+	// headers, checked against the policy like From and the recipients.
+	Sender    string
+	ReplyTo   []string
+	SizeBytes int64
 }
 
 // Status classifies a Result so transports can pick a status code.
@@ -148,7 +152,9 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 	view := policy.MessageView{
 		From:         req.Message.From.Address,
 		EnvelopeFrom: req.EnvelopeFrom,
+		Sender:       req.Sender,
 		Recipients:   Recipients(req.Message),
+		ReplyTo:      req.ReplyTo,
 		SizeBytes:    req.SizeBytes,
 	}
 	ev := audit.Event{

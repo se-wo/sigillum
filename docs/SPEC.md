@@ -148,6 +148,8 @@ User Stories sind nach Epics gruppiert. Jede Story folgt dem Schema **Als \<Roll
 - `allowedSenders` als Liste von Exact-Match und Glob-Patterns (z. B. `*@noreply.example.com`).
 - Bei Verletzung: HTTP 403 mit eindeutigem Error-Code `sender_not_allowed`.
 - Policy-Match per `subjectSelector` (siehe US-3.x).
+- Geprüft werden Header-`From`, SMTP-Envelope-Sender und, falls vorhanden, der `Sender`-Header.
+- Anzeigenamen, Kommentare und Encoded-Words in `From`, `Sender` und `Reply-To` dürfen kein `@` enthalten (sonst `invalid_payload`). Sonst ließe sich eine beliebige Adresse als Absender *darstellen*, obwohl nur die addr-spec geprüft wird.
 
 #### US-2.4 — Empfänger-Allow/Denylist
 **Als** Security Officer **möchte ich** Empfänger-Domains einschränken können, **damit** Entwicklungs-Workloads keine Mails an externe Adressen senden.
@@ -155,6 +157,9 @@ User Stories sind nach Epics gruppiert. Jede Story folgt dem Schema **Als \<Roll
 *Akzeptanzkriterien:*
 - `allowedRecipientDomains` (Allowlist) und `blockedRecipientDomains` (Denylist) optional konfigurierbar.
 - Denylist hat Vorrang vor Allowlist.
+- Die Restriktion wirkt **domänenweit**: `allowedDomains: [example.com]` erlaubt jede Mailbox `@example.com`. Einzeladressen lassen sich (noch) nicht erlauben, eine adressgenaue Allowlist ist für v0.3.0 geplant.
+- Auch `Reply-To`-Adressen müssen die Empfänger-Restriktionen erfüllen, denn Antworten gehen dorthin.
+- Local-Parts mit Routing-Semantik (`%`, `!`, gequotete Local-Parts wie `"user@other"@example.com`) werden abgelehnt (`invalid_payload`). Die Domain-Prüfung betrachtet nur den Teil nach dem letzten `@`. Ein Upstream-MTA mit Percent-Hack oder Bang-Path-Auflösung könnte solche Adressen sonst an eine fremde Domain zustellen.
 
 #### US-2.5 — Multi-Backend-Routing
 **Als** Platform Engineer **möchte ich** pro Policy ein anderes Backend wählen können, **damit** z. B. Test-Workloads in einen MailHog senden und Prod-Workloads in den echten Corporate-SMTP oder (künftig) in Microsoft Graph.
@@ -800,8 +805,16 @@ Liefert den Kern-Use-Case „Developer sendet per REST, Policy wird durchgesetzt
 - Empfänger-Restriktionen
 - OpenTelemetry-Tracing
 
+### 8.2.1 v0.2.1 (Security-Patch)
+
+- Adress-Härtung: Local-Parts mit `%`, `!`, `@` oder Quotes werden abgelehnt; Anzeigenamen dürfen kein `@` enthalten
+- `Sender` wird gegen `allowedSenders`, `Reply-To` gegen die Empfänger-Restriktionen geprüft; `Resent-*` und doppelte Header werden abgelehnt
+- REST-Größenprüfung zählt Subject und Custom-Header mit; Header-Werte max. 998 Zeichen
+- Helm: `smtp.allowInsecureAuth` folgt per Default `smtp.tls.secretName`; Warnungen bei Klartext-Betrieb und `rateLimit.failOpen`
+
 ### 8.3 v0.3.0
 
+- Adressgenaue Empfänger-Allowlist (`recipientRestrictions.allowedRecipients`)
 - Istio-mTLS-Auth (SPIFFE)
 - `MailQuota` (Namespace-weit)
 - Preflight-Endpoint

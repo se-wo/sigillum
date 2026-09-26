@@ -78,7 +78,7 @@ spec:
   backendRef: { name: corporate-smtp, kind: ClusterMailBackend }
   senderRestrictions:
     allowedSenders: ["noreply@example.com", "*@billing.example.com"]
-  recipientRestrictions:
+  recipientRestrictions:         # domain-wide: every mailbox in a listed domain
     allowedDomains: ["example.com", "customer.example.com"]
     blockedDomains: []            # denylist wins over allowlist
   messageLimits:

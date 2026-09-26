@@ -419,3 +419,71 @@ func wrap76(s string) string {
 	b.WriteString(s)
 	return b.String()
 }
+
+func TestRoutingRecipientsAreRefused(t *testing.T) {
+	for _, rcpt := range []string{
+		"attacker%evil.example@x.example",
+		"evil.example!attacker@x.example",
+		`"attacker@evil.example"@x.example`,
+	} {
+		sender := &stubSender{}
+		c := authed(t, startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{}}))
+		if err := c.Mail("app@billing.example", nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Rcpt(rcpt, nil); smtpCode(err) != 553 {
+			t.Errorf("RCPT TO:<%s>: want 553, got %v", rcpt, err)
+		}
+		if len(sender.rejects) != 1 || sender.rejects[0] != "invalid_payload" {
+			t.Errorf("RCPT TO:<%s>: unexpected rejects %v", rcpt, sender.rejects)
+		}
+	}
+}
+
+func TestRoutingEnvelopeSenderIsRefused(t *testing.T) {
+	sender := &stubSender{}
+	c := authed(t, startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{}}))
+	if err := c.Mail("app%evil.example@billing.example", nil); smtpCode(err) != 553 {
+		t.Fatalf("want 553, got %v", err)
+	}
+}
+
+func TestSpoofedHeadersAreRejected(t *testing.T) {
+	const tail = "To: a@x.example\r\nSubject: x\r\n\r\nbody\r\n"
+	for name, headers := range map[string]string{
+		"comment in From":        "From: app@billing.example(attacker@evil.example)\r\n",
+		"display name in From":   "From: \"attacker@evil.example\" <app@billing.example>\r\n",
+		"encoded-word in From":   "From: =?utf-8?B?YXR0YWNrZXJAZXZpbC5leGFtcGxl?= <app@billing.example>\r\n",
+		"routing From":           "From: app%evil.example@billing.example\r\n",
+		"duplicate Reply-To":     "From: app@billing.example\r\nReply-To: a@x.example\r\nReply-To: b@evil.example\r\n",
+		"duplicate Sender":       "From: app@billing.example\r\nSender: app@billing.example\r\nSender: b@evil.example\r\n",
+		"two Sender addresses":   "From: app@billing.example\r\nSender: app@billing.example, b@evil.example\r\n",
+		"display name in Sender": "From: app@billing.example\r\nSender: \"x@evil.example\" <app@billing.example>\r\n",
+		"Resent-From":            "From: app@billing.example\r\nResent-From: attacker@evil.example\r\n",
+	} {
+		sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+		c := authed(t, startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{}}))
+		err := send(c, "app@billing.example", []string{"a@x.example"}, headers+tail)
+		if smtpCode(err) != 550 || len(sender.reqs) != 0 {
+			t.Errorf("%s: want 550 before policy evaluation, got %v (reqs=%d)", name, err, len(sender.reqs))
+		}
+		if len(sender.rejects) != 1 || sender.rejects[0] != "invalid_payload" {
+			t.Errorf("%s: want one audited reject, got %v", name, sender.rejects)
+		}
+	}
+}
+
+func TestSenderAndReplyToReachPolicy(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	c := authed(t, startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{}}))
+	msg := "From: App <app@billing.example>\r\nSender: relay@billing.example\r\n" +
+		"Reply-To: support@billing.example, Help <help@billing.example>\r\n" +
+		"To: a@x.example\r\nSubject: x\r\n\r\nbody\r\n"
+	if err := send(c, "app@billing.example", []string{"a@x.example"}, msg); err != nil {
+		t.Fatal(err)
+	}
+	req := sender.reqs[0]
+	if req.Sender != "relay@billing.example" || len(req.ReplyTo) != 2 || req.ReplyTo[1] != "help@billing.example" {
+		t.Fatalf("got Sender=%q ReplyTo=%v", req.Sender, req.ReplyTo)
+	}
+}

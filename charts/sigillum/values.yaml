@@ -75,9 +75,10 @@ smtp:
   #              address (no SNAT/masquerading between caller and proxy).
   authModes: [oauthbearer]
   # Allow AUTH on connections without STARTTLS. Tokens then travel in clear
-  # text inside the cluster: keep true only behind a mesh with mTLS, or set
-  # tls.secretName and false.
-  allowInsecureAuth: true
+  # text inside the cluster. Unset (default), it follows tls.secretName:
+  # false once STARTTLS is configured, true without it (for meshes with
+  # mTLS). Set true or false to override.
+  allowInsecureAuth: null
   tls:
     secretName: ""    # enables STARTTLS with tls.crt / tls.key
   maxMessageBytes: 33554432

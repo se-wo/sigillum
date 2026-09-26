@@ -31,7 +31,7 @@ spec:
             - --metrics-listen=:{{ .Values.smtp.metricsPort }}
             - --domain={{ .Values.smtp.domain }}
             - --auth-modes={{ join "," .Values.smtp.authModes }}
-            - --allow-insecure-auth={{ .Values.smtp.allowInsecureAuth }}
+            - --allow-insecure-auth={{ include "sigillum.smtp.allowInsecureAuth" . }}
             - --max-message-bytes={{ int64 .Values.smtp.maxMessageBytes }}
             - --max-recipients={{ .Values.smtp.maxRecipients }}
             - --token-audience={{ .Values.api.tokenAudience }}

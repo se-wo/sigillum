@@ -56,8 +56,15 @@ type MessageView struct {
 	// header From. Both must satisfy senderRestrictions, otherwise a client
 	// could pass the check with one and spoof the other.
 	EnvelopeFrom string
-	Recipients   []string // To + Cc + Bcc
-	SizeBytes    int64
+	// Sender is the Sender header address, if any. It names the mailbox
+	// that submitted the message and is shown by mail clients ("on behalf
+	// of"), so it must satisfy senderRestrictions like From.
+	Sender     string
+	Recipients []string // To + Cc + Bcc
+	// ReplyTo holds the Reply-To addresses. Replies go there, so they must
+	// satisfy recipientRestrictions like the recipients themselves.
+	ReplyTo   []string
+	SizeBytes int64
 }
 
 // DenyReason is the slug used both for metrics labels and for problem types.
@@ -167,6 +174,9 @@ func Evaluate(p *sigv1.MailPolicy, msg MessageView) Decision {
 		if msg.EnvelopeFrom != "" {
 			senders = append(senders, msg.EnvelopeFrom)
 		}
+		if msg.Sender != "" {
+			senders = append(senders, msg.Sender)
+		}
 		for _, from := range senders {
 			if !senderAllowed(from, p.Spec.SenderRestrictions.AllowedSenders) {
 				return Decision{Policy: p, DenyReason: DenySenderNotAllowed,
@@ -174,12 +184,18 @@ func Evaluate(p *sigv1.MailPolicy, msg MessageView) Decision {
 			}
 		}
 	}
-	if p.Spec.RecipientRestrictions != nil {
-		for _, r := range msg.Recipients {
-			if !recipientAllowed(r, p.Spec.RecipientRestrictions) {
-				return Decision{Policy: p, DenyReason: DenyRecipientBlocked,
-					DenyDetail: "recipient '" + r + "' not allowed by policy"}
-			}
+	// Transports reject routing local parts at parse time already; checking
+	// again here keeps the policy safe should a new transport forget to.
+	for _, r := range msg.Recipients {
+		if ValidateMailbox(r) != nil || !recipientAllowed(r, p.Spec.RecipientRestrictions) {
+			return Decision{Policy: p, DenyReason: DenyRecipientBlocked,
+				DenyDetail: "recipient '" + r + "' not allowed by policy"}
+		}
+	}
+	for _, r := range msg.ReplyTo {
+		if ValidateMailbox(r) != nil || !recipientAllowed(r, p.Spec.RecipientRestrictions) {
+			return Decision{Policy: p, DenyReason: DenyRecipientBlocked,
+				DenyDetail: "reply-to '" + r + "' not allowed by policy"}
 		}
 	}
 	return Decision{Allowed: true, Policy: p}
@@ -206,7 +222,11 @@ func senderAllowed(from string, allowed []string) bool {
 	return false
 }
 
+// recipientAllowed applies recipientRestrictions; nil allows every domain.
 func recipientAllowed(addr string, r *sigv1.RecipientRestrictions) bool {
+	if r == nil {
+		return true
+	}
 	domain := domainOf(addr)
 	for _, d := range r.BlockedDomains {
 		if strings.EqualFold(d, domain) {

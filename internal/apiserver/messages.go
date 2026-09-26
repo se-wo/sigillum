@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/mail"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
@@ -152,6 +153,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	ev.From = req.From // raw until parsed, so a malformed sender is still recorded
 	from, err := parseAddress(req.From)
+	if err == nil {
+		err = policy.ValidateAddressHeader(req.From, 1)
+	}
 	if err != nil {
 		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 			"Invalid 'from' address", err.Error()))
@@ -199,6 +203,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			"Invalid header", err.Error()))
 		return
 	}
+	sender, replyTo, err := addressHeaders(req.Headers)
+	if err != nil {
+		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+			"Invalid header", err.Error()))
+		return
+	}
 
 	res := s.gw.Send(ctx, gateway.Request{
 		Identity: gateway.Identity{
@@ -209,6 +219,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		Transport: gateway.TransportREST,
 		MessageID: msgID,
 		Message:   msg,
+		Sender:    sender,
+		ReplyTo:   replyTo,
 		SizeBytes: estimateSize(req, atts),
 	})
 	writeResult(w, msgID, res)
@@ -288,10 +300,15 @@ func writePolicyDeny(w http.ResponseWriter, msgID string, res gateway.Result) {
 	problem.Write(w, p)
 }
 
+// parseAddress parses one address and rejects local parts with routing
+// semantics (see policy.ValidateMailbox).
 func parseAddress(s string) (mail.Address, error) {
 	a, err := mail.ParseAddress(strings.TrimSpace(s))
 	if err != nil {
 		return mail.Address{}, fmt.Errorf("%q: %w", s, err)
+	}
+	if err := policy.ValidateMailbox(a.Address); err != nil {
+		return mail.Address{}, err
 	}
 	return *a, nil
 }
@@ -338,9 +355,15 @@ func decodeAttachments(in []requestAttachment) ([]driver.Attachment, error) {
 }
 
 // estimateSize returns the post-decode payload weight used for size policy
-// checks — body text/html bytes plus decoded attachment bytes.
+// checks: subject, custom headers, body text/html and decoded attachments.
+// Everything the caller controls and the driver relays is counted, so no
+// field can carry data past maxSizeBytes.
 func estimateSize(req requestBody, atts []driver.Attachment) int64 {
 	var n int64
+	n += int64(len(req.Subject))
+	for k, v := range req.Headers {
+		n += int64(len(k) + len(v))
+	}
 	n += int64(len(req.Body.Text))
 	n += int64(len(req.Body.HTML))
 	for _, a := range atts {
@@ -368,9 +391,18 @@ type subject struct {
 	ServiceAccount string
 }
 
+// maxHeaderValue is the RFC 5322 line limit (998 characters). The driver
+// writes custom header values unfolded, so a longer one could not be
+// relayed intact anyway.
+const maxHeaderValue = 998
+
 // validateRequestHeaders rejects header keys or values containing CR, LF, or
-// NUL, which would allow SMTP header injection through the driver.
+// NUL, which would allow SMTP header injection through the driver, values
+// longer than one header line, the same field given twice (keys match case-
+// insensitively, and which of them the driver keeps would be arbitrary), and
+// Resent-* fields, which have no place in a submission.
 func validateRequestHeaders(h map[string]string) error {
+	seen := make(map[string]bool, len(h))
 	for k, v := range h {
 		if strings.ContainsAny(k, "\r\n\x00") {
 			return fmt.Errorf("header key contains CR, LF, or NUL")
@@ -378,8 +410,52 @@ func validateRequestHeaders(h map[string]string) error {
 		if strings.ContainsAny(v, "\r\n\x00") {
 			return fmt.Errorf("header %q value contains CR, LF, or NUL", k)
 		}
+		if len(v) > maxHeaderValue {
+			return fmt.Errorf("header %q value exceeds %d characters", k, maxHeaderValue)
+		}
+		ck := textproto.CanonicalMIMEHeaderKey(k)
+		if seen[ck] {
+			return fmt.Errorf("header %q given more than once", ck)
+		}
+		seen[ck] = true
+		if strings.HasPrefix(ck, "Resent-") {
+			return fmt.Errorf("header %q is not allowed", ck)
+		}
 	}
 	return nil
+}
+
+// addressHeaders parses the Sender and Reply-To custom headers so the policy
+// can check them: mail clients display Sender and send replies to Reply-To,
+// so neither may name an address the policy would not accept. It expects
+// headers already checked by validateRequestHeaders.
+func addressHeaders(h map[string]string) (sender string, replyTo []string, err error) {
+	for k, v := range h {
+		switch textproto.CanonicalMIMEHeaderKey(k) {
+		case "Sender":
+			a, err := parseAddress(v)
+			if err == nil {
+				err = policy.ValidateAddressHeader(v, 1)
+			}
+			if err != nil {
+				return "", nil, fmt.Errorf("header \"Sender\": %w", err)
+			}
+			sender = a.Address
+		case "Reply-To":
+			list, err := mail.ParseAddressList(v)
+			if err == nil {
+				err = policy.ValidateAddressHeader(v, len(list))
+			}
+			for i := 0; err == nil && i < len(list); i++ {
+				err = policy.ValidateMailbox(list[i].Address)
+				replyTo = append(replyTo, list[i].Address)
+			}
+			if err != nil {
+				return "", nil, fmt.Errorf("header \"Reply-To\": %w", err)
+			}
+		}
+	}
+	return sender, replyTo, nil
 }
 
 // validateAttachmentMeta rejects attachment metadata fields (filename,
