@@ -1108,8 +1108,8 @@ These targets are not yet verified by a benchmark in CI.
 | Header spoofing | `@` banned in display names; `Sender` / `Reply-To` checked; `Resent-*` and duplicate headers rejected; managed headers cannot be overridden (§4.4.1, §4.6) |
 | Address routing | `%`, `!` and quoted local parts rejected (US-2.4) |
 | Pod Security Standard | Compatible with `restricted` |
-| SBOM / signing | SPDX SBOM and cosign image signatures in the release pipeline **[planned v0.4.0]** |
-| Dependency scanning | Trivy or Grype in CI **[planned v0.4.0]** |
+| SBOM / signing | Releases after v0.2.1: image and chart signed keyless with cosign, SLSA build provenance via GitHub artifact attestations, SPDX SBOM and BuildKit provenance per platform; base images pinned by digest, Actions by commit SHA (README, "Supply chain") |
+| Dependency scanning | CI: `govulncheck` (reachable vulnerabilities), dependency review on PRs (moderate and above), CodeQL for Go and workflows; Dependabot weekly updates with cooldown, security updates immediately |
 
 ### 5.4 Scalability
 
@@ -1156,7 +1156,7 @@ These targets are not yet verified by a benchmark in CI.
 
 | Area | Decision | Rationale |
 |---|---|---|
-| Language | Go (module `go 1.22`, toolchain 1.24) | Ecosystem, kubebuilder, performance |
+| Language | Go (module `go 1.25`, toolchain 1.26) | Ecosystem, kubebuilder, performance |
 | Framework | controller-runtime / kubebuilder markers | De-facto standard for operators |
 | REST router | chi | Small, low-dependency |
 | SMTP | `emersion/go-smtp` + `emersion/go-sasl` | RFC-compliant, including OAUTHBEARER (RFC 7628) |
@@ -1166,8 +1166,8 @@ These targets are not yet verified by a benchmark in CI.
 | Logging | `log/slog` (stdlib), JSON | Structured, no dependency |
 | Metrics | `prometheus/client_golang` | Standard |
 | Tracing | OpenTelemetry Go, OTLP/HTTP | Vendor-neutral |
-| Container base | `distroless/static`, non-root | Minimal, no shell |
-| Build / release | Multi-arch `docker buildx` and Helm packaging in GitHub Actions (no third-party actions); GoReleaser optional later | Reproducible, few supply-chain dependencies |
+| Container base | `distroless/static:nonroot`, pinned by digest | Minimal, no shell |
+| Build / release | Multi-arch `docker buildx` and Helm packaging in GitHub Actions (no third-party actions); cosign (checksum-pinned binary) and `actions/attest` for signing and provenance | Reproducible, verifiable, few supply-chain dependencies |
 | Chart distribution | OCI registry | GitOps-compatible |
 | Backend drivers | In-process Go interface; gRPC plugins as an option after 1.0 | Simple first; Crossplane-style evolution path |
 
@@ -1244,7 +1244,6 @@ Goal: one-command install on a small cluster, and developers can answer "why was
 | OpenAPI 3.1 description | Feature | US-7.3 |
 | Grafana dashboard and `PrometheusRule` alerts | Feature | US-4.6 |
 | Runbooks: upstream outage, Redis outage, CRD upgrade | Docs | §5.7 |
-| SBOM, cosign signatures, dependency scanning in CI | Release | §5.3 |
 
 ### 8.4 v0.5.0 — Hosted mailboxes (Microsoft 365, Google Workspace)
 
@@ -1300,7 +1299,7 @@ Every candidate that has been discussed, with its decision and the reason.
 | SMTPS on port 465 | v0.4.0 | Small; some apps offer nothing else. |
 | OpenAPI description | v0.4.0 | Small; enables generated clients. |
 | Dashboard and alert rules | v0.4.0 | Small teams rarely write their own. |
-| SBOM, signing, dependency scanning | v0.4.0 | Cheap in CI; lets security-minded users verify releases. |
+| SBOM, signing, dependency scanning | Done (main, first release after v0.2.1) | Cheap in CI; lets security-minded users verify releases. |
 | XOAUTH2 for the SMTP driver | v0.5.0 | Microsoft 365 is common among small and medium organizations, and password-based SMTP AUTH is being retired. Workaround (relay connector) needs a static egress IP. |
 | Daily limit per policy | v0.5.0 | Protects the provider's daily quota of a shared sending account. |
 | Idempotency keys | v0.6.0 | Duplicate mail on retries is real, but rare enough to follow the basics. |
