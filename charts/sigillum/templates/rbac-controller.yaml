@@ -7,14 +7,24 @@ metadata:
 rules:
   # Reconcile sigillum CRs and update their status subresource.
   - apiGroups: [sigillum.dev]
-    resources: [mailbackends, clustermailbackends, mailpolicies]
+    resources: [mailbackends, clustermailbackends, mailpolicies, mailcredentials]
     verbs: [get, list, watch]
   - apiGroups: [sigillum.dev]
     resources:
       - mailbackends/status
       - clustermailbackends/status
       - mailpolicies/status
+      - mailcredentials/status
     verbs: [get, update, patch]
+  # MailCredential: check that the bound ServiceAccount exists.
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [get, list, watch]
+  # Verify the credential Secret guard (by name only).
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingadmissionpolicies, validatingadmissionpolicybindings]
+    resourceNames: [{{ include "sigillum.credentials.guardName" . }}]
+    verbs: [get]
   - apiGroups: [sigillum.dev]
     resources:
       - mailbackends/finalizers
@@ -42,6 +52,37 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "sigillum.controller.fullname" . }}
     namespace: {{ .Release.Namespace }}
+{{- if include "sigillum.credentials.guarded" . }}
+---
+# Generated MailCredentials (US-3.7): write credential Secrets in any
+# namespace, without get/list/watch. RBAC cannot narrow this by label, so it
+# is only rendered together with the credential Secret guard
+# (credential-guard.yaml), which admits nothing but labelled Secrets owned by
+# a MailCredential outside the excluded namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "sigillum.controller.fullname" . }}-credential-writer
+  labels: {{- include "sigillum.controller.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "sigillum.controller.fullname" . }}-credential-writer
+  labels: {{- include "sigillum.controller.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "sigillum.controller.fullname" . }}-credential-writer
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sigillum.controller.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 ---
 # Secret access is namespace-scoped. Add namespaces containing ClusterMailBackend
 # credentials to rbac.allowedSecretNamespaces.

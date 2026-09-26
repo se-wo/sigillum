@@ -14,6 +14,11 @@ commonAnnotations: {}
 
 logLevel: info
 
+# Name of this cluster (US-4.5). When set, every audit record and log line
+# carries a "cluster" field and the ServiceMonitor adds a "cluster" target
+# label, so one log backend and one Prometheus can serve several clusters.
+clusterName: ""
+
 ## CRDs ##
 # CRDs ship in charts/sigillum/crds/ and Helm installs them automatically.
 # Toggle deletion behaviour here (Helm removes nothing on uninstall by default,
@@ -30,7 +35,13 @@ api:
   tokenAudience: sigillum
   tokenCacheSize: 4096
   tokenCacheTTL: 5m
+  # On SIGTERM the pod first fails readiness for shutdownDelay while still
+  # serving (so it leaves the Service endpoints before its listener closes),
+  # then lets in-flight requests finish within shutdownTimeout. Keep
+  # shutdownDelay + shutdownTimeout below terminationGracePeriodSeconds.
+  shutdownDelay: 5s
   shutdownTimeout: 25s
+  terminationGracePeriodSeconds: 35
   resources:
     requests:
       cpu: 100m
@@ -68,6 +79,11 @@ smtp:
   domain: sigillum
   # oauthbearer: AUTH OAUTHBEARER with a projected ServiceAccount token
   #              (audience api.tokenAudience) — the recommended mode.
+  # credential:  AUTH PLAIN / LOGIN with a Sigillum-issued MailCredential,
+  #              for off-the-shelf apps that only take a username and
+  #              password (see credentials below). Offered only after
+  #              STARTTLS (tls.secretName) unless allowInsecureAuth is
+  #              explicitly true.
   # podip:       legacy fallback identifying unauthenticated clients by pod
   #              IP. Grants the proxy cluster-wide pod list/watch, and still
   #              only matches policies with legacyAuth.podIPFallback: true.
@@ -77,7 +93,8 @@ smtp:
   # Allow AUTH on connections without STARTTLS. Tokens then travel in clear
   # text inside the cluster. Unset (default), it follows tls.secretName:
   # false once STARTTLS is configured, true without it (for meshes with
-  # mTLS). Set true or false to override.
+  # mTLS). Set true or false to override. MailCredential passwords (mode
+  # credential) are only accepted without TLS when this is explicitly true.
   allowInsecureAuth: null
   tls:
     secretName: ""    # enables STARTTLS with tls.crt / tls.key
@@ -89,7 +106,9 @@ smtp:
   # wait up to sendTimeout, then get a retryable 451.
   maxConcurrentMessages: 4
   sendTimeout: 60s
+  shutdownDelay: 5s
   shutdownTimeout: 25s
+  terminationGracePeriodSeconds: 35
   resources:
     requests:
       cpu: 100m
@@ -132,6 +151,28 @@ controller:
     enabled: false
     minAvailable: 1
   extraArgs: []
+
+## Sigillum-issued SMTP credentials (MailCredential, US-3.7) ##
+# A MailCredential binds an SMTP username/password to one ServiceAccount in
+# its namespace; enable smtp.authModes "credential" to accept them.
+credentials:
+  # Generated mode: the controller writes a random password into a Secret in
+  # the credential's namespace and keeps only a hash. Needs Kubernetes >= 1.30
+  # (ValidatingAdmissionPolicy): the chart grants the controller Secret
+  # create/patch cluster-wide only together with a guard policy that limits
+  # it to labelled credential Secrets. false = bring-your-own-hash only
+  # (spec.passwordHash), and the controller gets no Secret write access.
+  enabled: true
+  # Namespaces that may not hold MailCredentials: exact names, or prefixes
+  # ending in "*". The release namespace (which holds the relay credentials)
+  # is always excluded. Add platform namespaces such as cert-manager or
+  # istio-system as needed.
+  excludeNamespaces:
+    - "kube-*"
+  # Host and port written into generated Secrets; default: the SMTP proxy
+  # Service (<release>-smtp.<namespace>.svc:smtp.service.port).
+  smtpHost: ""
+  smtpPort: null
 
 ## Validating webhook ##
 # The chart can either rely on cert-manager to provision the serving cert

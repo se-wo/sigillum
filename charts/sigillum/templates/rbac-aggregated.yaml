@@ -9,7 +9,7 @@ metadata:
     {{- include "sigillum.labels" . | nindent 4 }}
 rules:
   - apiGroups: [sigillum.dev]
-    resources: [mailbackends, clustermailbackends, mailpolicies]
+    resources: [mailbackends, clustermailbackends, mailpolicies, mailcredentials]
     verbs: [get, list, watch]
 ---
 # edit: mutate namespace-scoped resources, read cluster-scoped backends.
@@ -21,8 +21,10 @@ metadata:
     rbac.authorization.k8s.io/aggregate-to-edit: "true"
     {{- include "sigillum.labels" . | nindent 4 }}
 rules:
+  # MailCredential status (the password hashes) is written by the controller
+  # only; no aggregated role grants mailcredentials/status.
   - apiGroups: [sigillum.dev]
-    resources: [mailbackends, mailpolicies]
+    resources: [mailbackends, mailpolicies, mailcredentials]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [sigillum.dev]
     resources: [clustermailbackends]
@@ -38,6 +40,6 @@ metadata:
     {{- include "sigillum.labels" . | nindent 4 }}
 rules:
   - apiGroups: [sigillum.dev]
-    resources: [mailbackends, mailpolicies, clustermailbackends]
+    resources: [mailbackends, mailpolicies, mailcredentials, clustermailbackends]
     verbs: [get, list, watch, create, update, patch, delete]
 {{- end }}

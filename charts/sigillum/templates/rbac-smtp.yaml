@@ -12,6 +12,13 @@ rules:
   - apiGroups: [sigillum.dev]
     resources: [mailbackends, clustermailbackends, mailpolicies]
     verbs: [get, list, watch]
+  {{- if has "credential" .Values.smtp.authModes }}
+  # AUTH PLAIN / LOGIN: verify against MailCredential status hashes. The
+  # proxy never reads the credential Secrets.
+  - apiGroups: [sigillum.dev]
+    resources: [mailcredentials]
+    verbs: [get, list, watch]
+  {{- end }}
   # Resolve caller ServiceAccount labels for serviceAccountSelector subjects.
   - apiGroups: [""]
     resources: [serviceaccounts]

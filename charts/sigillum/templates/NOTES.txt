@@ -23,6 +23,28 @@ WARNING: the SMTP proxy accepts AUTH without STARTTLS, so ServiceAccount
 tokens cross the cluster network unencrypted. Set smtp.tls.secretName, or
 make sure a service mesh with mTLS carries the traffic.
 {{- end }}
+{{- if and .Values.smtp.enabled (has "credential" .Values.smtp.authModes) }}
+{{- if and (not .Values.smtp.tls.secretName) (ne (include "sigillum.smtp.allowInsecureCredentialAuth" .) "true") }}
+
+WARNING: smtp.authModes includes "credential", but smtp.tls.secretName is
+unset. AUTH PLAIN/LOGIN requires STARTTLS and will not be offered. Configure
+a TLS secret, or set smtp.allowInsecureAuth=true if a mesh encrypts the
+traffic.
+{{- else if eq (include "sigillum.smtp.allowInsecureCredentialAuth" .) "true" }}
+
+WARNING: smtp.allowInsecureAuth=true: MailCredential passwords are accepted
+without STARTTLS and may cross the cluster network unencrypted. Only do this
+behind mesh mTLS.
+{{- end }}
+{{- end }}
+{{- if and .Values.controller.enabled .Values.credentials.enabled (not (include "sigillum.credentials.guarded" .)) }}
+
+NOTE: generated MailCredentials need ValidatingAdmissionPolicy (Kubernetes
+>= 1.30), which this cluster does not serve, so the controller was given no
+Secret write access. MailCredentials in generated mode will report
+Ready=False (GuardMissing); use spec.passwordHash instead, or set
+credentials.enabled=false.
+{{- end }}
 {{- if and (eq .Values.rateLimit.backend "redis") .Values.rateLimit.failOpen }}
 
 WARNING: rateLimit.failOpen=true admits every message while Redis is

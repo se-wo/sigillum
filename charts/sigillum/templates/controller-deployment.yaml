@@ -35,6 +35,12 @@ spec:
             {{- if not .Values.webhook.enabled }}
             - --disable-webhook=true
             {{- end }}
+            {{- include "sigillum.commonArgs" . | nindent 12 }}
+            - --credentials-generated={{ .Values.credentials.enabled }}
+            - --credential-exclude-namespaces={{ join "," .Values.credentials.excludeNamespaces }}
+            - --credential-guard-name={{ include "sigillum.credentials.guardName" . }}
+            - --credential-smtp-host={{ include "sigillum.credentials.smtpHost" . }}
+            - --credential-smtp-port={{ default .Values.smtp.service.port .Values.credentials.smtpPort }}
             {{- range .Values.controller.extraArgs }}
             - {{ . }}
             {{- end }}
@@ -43,6 +49,8 @@ spec:
               value: {{ .Values.logLevel }}
             - name: POD_NAMESPACE
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: POD_SERVICE_ACCOUNT
+              valueFrom: { fieldRef: { fieldPath: spec.serviceAccountName } }
           ports:
             - name: metrics
               containerPort: {{ .Values.controller.metricsPort }}

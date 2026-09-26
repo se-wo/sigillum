@@ -19,4 +19,10 @@ spec:
       interval: {{ .Values.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
       path: /metrics
+      {{- with .Values.clusterName }}
+      # US-4.5: one target label instead of an extra label on every series.
+      relabelings:
+        - targetLabel: cluster
+          replacement: {{ . | quote }}
+      {{- end }}
 {{- end }}

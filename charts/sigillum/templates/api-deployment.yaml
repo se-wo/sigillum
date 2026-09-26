@@ -19,7 +19,7 @@ spec:
     spec:
       serviceAccountName: {{ include "sigillum.api.fullname" . }}
       automountServiceAccountToken: true
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
       securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: sigillum
@@ -33,7 +33,9 @@ spec:
             - --token-cache-size={{ .Values.api.tokenCacheSize }}
             - --token-cache-ttl={{ .Values.api.tokenCacheTTL }}
             - --shutdown-timeout={{ .Values.api.shutdownTimeout }}
+            - --shutdown-delay={{ .Values.api.shutdownDelay }}
             - --audit-log={{ .Values.audit.output }}
+            {{- include "sigillum.commonArgs" . | nindent 12 }}
             {{- include "sigillum.ratelimitArgs" . | nindent 12 }}
             {{- range .Values.api.extraArgs }}
             - {{ . }}
