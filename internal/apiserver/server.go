@@ -17,18 +17,20 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 	"github.com/se-wo/sigillum/internal/apiserver/auth"
 	"github.com/se-wo/sigillum/internal/apiserver/problem"
+	"github.com/se-wo/sigillum/internal/audit"
+	"github.com/se-wo/sigillum/internal/gateway"
 	"github.com/se-wo/sigillum/internal/policy/ratelimit"
 	"github.com/se-wo/sigillum/internal/telemetry"
 
@@ -48,12 +50,10 @@ var run = func(_ *slog.Logger) error { return nil }
 
 // Server holds the live api-server state.
 type Server struct {
-	logger      *slog.Logger
-	policyStore PolicyStore
-	k8sReader   client.Client
-	limiter     ratelimit.Limiter
-	authn       *auth.Authenticator
-	router      http.Handler
+	logger *slog.Logger
+	gw     *gateway.Gateway
+	authn  *auth.Authenticator
+	router http.Handler
 
 	cacheSynced atomic.Bool
 	shutting    atomic.Bool
@@ -73,6 +73,7 @@ func init() {
 			tokenCacheTTL   time.Duration
 			audience        string
 			shutdownTimeout time.Duration
+			auditLog        string
 		)
 		fs := flag.NewFlagSet("api", flag.ContinueOnError)
 		// --mode is consumed by the entrypoint; accept it here so Parse does
@@ -84,6 +85,7 @@ func init() {
 		fs.DurationVar(&tokenCacheTTL, "token-cache-ttl", 5*time.Minute, "cache TTL for TokenReview results")
 		fs.StringVar(&audience, "token-audience", "sigillum", "expected audience in projected ServiceAccount tokens")
 		fs.DurationVar(&shutdownTimeout, "shutdown-timeout", 25*time.Second, "graceful shutdown deadline")
+		fs.StringVar(&auditLog, "audit-log", "stdout", "audit stream sink: stdout, stderr, none, or a file path")
 		if err := fs.Parse(os.Args[1:]); err != nil && err != flag.ErrHelp {
 			return err
 		}
@@ -116,12 +118,21 @@ func init() {
 			return err
 		}
 
+		auditLogger, err := audit.FromFlag(auditLog)
+		if err != nil {
+			return err
+		}
+
 		s := &Server{
-			logger:      logger,
-			policyStore: newCachedPolicyStore(cl.GetClient()),
-			k8sReader:   cl.GetClient(),
-			limiter:     ratelimit.NewMemoryLimiter(),
-			authn:       authn,
+			logger: logger,
+			gw: &gateway.Gateway{
+				Logger:   logger,
+				Audit:    auditLogger,
+				Policies: gateway.CachedPolicyStore{C: cl.GetClient()},
+				Reader:   cl.GetClient(),
+				Limiter:  ratelimit.NewMemoryLimiter(),
+			},
+			authn: authn,
 		}
 		s.router = s.buildRouter()
 
@@ -222,12 +233,20 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := bearerToken(r.Header.Get("Authorization"))
 		if token == "" {
+			s.gw.Reject(audit.Event{
+				MessageID: uuid.NewString(),
+				Transport: gateway.TransportREST,
+			}, "missing_token")
 			problem.Write(w, problem.New(problem.TypeInvalidToken, http.StatusUnauthorized,
 				"Missing Bearer token", "set Authorization: Bearer <token>"))
 			return
 		}
 		subj, err := s.authn.Authenticate(r.Context(), token)
 		if err != nil {
+			s.gw.Reject(audit.Event{
+				MessageID: uuid.NewString(),
+				Transport: gateway.TransportREST,
+			}, "invalid_token")
 			problem.Write(w, problem.New(problem.TypeInvalidToken, http.StatusUnauthorized,
 				"Invalid token", err.Error()))
 			return

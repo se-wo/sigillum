@@ -223,3 +223,40 @@ func TestEvaluate_RecipientCaseAndNoAllowlist(t *testing.T) {
 		t.Fatalf("empty allowlist must allow non-blocked domains, got %+v", got)
 	}
 }
+
+func TestMatch_PodIPLegacyRequiresOptIn(t *testing.T) {
+	podPolicy := func(name string, optIn bool) sigv1.MailPolicy {
+		p := sigv1.MailPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "legacy"},
+			Spec: sigv1.MailPolicySpec{
+				Subjects: []sigv1.PolicySubject{{PodSelector: &sigv1.LabelSelectorSubject{
+					MatchLabels: map[string]string{"app": "cron"},
+				}}},
+			},
+		}
+		if optIn {
+			p.Spec.LegacyAuth = &sigv1.LegacyAuthSpec{PodIPFallback: true}
+		}
+		return p
+	}
+	legacy := Caller{Namespace: "legacy", ServiceAccount: "default", LegacyPodIP: true,
+		PodLabels: map[string]string{"app": "cron"}}
+
+	if got := Match([]sigv1.MailPolicy{podPolicy("no-opt-in", false)}, legacy); got != nil {
+		t.Fatalf("pod-IP caller must not match a policy without podIPFallback, got %s", got.Name)
+	}
+	if got := Match([]sigv1.MailPolicy{podPolicy("opt-in", true)}, legacy); got == nil {
+		t.Fatal("pod-IP caller must match an opted-in podSelector policy")
+	}
+	token := legacy
+	token.LegacyPodIP = false
+	if got := Match([]sigv1.MailPolicy{podPolicy("opt-in", true)}, token); got != nil {
+		t.Fatal("podSelector must be ignored for token-authenticated callers")
+	}
+	// An SA subject in an opted-in policy still matches a pod-IP caller.
+	sa := policy("sa-opt-in", "legacy", 1, "default")
+	sa.Spec.LegacyAuth = &sigv1.LegacyAuthSpec{PodIPFallback: true}
+	if got := Match([]sigv1.MailPolicy{sa}, legacy); got == nil {
+		t.Fatal("SA subject in opted-in policy must match pod-IP caller")
+	}
+}

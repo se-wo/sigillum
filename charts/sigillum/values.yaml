@@ -112,6 +112,13 @@ containerSecurityContext:
     drop: [ALL]
 
 ## Observability ##
+# Audit stream (US-4.3): one JSON record per mail request, accepted or
+# rejected, tagged "stream":"audit". Never contains subject/body/attachments.
+# output: stdout | stderr | none. (A file path also works, but the root
+# filesystem is read-only and the chart mounts no writable volume for it.)
+audit:
+  output: stdout
+
 serviceMonitor:
   enabled: false
   namespace: ""

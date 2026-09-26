@@ -22,6 +22,12 @@ type Caller struct {
 	// transport layer. Only needed when a candidate policy uses a
 	// serviceAccountSelector (see NeedsSALabels).
 	SALabels map[string]string
+	// LegacyPodIP is set when the caller was identified by pod-IP lookup on
+	// the SMTP path (US-3.5). Only policies with legacyAuth.podIPFallback
+	// accept such callers, and only then are podSelector subjects consulted.
+	LegacyPodIP bool
+	// PodLabels are the labels of the source pod (LegacyPodIP only).
+	PodLabels map[string]string
 }
 
 // NeedsSALabels reports whether any of the policies carries a
@@ -70,12 +76,15 @@ type Decision struct {
 //	explicit ServiceAccount > ServiceAccountSelector > PodSelector
 //
 // Tie-break across policies follows US-2.6 — higher priority wins, then
-// alphabetical name. Pod-selector subjects are skipped (they only matter for
-// the future SMTP path); the api-server path matches by SA only.
+// alphabetical name. Pod-selector subjects only apply to pod-IP legacy
+// callers, and those only match policies that opt in via legacyAuth.
 func Match(policies []sigv1.MailPolicy, caller Caller) *sigv1.MailPolicy {
 	candidates := make([]sigv1.MailPolicy, 0, len(policies))
 	for _, p := range policies {
 		if p.Namespace != caller.Namespace {
+			continue
+		}
+		if caller.LegacyPodIP && (p.Spec.LegacyAuth == nil || !p.Spec.LegacyAuth.PodIPFallback) {
 			continue
 		}
 		if !subjectMatches(p, caller) {
@@ -104,7 +113,9 @@ func subjectMatches(p sigv1.MailPolicy, caller Caller) bool {
 		if s.ServiceAccountSelector != nil && selectorMatches(s.ServiceAccountSelector, caller.SALabels) {
 			return true
 		}
-		// PodSelector is intentionally ignored on the REST path (SMTP-only).
+		if s.PodSelector != nil && caller.LegacyPodIP && selectorMatches(s.PodSelector, caller.PodLabels) {
+			return true
+		}
 	}
 	return false
 }

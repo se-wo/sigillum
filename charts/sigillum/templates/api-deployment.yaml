@@ -33,6 +33,7 @@ spec:
             - --token-cache-size={{ .Values.api.tokenCacheSize }}
             - --token-cache-ttl={{ .Values.api.tokenCacheTTL }}
             - --shutdown-timeout={{ .Values.api.shutdownTimeout }}
+            - --audit-log={{ .Values.audit.output }}
             {{- range .Values.api.extraArgs }}
             - {{ . }}
             {{- end }}
