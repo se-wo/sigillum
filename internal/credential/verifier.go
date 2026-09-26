@@ -130,6 +130,11 @@ func nameOf(username string) string {
 }
 
 func (v *Verifier) verifyArgon2id(ctx context.Context, username, phc, password string) (bool, error) {
+	// Lookup key of the in-memory cache of argon2id successes; it is never
+	// stored or logged, and only entries whose password argon2id accepted
+	// are added. A fast hash is appropriate here: the password's stored
+	// form is the argon2id hash (CodeQL's go/weak-sensitive-data-hashing
+	// alert on this line is a false positive).
 	key := sha256.Sum256([]byte(username + "\x00" + phc + "\x00" + password))
 	if exp, ok := v.argonOK.Get(key); ok && v.now().Before(exp) {
 		return true, nil

@@ -51,12 +51,20 @@ func GeneratePassword() (string, error) {
 const sha256Prefix = "sha256:"
 
 // HashGenerated returns the status hash of a generated password.
+//
+// A fast hash is deliberate (SPEC Q-11): these passwords are 256 bits from
+// crypto/rand, never chosen by a person, so a preimage search over 2^256 is
+// infeasible regardless of hash speed, and a slow hash would only make every
+// SMTP login expensive for the proxy. User-chosen passwords use argon2id
+// (VerifyArgon2id). CodeQL's go/weak-sensitive-data-hashing alerts on this
+// function and VerifyGenerated are false positives for that reason.
 func HashGenerated(password string) string {
 	sum := sha256.Sum256([]byte(password))
 	return sha256Prefix + hex.EncodeToString(sum[:])
 }
 
 // VerifyGenerated reports whether password matches hash (constant time).
+// SHA-256 is deliberate; see HashGenerated.
 func VerifyGenerated(hash, password string) bool {
 	if !strings.HasPrefix(hash, sha256Prefix) {
 		return false
