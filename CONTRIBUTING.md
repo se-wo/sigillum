@@ -21,6 +21,8 @@ make vulncheck          # govulncheck
   `make manifests generate` and commit the regenerated files.
 - `go mod tidy` must leave `go.mod` and `go.sum` unchanged; CI fails
   otherwise.
+- `make test` also renders the Helm chart (`test/chart`, `test/examples`)
+  when `helm` is on `PATH`; those tests are skipped otherwise.
 - `make e2e` runs the kind + Mailpit end-to-end suite. It needs Docker and a
   kind cluster; CI runs it on every PR, so running it locally is optional.
 
