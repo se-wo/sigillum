@@ -10,6 +10,20 @@ The section of a version becomes the notes of its GitHub Release
 (`hack/release-notes.sh`, run by the release workflow). Add entries under
 the version being prepared in the same pull request as the change.
 
+## [0.3.1] - unreleased
+
+### Fixed
+
+- REST: display names in `from`, `to` and `cc` are quoted (or encoded)
+  when relayed. A name containing `"`, `<` or `,` could end early and show
+  an address in the `To` or `Cc` header that was never a recipient, or
+  produce a header mail clients cannot parse.
+
+### Added
+
+- Continuous fuzzing of the SMTP, REST, address and credential parsers
+  with Go's native fuzzer (`make fuzz`, `fuzz` workflow on PRs and daily).
+
 ## [0.3.0] - 2026-09-26
 
 Works with off-the-shelf apps and cannot be bypassed (SPEC §8.2).
@@ -199,6 +213,7 @@ First release (MVP).
   recipient limits.
 - Prometheus metrics, structured JSON logs, Helm chart.
 
+[0.3.1]: https://github.com/se-wo/sigillum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/se-wo/sigillum/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/se-wo/sigillum/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/se-wo/sigillum/compare/v0.1.1...v0.2.0

@@ -15,6 +15,7 @@ make vet                # go vet ./...
 make test-unit          # fast unit tests (go test -short)
 make test               # regenerates manifests/deepcopy, then unit + envtest suite
 make vulncheck          # govulncheck
+make fuzz               # every fuzz target for 30s (FUZZTIME=5m, FUZZ_PKGS=internal/policy)
 ```
 
 - After changing API types or kubebuilder markers, run
@@ -23,6 +24,14 @@ make vulncheck          # govulncheck
   otherwise.
 - `make test` also renders the Helm chart (`test/chart`, `test/examples`)
   when `helm` is on `PATH`; those tests are skipped otherwise.
+- Code that parses untrusted input (SMTP DATA, REST requests, addresses,
+  credential strings) should have a native Go fuzz target
+  (`func FuzzXxx(f *testing.F)` in the package's `fuzz_test.go`) that
+  checks a property, not only that nothing panics. `go test` replays its
+  seeds, and the [`fuzz`](.github/workflows/fuzz.yml) workflow fuzzes every
+  target on PRs and daily. When a fuzzer finds a failing input, commit the
+  file it writes to `testdata/fuzz/<FuzzName>/` together with the fix, so
+  it stays a regression test.
 - `make e2e` runs the kind + Mailpit end-to-end suite. It needs Docker and a
   kind cluster; CI runs it on every PR, so running it locally is optional.
 

@@ -57,6 +57,14 @@ test: manifests generate fmt vet envtest
 test-unit:
 	$(GO) test -short $(PKG)
 
+# Time per fuzz target; FUZZ_PKGS limits the run to some package dirs.
+FUZZTIME  ?= 30s
+FUZZ_PKGS ?=
+
+.PHONY: fuzz
+fuzz:
+	hack/fuzz.sh run $(FUZZTIME) $(FUZZ_PKGS)
+
 .PHONY: test-envtest
 test-envtest: envtest
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --use-deprecated-gcs=false -p path)" \
