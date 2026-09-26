@@ -50,7 +50,8 @@ type PolicySubject struct {
 	PodSelector *LabelSelectorSubject `json:"podSelector,omitempty"`
 }
 
-// SenderRestrictions restrict the From address of accepted messages.
+// SenderRestrictions restrict the From address of accepted messages, as well
+// as the SMTP envelope sender and the Sender header where present.
 type SenderRestrictions struct {
 	// AllowedSenders is a list of exact addresses or glob patterns
 	// (e.g. "*@noreply.example.com"). Empty list means "deny all".
@@ -58,9 +59,11 @@ type SenderRestrictions struct {
 	AllowedSenders []string `json:"allowedSenders,omitempty"`
 }
 
-// RecipientRestrictions restrict the domains of To/Cc/Bcc recipients
-// (US-2.4). Domains match exactly and case-insensitively; subdomains must be
-// listed separately. BlockedDomains takes precedence over AllowedDomains.
+// RecipientRestrictions restrict the domains of To/Cc/Bcc recipients and of
+// Reply-To addresses (US-2.4). Domains match exactly and case-insensitively;
+// subdomains must be listed separately. BlockedDomains takes precedence over
+// AllowedDomains. The restriction is domain-wide: allowing "example.com"
+// allows every mailbox in it; single addresses cannot be allowed.
 type RecipientRestrictions struct {
 	// AllowedDomains, if non-empty, is the exhaustive list of recipient
 	// domains. Empty means "any domain not blocked".
@@ -85,7 +88,8 @@ type RateLimitsSpec struct {
 type MessageLimitsSpec struct {
 	// MaxSizeBytes caps the size of a message without transfer-encoding
 	// overhead: an 8 MiB attachment counts as 8 MiB, not as its ~11 MiB
-	// base64 form. REST counts bodies plus decoded attachments; SMTP counts
+	// base64 form. REST counts subject, custom headers, bodies and decoded
+	// attachments; SMTP counts
 	// the relayed message minus base64/quoted-printable overhead, so headers
 	// and MIME framing are included there.
 	// +kubebuilder:default=10485760

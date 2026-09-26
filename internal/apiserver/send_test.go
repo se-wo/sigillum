@@ -168,3 +168,56 @@ func TestHandleSendMessage_OversizedBodyAuditedAsMessageTooLarge(t *testing.T) {
 		t.Fatalf("want the same reason as the SMTP path, got %+v", sink.events)
 	}
 }
+
+func TestHandleSendMessage_AddressSpoofingIsRejected(t *testing.T) {
+	long := strings.Repeat("x", maxHeaderValue+1)
+	for name, body := range map[string]string{
+		"percent hack":        `{"from":"a@team.example","to":["attacker%evil.example@x.example"]}`,
+		"bang path":           `{"from":"a@team.example","cc":["evil.example!attacker@x.example"]}`,
+		"quoted local part":   `{"from":"a@team.example","bcc":["\"attacker@evil.example\"@x.example"]}`,
+		"display name with @": `{"from":"\"attacker@evil.example\" <a@team.example>","to":["b@x.example"]}`,
+		"comment with @":      `{"from":"a@team.example(attacker@evil.example)","to":["b@x.example"]}`,
+		"encoded-word with @": `{"from":"=?utf-8?B?YXR0YWNrZXJAZXZpbC5leGFtcGxl?= <a@team.example>","to":["b@x.example"]}`,
+		"reply-to name":       `{"from":"a@team.example","to":["b@x.example"],"headers":{"Reply-To":"\"x@evil.example\" <b@x.example>"}}`,
+		"reply-to routing":    `{"from":"a@team.example","to":["b@x.example"],"headers":{"Reply-To":"attacker%evil.example@x.example"}}`,
+		"sender two":          `{"from":"a@team.example","to":["b@x.example"],"headers":{"Sender":"a@team.example, c@team.example"}}`,
+		"duplicate header":    `{"from":"a@team.example","to":["b@x.example"],"headers":{"Reply-To":"b@x.example","reply-to":"attacker@evil.example"}}`,
+		"resent header":       `{"from":"a@team.example","to":["b@x.example"],"headers":{"Resent-From":"attacker@evil.example"}}`,
+		"overlong header":     `{"from":"a@team.example","to":["b@x.example"],"headers":{"X-Data":"` + long + `"}}`,
+	} {
+		s, sink := newTestServer()
+		w := post(s, body)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d: %s", name, w.Code, w.Body.String())
+			continue
+		}
+		if len(sink.events) != 1 || sink.events[0].Reason != "invalid_payload" {
+			t.Errorf("%s: want one invalid_payload audit event, got %+v", name, sink.events)
+		}
+	}
+}
+
+func TestAddressHeaders(t *testing.T) {
+	sender, replyTo, err := addressHeaders(map[string]string{
+		"sender":   "Billing <noreply@team.example>",
+		"Reply-To": "support@team.example, Help Desk <help@team.example>",
+		"X-Other":  "attacker@evil.example",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sender != "noreply@team.example" || len(replyTo) != 2 || replyTo[1] != "help@team.example" {
+		t.Fatalf("got sender=%q replyTo=%v", sender, replyTo)
+	}
+}
+
+func TestEstimateSizeCountsSubjectAndHeaders(t *testing.T) {
+	req := requestBody{
+		Subject: strings.Repeat("s", 100),
+		Headers: map[string]string{"X-Data": strings.Repeat("h", 200)},
+		Body:    requestBodyContent{Text: "text"},
+	}
+	if got, want := estimateSize(req, nil), int64(100+len("X-Data")+200+4); got != want {
+		t.Fatalf("estimateSize = %d, want %d", got, want)
+	}
+}

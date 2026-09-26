@@ -153,3 +153,15 @@ Arg: dict "root" $ "service" "<service name>".
 {{- end }}
 {{- end }}
 {{- end }}
+
+{{/*
+Effective smtp.allowInsecureAuth: an explicit true/false wins, unset follows
+TLS (insecure AUTH only while no STARTTLS certificate is configured).
+*/}}
+{{- define "sigillum.smtp.allowInsecureAuth" -}}
+{{- if kindIs "bool" .Values.smtp.allowInsecureAuth -}}
+{{- .Values.smtp.allowInsecureAuth -}}
+{{- else -}}
+{{- empty .Values.smtp.tls.secretName -}}
+{{- end -}}
+{{- end }}

@@ -157,7 +157,7 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1},
 			Message: "Null sender <> is not accepted for submission"}
 	}
-	if _, err := mail.ParseAddress(from); err != nil {
+	if err := checkPath(from); err != nil {
 		s.rejectCommand("invalid_payload", from, nil)
 		return &smtp.SMTPError{Code: 553, EnhancedCode: smtp.EnhancedCode{5, 1, 7}, Message: "Malformed sender address"}
 	}
@@ -210,7 +210,7 @@ func (s *session) rejectUnauthenticated(reason string) {
 // Rcpt implements smtp.Session. Policy checks happen at end of DATA, where the
 // whole message (size, header From) is known.
 func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
-	if _, err := mail.ParseAddress(to); err != nil {
+	if err := checkPath(to); err != nil {
 		s.rejectCommand("invalid_payload", s.from, []string{to})
 		return &smtp.SMTPError{Code: 553, EnhancedCode: smtp.EnhancedCode{5, 1, 3}, Message: "Malformed recipient address"}
 	}
@@ -263,7 +263,7 @@ func (s *session) Data(r io.Reader) error {
 		return err
 	}
 	raw := stripBcc(buf.Bytes()[len(trace):])
-	msg, headerFrom, err := parseMessage(raw)
+	msg, hdr, err := parseMessage(raw)
 	if err != nil {
 		s.b.Sender.Reject(baseEvent, "invalid_payload")
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 6, 0}, Message: err.Error()}
@@ -277,9 +277,11 @@ func (s *session) Data(r io.Reader) error {
 		Identity:     *s.identity,
 		Transport:    gateway.TransportSMTP,
 		MessageID:    msgID,
-		Message:      &driver.Message{From: driver.Address{Address: headerFrom}, To: to},
+		Message:      &driver.Message{From: driver.Address{Address: hdr.from}, To: to},
 		Raw:          buf.Bytes()[:len(trace)+len(raw)],
 		EnvelopeFrom: s.from,
+		Sender:       hdr.sender,
+		ReplyTo:      hdr.replyTo,
 		SizeBytes:    contentSize(msg, len(raw)),
 	})
 	if res.Status != gateway.StatusAccepted {
@@ -332,34 +334,111 @@ func resultError(res gateway.Result, msgID string) error {
 
 var errNoFrom = errors.New("message has no valid From header")
 
-// parseMessage parses raw and returns its single From address.
+// checkPath validates a MAIL FROM or RCPT TO path as go-smtp hands it over:
+// quotes already removed, any source route stripped. It must parse as a
+// single plain address, equal to what is relayed, whose local part has no
+// routing semantics (see policy.ValidateMailbox).
+func checkPath(path string) error {
+	a, err := mail.ParseAddress(path)
+	if err != nil {
+		return err
+	}
+	if a.Name != "" || a.Address != path {
+		return fmt.Errorf("%q is not a plain address", path)
+	}
+	return policy.ValidateMailbox(a.Address)
+}
+
+// addressHeaders holds the header addresses the policy checks.
+type addressHeaders struct {
+	from    string
+	sender  string
+	replyTo []string
+}
+
+// parseMessage parses raw and returns the addresses of its From, Sender and
+// Reply-To fields.
 //
-// RFC 5322 §3.6 allows exactly one From field. net/mail's Header.Get (and so
-// AddressList) only reads the first one, while the raw bytes, second From
-// included, are relayed unchanged and many clients display the last. So a
-// duplicate From field is rejected outright rather than half-checked. A
-// single field with several addresses is rejected too: each would have to
-// pass the sender policy, and it is virtually never legitimate for
-// submission.
-func parseMessage(raw []byte) (*mail.Message, string, error) {
+// RFC 5322 §3.6 allows each of these fields at most once. net/mail's
+// Header.Get (and so AddressList) only reads the first one, while the raw
+// bytes, duplicates included, are relayed unchanged and many clients display
+// the last. So a duplicate field is rejected outright rather than
+// half-checked. A From field with several addresses is rejected too: each
+// would have to pass the sender policy, and it is virtually never legitimate
+// for submission.
+//
+// Display names and comments must not contain '@' (policy.
+// ValidateAddressHeader), and Resent-* fields, which make no sense in a
+// submission, are refused.
+func parseMessage(raw []byte) (*mail.Message, addressHeaders, error) {
+	var hdr addressHeaders
 	msg, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
-		return nil, "", fmt.Errorf("malformed message header: %v", err)
+		return nil, hdr, fmt.Errorf("malformed message header: %v", err)
 	}
-	switch n := len(msg.Header["From"]); {
-	case n == 0:
-		return nil, "", errNoFrom
-	case n > 1:
-		return nil, "", errors.New("multiple From header fields are not allowed")
+	for k := range msg.Header {
+		if strings.HasPrefix(k, "Resent-") {
+			return nil, hdr, fmt.Errorf("%s header fields are not allowed", k)
+		}
 	}
-	list, err := msg.Header.AddressList("From")
-	if err != nil || len(list) == 0 {
-		return nil, "", errNoFrom
+	for _, k := range []string{"From", "Sender", "Reply-To"} {
+		if len(msg.Header[k]) > 1 {
+			return nil, hdr, fmt.Errorf("multiple %s header fields are not allowed", k)
+		}
+	}
+
+	if len(msg.Header["From"]) == 0 {
+		return nil, hdr, errNoFrom
+	}
+	list, err := addressField(msg.Header, "From")
+	if err != nil {
+		return nil, hdr, fmt.Errorf("invalid From header: %v", err)
+	}
+	if len(list) == 0 {
+		return nil, hdr, errNoFrom
 	}
 	if len(list) > 1 {
-		return nil, "", errors.New("multiple From addresses are not allowed")
+		return nil, hdr, errors.New("multiple From addresses are not allowed")
 	}
-	return msg, list[0].Address, nil
+	hdr.from = list[0]
+
+	if len(msg.Header["Sender"]) > 0 {
+		list, err := addressField(msg.Header, "Sender")
+		if err != nil {
+			return nil, hdr, fmt.Errorf("invalid Sender header: %v", err)
+		}
+		if len(list) != 1 {
+			return nil, hdr, errors.New("the Sender header must hold exactly one address")
+		}
+		hdr.sender = list[0]
+	}
+	if len(msg.Header["Reply-To"]) > 0 {
+		hdr.replyTo, err = addressField(msg.Header, "Reply-To")
+		if err != nil {
+			return nil, hdr, fmt.Errorf("invalid Reply-To header: %v", err)
+		}
+	}
+	return msg, hdr, nil
+}
+
+// addressField parses the address list in header field k and applies the
+// display-name and local-part checks to it.
+func addressField(h mail.Header, k string) ([]string, error) {
+	list, err := h.AddressList(k)
+	if err != nil {
+		return nil, err
+	}
+	if err := policy.ValidateAddressHeader(h.Get(k), len(list)); err != nil {
+		return nil, err
+	}
+	out := make([]string, len(list))
+	for i, a := range list {
+		if err := policy.ValidateMailbox(a.Address); err != nil {
+			return nil, err
+		}
+		out[i] = a.Address
+	}
+	return out, nil
 }
 
 // receivedHeader builds the RFC 5321 trace header that is prepended to the

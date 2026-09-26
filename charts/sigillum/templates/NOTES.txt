@@ -11,6 +11,23 @@ WARNING: rateLimit.backend=memory counts per replica. With several api/smtp
 replicas every policy limit is effectively multiplied. Use
 rateLimit.backend=redis for accurate limits.
 {{- end }}
+{{- if not .Values.api.tls.secretName }}
+
+WARNING: api.tls.secretName is unset, so the api-server serves plain HTTP and
+ServiceAccount tokens cross the cluster network unencrypted. Set
+api.tls.secretName, or make sure a service mesh with mTLS carries the traffic.
+{{- end }}
+{{- if and .Values.smtp.enabled (eq (include "sigillum.smtp.allowInsecureAuth" .) "true") }}
+
+WARNING: the SMTP proxy accepts AUTH without STARTTLS, so ServiceAccount
+tokens cross the cluster network unencrypted. Set smtp.tls.secretName, or
+make sure a service mesh with mTLS carries the traffic.
+{{- end }}
+{{- if and (eq .Values.rateLimit.backend "redis") .Values.rateLimit.failOpen }}
+
+WARNING: rateLimit.failOpen=true admits every message while Redis is
+unreachable, i.e. rate limits are not enforced during a Redis outage.
+{{- end }}
 
 Quickstart:
 
