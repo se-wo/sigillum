@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -40,11 +41,24 @@ type cacheEntry struct {
 }
 
 // New constructs an Authenticator. cacheSize 0 disables caching.
+//
+// At least one non-empty audience is required: without one, TokenReview
+// validates against the kube-apiserver's own audience, and Sigillum would
+// accept (and receive) tokens that are valid for the Kubernetes API.
 func New(c kubernetes.Interface, audiences []string, cacheSize int, ttl time.Duration) (*Authenticator, error) {
 	if c == nil {
 		return nil, errors.New("kubernetes client is required")
 	}
-	a := &Authenticator{client: c, audiences: audiences, ttl: ttl, now: time.Now}
+	var auds []string
+	for _, aud := range audiences {
+		if aud = strings.TrimSpace(aud); aud != "" {
+			auds = append(auds, aud)
+		}
+	}
+	if len(auds) == 0 {
+		return nil, errors.New("at least one token audience is required")
+	}
+	a := &Authenticator{client: c, audiences: auds, ttl: ttl, now: time.Now}
 	if cacheSize > 0 {
 		ca, err := lru.New[string, cacheEntry](cacheSize)
 		if err != nil {
@@ -94,6 +108,19 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (*Subjec
 		return nil, errors.New(msg)
 	}
 
+	// The TokenReview API requires clients that set spec.audiences to verify
+	// status.audiences: an authenticator that is not audience-aware may
+	// answer authenticated=true with no audiences, which means the token is
+	// valid for the kube-apiserver. Accepting such a token would hand
+	// Sigillum a credential that can act as the ServiceAccount against the
+	// Kubernetes API.
+	if !a.audienceMatches(resp.Status.Audiences) {
+		if a.cache != nil {
+			a.cache.Add(key, cacheEntry{expires: a.now().Add(a.ttl)})
+		}
+		return nil, fmt.Errorf("token audiences %v do not include any of %v", resp.Status.Audiences, a.audiences)
+	}
+
 	ns, sa, ok := parseServiceAccountUsername(resp.Status.User.Username)
 	if !ok {
 		return nil, errors.New("token does not belong to a serviceaccount: " + resp.Status.User.Username)
@@ -109,6 +136,17 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (*Subjec
 		a.cache.Add(key, cacheEntry{subject: subj, expires: a.now().Add(a.ttl)})
 	}
 	return subj, nil
+}
+
+func (a *Authenticator) audienceMatches(got []string) bool {
+	for _, g := range got {
+		for _, want := range a.audiences {
+			if g == want {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // parseServiceAccountUsername decodes "system:serviceaccount:<ns>:<name>".
