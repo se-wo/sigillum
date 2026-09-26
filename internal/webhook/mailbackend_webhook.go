@@ -10,7 +10,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
@@ -22,43 +21,45 @@ import (
 
 // MailBackendValidator validates both MailBackend and ClusterMailBackend.
 // One implementation handles both — the only difference is whether
-// credentialsRef.namespace is required (cluster-scope: yes).
-type MailBackendValidator struct {
+// credentialsRef.namespace is required (cluster-scope: yes). T is the
+// concrete CR type the webhook is registered for.
+type MailBackendValidator[T runtime.Object] struct {
 	clusterScoped bool
 }
 
 // SetupMailBackendWebhook registers the namespace-scoped validator.
 func SetupMailBackendWebhook(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(&sigv1.MailBackend{}).
-		WithValidator(&MailBackendValidator{clusterScoped: false}).
+	return ctrl.NewWebhookManagedBy(mgr, &sigv1.MailBackend{}).
+		WithValidator(&MailBackendValidator[*sigv1.MailBackend]{clusterScoped: false}).
 		Complete()
 }
 
 // SetupClusterMailBackendWebhook registers the cluster-scoped validator.
 func SetupClusterMailBackendWebhook(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(&sigv1.ClusterMailBackend{}).
-		WithValidator(&MailBackendValidator{clusterScoped: true}).
+	return ctrl.NewWebhookManagedBy(mgr, &sigv1.ClusterMailBackend{}).
+		WithValidator(&MailBackendValidator[*sigv1.ClusterMailBackend]{clusterScoped: true}).
 		Complete()
 }
 
-// compile-time interface assertion
-var _ webhook.CustomValidator = &MailBackendValidator{}
+// compile-time interface assertions
+var (
+	_ admission.Validator[*sigv1.MailBackend]        = &MailBackendValidator[*sigv1.MailBackend]{}
+	_ admission.Validator[*sigv1.ClusterMailBackend] = &MailBackendValidator[*sigv1.ClusterMailBackend]{}
+)
 
-func (v *MailBackendValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (v *MailBackendValidator[T]) ValidateCreate(_ context.Context, obj T) (admission.Warnings, error) {
 	return v.validate(obj)
 }
 
-func (v *MailBackendValidator) ValidateUpdate(_ context.Context, _, newObj runtime.Object) (admission.Warnings, error) {
+func (v *MailBackendValidator[T]) ValidateUpdate(_ context.Context, _, newObj T) (admission.Warnings, error) {
 	return v.validate(newObj)
 }
 
-func (v *MailBackendValidator) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
+func (v *MailBackendValidator[T]) ValidateDelete(_ context.Context, _ T) (admission.Warnings, error) {
 	return nil, nil
 }
 
-func (v *MailBackendValidator) validate(obj runtime.Object) (admission.Warnings, error) {
+func (v *MailBackendValidator[T]) validate(obj runtime.Object) (admission.Warnings, error) {
 	var (
 		spec   *sigv1.BackendSpec
 		gk     schema.GroupKind

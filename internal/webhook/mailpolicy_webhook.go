@@ -2,17 +2,14 @@ package webhook
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
@@ -26,31 +23,26 @@ type MailPolicyValidator struct{}
 
 // SetupMailPolicyWebhook wires the validator into the manager.
 func SetupMailPolicyWebhook(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(&sigv1.MailPolicy{}).
+	return ctrl.NewWebhookManagedBy(mgr, &sigv1.MailPolicy{}).
 		WithValidator(&MailPolicyValidator{}).
 		Complete()
 }
 
-var _ webhook.CustomValidator = &MailPolicyValidator{}
+var _ admission.Validator[*sigv1.MailPolicy] = &MailPolicyValidator{}
 
-func (v *MailPolicyValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (v *MailPolicyValidator) ValidateCreate(_ context.Context, obj *sigv1.MailPolicy) (admission.Warnings, error) {
 	return v.validate(obj)
 }
 
-func (v *MailPolicyValidator) ValidateUpdate(_ context.Context, _, newObj runtime.Object) (admission.Warnings, error) {
+func (v *MailPolicyValidator) ValidateUpdate(_ context.Context, _, newObj *sigv1.MailPolicy) (admission.Warnings, error) {
 	return v.validate(newObj)
 }
 
-func (v *MailPolicyValidator) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
+func (v *MailPolicyValidator) ValidateDelete(_ context.Context, _ *sigv1.MailPolicy) (admission.Warnings, error) {
 	return nil, nil
 }
 
-func (v *MailPolicyValidator) validate(obj runtime.Object) (admission.Warnings, error) {
-	mp, ok := obj.(*sigv1.MailPolicy)
-	if !ok {
-		return nil, fmt.Errorf("unexpected object type %T", obj)
-	}
+func (v *MailPolicyValidator) validate(mp *sigv1.MailPolicy) (admission.Warnings, error) {
 	gk := schema.GroupKind{Group: sigv1.GroupVersion.Group, Kind: "MailPolicy"}
 
 	var allErrs field.ErrorList
