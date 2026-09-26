@@ -14,6 +14,9 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -128,6 +131,9 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 		"authMethod", id.AuthMethod,
 		"transport", req.Transport,
 	)
+	if tid := telemetry.TraceID(ctx); tid != "" {
+		logger = logger.With("trace_id", tid)
+	}
 	view := policy.MessageView{
 		From:       req.Message.From.Address,
 		Recipients: Recipients(req.Message),
@@ -143,6 +149,12 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 		To:             view.Recipients,
 	}
 
+	evalCtx, evalSpan := telemetry.Tracer().Start(ctx, "policy.evaluate", trace.WithAttributes(
+		attribute.String("sigillum.namespace", id.Namespace),
+		attribute.String("sigillum.service_account", id.ServiceAccount),
+		attribute.String("sigillum.auth_method", id.AuthMethod),
+		attribute.Int("sigillum.recipients", len(view.Recipients)),
+	))
 	policies := g.Policies.ListInNamespace(id.Namespace)
 	caller := policy.Caller{
 		Namespace:      id.Namespace,
@@ -151,9 +163,15 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 		LegacyPodIP:    id.AuthMethod == AuthPodIPLegacy,
 	}
 	if policy.NeedsSALabels(policies) {
-		caller.SALabels = g.serviceAccountLabels(ctx, id.Namespace, id.ServiceAccount)
+		caller.SALabels = g.serviceAccountLabels(evalCtx, id.Namespace, id.ServiceAccount)
 	}
 	decision := policy.Evaluate(policy.Match(policies, caller), view)
+	evalSpan.SetAttributes(attribute.String("sigillum.policy", nameOf(decision.Policy)),
+		attribute.Bool("sigillum.allowed", decision.Allowed))
+	if !decision.Allowed {
+		evalSpan.SetAttributes(attribute.String("sigillum.deny_reason", string(decision.DenyReason)))
+	}
+	evalSpan.End()
 	if !decision.Allowed {
 		ns, name := id.Namespace, nameOf(decision.Policy)
 		telemetry.PolicyDeniedTotal.WithLabelValues(ns, name, string(decision.DenyReason)).Inc()
@@ -166,7 +184,13 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 	ev.Policy = p.Name
 
 	if rl := p.Spec.RateLimits; rl != nil && (rl.MessagesPerMinute > 0 || rl.MessagesPerHour > 0) {
-		ok, retry, err := g.Limiter.Allow(ctx, p.Namespace+"/"+p.Name, rl.MessagesPerMinute, rl.MessagesPerHour)
+		rlCtx, rlSpan := telemetry.Tracer().Start(ctx, "ratelimit.allow")
+		ok, retry, err := g.Limiter.Allow(rlCtx, p.Namespace+"/"+p.Name, rl.MessagesPerMinute, rl.MessagesPerHour)
+		rlSpan.SetAttributes(attribute.Bool("sigillum.allowed", ok))
+		if err != nil {
+			rlSpan.SetStatus(codes.Error, err.Error())
+		}
+		rlSpan.End()
 		if err != nil {
 			logger.Error("rate limiter unavailable", "policy", p.Name, "err", err)
 			ev.Decision, ev.Reason = audit.DecisionReject, "ratelimit_unavailable"
@@ -194,9 +218,15 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 	defer d.Close()
 	ev.Backend = backendKey
 
+	sendCtx, sendSpan := telemetry.Tracer().Start(ctx, "backend.send", trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.String("sigillum.backend", backendKey), attribute.String("sigillum.policy", p.Name)))
 	start := time.Now()
-	res, err := d.Send(ctx, req.Message)
+	res, err := d.Send(sendCtx, req.Message)
 	dur := time.Since(start).Seconds()
+	if err != nil {
+		sendSpan.SetStatus(codes.Error, err.Error())
+	}
+	sendSpan.End()
 
 	if err != nil {
 		const resultLabel = "upstream_error"

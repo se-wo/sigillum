@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel/codes"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -108,6 +109,17 @@ func init() {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
+
+		shutdownTracing, tracingOn, err := telemetry.InitTracing(ctx, "sigillum-api")
+		if err != nil {
+			return err
+		}
+		defer func() {
+			flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = shutdownTracing(flushCtx)
+		}()
+		logger.Info("tracing", "enabled", tracingOn)
 
 		go func() {
 			if startErr := cl.Start(ctx); startErr != nil {
@@ -207,6 +219,7 @@ func (s *Server) buildRouter() http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
+	r.Use(telemetry.HTTPMiddleware)
 	r.Use(s.requestLogger)
 
 	r.Get("/healthz", s.handleHealthz)
@@ -247,7 +260,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				"Missing Bearer token", "set Authorization: Bearer <token>"))
 			return
 		}
-		subj, err := s.authn.Authenticate(r.Context(), token)
+		authCtx, span := telemetry.Tracer().Start(r.Context(), "auth.tokenreview")
+		subj, err := s.authn.Authenticate(authCtx, token)
+		if err != nil {
+			span.SetStatus(codes.Error, "token rejected")
+		}
+		span.End()
 		if err != nil {
 			s.gw.Reject(audit.Event{
 				MessageID: uuid.NewString(),

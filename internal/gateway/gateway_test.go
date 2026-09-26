@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -242,5 +245,38 @@ func TestSend_LimiterUnavailable(t *testing.T) {
 	}
 	if ev := rec.last(t); ev.Reason != "ratelimit_unavailable" {
 		t.Fatalf("unexpected audit event %+v", ev)
+	}
+}
+
+func TestSend_SpanHierarchy(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+
+	g, _ := newGateway(t, &fakeDriver{}, testPolicy(), readyBackend("relay", true))
+	ctx, root := tp.Tracer("test").Start(context.Background(), "http.request")
+	if res := g.Send(ctx, request("app@team.example")); res.Status != StatusAccepted {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	root.End()
+
+	parents := map[string]string{}
+	ids := map[string]string{}
+	for _, s := range exp.GetSpans() {
+		ids[s.SpanContext.SpanID().String()] = s.Name
+	}
+	for _, s := range exp.GetSpans() {
+		parents[s.Name] = ids[s.Parent.SpanID().String()]
+	}
+	for child, parent := range map[string]string{
+		"policy.evaluate": "http.request",
+		"ratelimit.allow": "http.request",
+		"backend.send":    "http.request",
+	} {
+		if parents[child] != parent {
+			t.Errorf("%s: parent %q, want %q (all: %v)", child, parents[child], parent, parents)
+		}
 	}
 }

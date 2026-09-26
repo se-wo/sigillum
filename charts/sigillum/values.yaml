@@ -140,6 +140,15 @@ rateLimit:
 audit:
   output: stdout
 
+# OpenTelemetry tracing (US-4.4). OTLP over HTTP/protobuf; disabled while
+# endpoint is empty. Spans: http.request > auth.tokenreview, policy.evaluate,
+# ratelimit.allow, backend.send. Incoming W3C traceparent is continued.
+tracing:
+  endpoint: ""            # e.g. http://otel-collector.observability:4318
+  sampler: ""             # OTEL_TRACES_SAMPLER, e.g. parentbased_traceidratio
+  samplerArg: ""          # OTEL_TRACES_SAMPLER_ARG, e.g. "0.1"
+  resourceAttributes: ""  # OTEL_RESOURCE_ATTRIBUTES, e.g. deployment.environment=prod
+
 serviceMonitor:
   enabled: false
   namespace: ""

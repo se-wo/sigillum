@@ -112,3 +112,29 @@ Redis credentials from an existing Secret (never rendered into args).
 {{- end }}
 {{- end }}
 {{- end }}
+
+{{/*
+OpenTelemetry env (US-4.4). Rendered only when an endpoint is configured.
+Arg: dict "root" $ "service" "<service name>".
+*/}}
+{{- define "sigillum.tracingEnv" -}}
+{{- $t := .root.Values.tracing }}
+{{- if $t.endpoint }}
+- name: OTEL_EXPORTER_OTLP_ENDPOINT
+  value: {{ $t.endpoint | quote }}
+- name: OTEL_SERVICE_NAME
+  value: {{ .service | quote }}
+{{- with $t.sampler }}
+- name: OTEL_TRACES_SAMPLER
+  value: {{ . | quote }}
+{{- end }}
+{{- with $t.samplerArg }}
+- name: OTEL_TRACES_SAMPLER_ARG
+  value: {{ . | quote }}
+{{- end }}
+{{- with $t.resourceAttributes }}
+- name: OTEL_RESOURCE_ATTRIBUTES
+  value: {{ . | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

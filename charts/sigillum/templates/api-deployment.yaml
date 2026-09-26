@@ -44,6 +44,7 @@ spec:
             - name: POD_NAMESPACE
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
             {{- include "sigillum.ratelimitEnv" . | nindent 12 }}
+            {{- include "sigillum.tracingEnv" (dict "root" . "service" "sigillum-api") | nindent 12 }}
             {{- if .Values.api.tls.secretName }}
             - name: SIGILLUM_TLS_CERT
               value: /etc/sigillum/tls/tls.crt
