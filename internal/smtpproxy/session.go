@@ -212,6 +212,8 @@ func (s *session) event(msgID, from string, to []string) audit.Event {
 		ev.Namespace = s.identity.Namespace
 		ev.ServiceAccount = s.identity.ServiceAccount
 		ev.AuthMethod = s.identity.AuthMethod
+		ev.Credential = s.identity.Credential
+		ev.CredentialPrevious = s.identity.CredentialPrevious
 	}
 	return ev
 }
