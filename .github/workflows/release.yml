@@ -2,8 +2,8 @@ name: release
 
 # Only GitHub-owned actions are used: the repository's Actions policy allows
 # actions created by GitHub, helm/kind-action and this repository's own local
-# actions. Docker
-# buildx and Helm are preinstalled on ubuntu-latest and driven from shell;
+# actions. Docker buildx and Helm are preinstalled on ubuntu-latest and driven
+# from shell;
 # cosign is a checksum-pinned release binary (.github/actions/setup-cosign).
 # Actions are pinned to commit SHAs (not tags); tag comments track which
 # human-readable release the SHA corresponds to. Dependabot bumps them.

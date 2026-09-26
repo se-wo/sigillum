@@ -1,9 +1,5 @@
 # Contributing to sigillum
 
-Thanks for your interest. Bug reports, fixes and improvements are welcome.
-For larger changes, please open an issue first so the approach can be
-discussed before you invest time in it.
-
 **Security issues:** do not open a public issue or PR. Follow
 [SECURITY.md](SECURITY.md) and report privately.
 
@@ -34,7 +30,8 @@ make vulncheck          # govulncheck
   pushes are blocked.
 - These checks must pass before a PR can be merged: `build-test`, `e2e`,
   `govulncheck`, `dependency-review`, `analyze (go)` and `analyze (actions)`.
-  New high-severity CodeQL alerts also block the merge.
+  CodeQL results are also enforced: alerts of high or critical security
+  severity, or of error severity, block the merge.
 - CI does not start automatically for PRs from outside contributors; a
   maintainer has to approve the workflow run first. Please be patient.
 - Keep PRs focused, add or update tests for behaviour changes, and update
@@ -54,6 +51,4 @@ make vulncheck          # govulncheck
 ## Dependencies
 
 Go modules, Actions and Docker base images are updated by Dependabot
-(see [`.github/dependabot.yml`](.github/dependabot.yml)). Please don't send
-PRs that only bump dependency versions; if you need a newer version for a
-fix, include the bump in that PR and explain why.
+(see [`.github/dependabot.yml`](.github/dependabot.yml)).
