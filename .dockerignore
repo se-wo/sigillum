@@ -1,0 +1,9 @@
+# Build context for Dockerfile (the build stage does `COPY . .`).
+# Dockerfile.ci has its own ignore file, Dockerfile.ci.dockerignore.
+.git
+.github
+bin
+cover.out
+**/*.test
+.idea
+.vscode

@@ -158,8 +158,12 @@ cosign verify ghcr.io/se-wo/sigillum:0.3.0 \
   --certificate-identity-regexp '^https://github\.com/se-wo/sigillum/\.github/workflows/release\.yml@refs/tags/v'
 
 # build provenance
-gh attestation verify oci://ghcr.io/se-wo/sigillum:0.3.0 --repo se-wo/sigillum
-gh attestation verify oci://ghcr.io/se-wo/charts/sigillum:0.3.0 --repo se-wo/sigillum
+gh attestation verify oci://ghcr.io/se-wo/sigillum:0.3.0 --repo se-wo/sigillum \
+  --signer-workflow se-wo/sigillum/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.3.0
+gh attestation verify oci://ghcr.io/se-wo/charts/sigillum:0.3.0 --repo se-wo/sigillum \
+  --signer-workflow se-wo/sigillum/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.3.0
 
 # SBOM for one platform
 docker buildx imagetools inspect ghcr.io/se-wo/sigillum:0.3.0 \
