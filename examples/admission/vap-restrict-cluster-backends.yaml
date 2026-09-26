@@ -1,0 +1,36 @@
+# Only namespaces labelled backends.sigillum.dev/<name>: "true" may reference
+# ClusterMailBackend <name> (US-5.7, Q-8). Namespace-scoped MailBackends are
+# not affected.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: sigillum-restrict-cluster-backends
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [sigillum.dev]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [mailpolicies]
+  variables:
+    - name: label
+      expression: "'backends.sigillum.dev/' + object.spec.backendRef.name"
+  validations:
+    - expression: >-
+        (has(object.spec.backendRef.kind) && object.spec.backendRef.kind == 'MailBackend') ||
+        (has(namespaceObject.metadata.labels) &&
+         variables.label in namespaceObject.metadata.labels &&
+         namespaceObject.metadata.labels[variables.label] == 'true')
+      messageExpression: >-
+        'namespace ' + namespaceObject.metadata.name + ' may not use ClusterMailBackend ' +
+        object.spec.backendRef.name + ' (namespace label ' + variables.label + '=true is missing)'
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: sigillum-restrict-cluster-backends
+spec:
+  policyName: sigillum-restrict-cluster-backends
+  validationActions: [Deny]

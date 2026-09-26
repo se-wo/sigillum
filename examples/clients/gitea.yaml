@@ -1,0 +1,26 @@
+# Gitea notifications. Username: gitea.gitea, Secret: gitea-smtp.
+apiVersion: sigillum.dev/v1alpha1
+kind: MailCredential
+metadata:
+  name: gitea
+  namespace: gitea
+spec:
+  serviceAccountName: gitea
+  secretName: gitea-smtp
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: MailPolicy
+metadata:
+  name: gitea-mail
+  namespace: gitea
+spec:
+  subjects:
+    - serviceAccount: { name: gitea }
+  backendRef:
+    name: corporate-smtp
+    kind: ClusterMailBackend
+  senderRestrictions:
+    allowedSenders: ["gitea@example.com"]
+  rateLimits:
+    messagesPerMinute: 30
+    messagesPerHour: 500

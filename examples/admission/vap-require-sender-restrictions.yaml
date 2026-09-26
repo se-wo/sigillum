@@ -1,0 +1,34 @@
+# Every MailPolicy must restrict its senders (US-5.7). Without
+# senderRestrictions a policy lets its ServiceAccounts send under any
+# address. Narrow the binding with a namespaceSelector to apply it to
+# production namespaces only.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: sigillum-require-sender-restrictions
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [sigillum.dev]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [mailpolicies]
+  validations:
+    - expression: >-
+        has(object.spec.senderRestrictions) &&
+        has(object.spec.senderRestrictions.allowedSenders) &&
+        size(object.spec.senderRestrictions.allowedSenders) > 0
+      message: MailPolicy must list its allowed senders in spec.senderRestrictions.allowedSenders
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: sigillum-require-sender-restrictions
+spec:
+  policyName: sigillum-require-sender-restrictions
+  validationActions: [Deny]
+  # matchResources:
+  #   namespaceSelector:
+  #     matchLabels: { environment: production }

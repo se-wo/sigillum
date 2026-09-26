@@ -1,0 +1,27 @@
+# Keycloak realm email (password reset, verification). Username:
+# keycloak.keycloak, Secret: keycloak-smtp.
+apiVersion: sigillum.dev/v1alpha1
+kind: MailCredential
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  serviceAccountName: keycloak
+  secretName: keycloak-smtp
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: MailPolicy
+metadata:
+  name: keycloak-mail
+  namespace: keycloak
+spec:
+  subjects:
+    - serviceAccount: { name: keycloak }
+  backendRef:
+    name: corporate-smtp
+    kind: ClusterMailBackend
+  senderRestrictions:
+    allowedSenders: ["noreply@example.com"]
+  rateLimits:
+    messagesPerMinute: 30
+    messagesPerHour: 500

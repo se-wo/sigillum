@@ -1,0 +1,30 @@
+# Mailgun SMTP. Use smtp.eu.mailgun.org for EU domains. The username is an
+# SMTP credential of the sending domain.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mailgun-smtp
+  namespace: sigillum-system
+type: Opaque
+stringData:
+  username: "postmaster@mg.example.com"
+  password: "REPLACE-ME"   # set out of band; do not commit
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: ClusterMailBackend
+metadata:
+  name: mailgun
+spec:
+  type: smtp
+  smtp:
+    endpoints:
+      - host: smtp.mailgun.org
+        port: 587
+        tls: starttls
+    authType: PLAIN
+    credentialsRef:
+      name: mailgun-smtp
+      namespace: sigillum-system
+    connectionTimeoutSeconds: 10
+  healthCheck:
+    intervalSeconds: 300

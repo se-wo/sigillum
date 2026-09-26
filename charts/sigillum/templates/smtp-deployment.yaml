@@ -19,7 +19,7 @@ spec:
     spec:
       serviceAccountName: {{ include "sigillum.smtp.fullname" . }}
       automountServiceAccountToken: true
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: {{ .Values.smtp.terminationGracePeriodSeconds }}
       securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: sigillum
@@ -32,15 +32,20 @@ spec:
             - --domain={{ .Values.smtp.domain }}
             - --auth-modes={{ join "," .Values.smtp.authModes }}
             - --allow-insecure-auth={{ include "sigillum.smtp.allowInsecureAuth" . }}
+            {{- if has "credential" .Values.smtp.authModes }}
+            - --allow-insecure-credential-auth={{ include "sigillum.smtp.allowInsecureCredentialAuth" . }}
+            {{- end }}
             - --max-message-bytes={{ int64 .Values.smtp.maxMessageBytes }}
             - --max-recipients={{ .Values.smtp.maxRecipients }}
             - --token-audience={{ .Values.api.tokenAudience }}
             - --token-cache-size={{ .Values.api.tokenCacheSize }}
             - --token-cache-ttl={{ .Values.api.tokenCacheTTL }}
             - --shutdown-timeout={{ .Values.smtp.shutdownTimeout }}
+            - --shutdown-delay={{ .Values.smtp.shutdownDelay }}
             - --send-timeout={{ .Values.smtp.sendTimeout }}
             - --max-concurrent-messages={{ .Values.smtp.maxConcurrentMessages }}
             - --audit-log={{ .Values.audit.output }}
+            {{- include "sigillum.commonArgs" . | nindent 12 }}
             {{- include "sigillum.ratelimitArgs" . | nindent 12 }}
             {{- range .Values.smtp.extraArgs }}
             - {{ . }}

@@ -32,13 +32,21 @@ type Event struct {
 	Namespace      string    `json:"namespace,omitempty"`
 	ServiceAccount string    `json:"service_account,omitempty"`
 	AuthMethod     string    `json:"auth_method,omitempty"`
-	Transport      string    `json:"transport"`
-	From           string    `json:"from,omitempty"`
-	To             []string  `json:"to"`
-	Policy         string    `json:"policy,omitempty"`
-	Backend        string    `json:"backend,omitempty"`
-	Decision       Decision  `json:"decision"`
-	Reason         string    `json:"reason,omitempty"`
+	// Credential is the MailCredential username (auth_method
+	// smtp_credential only).
+	Credential string `json:"credential,omitempty"`
+	// CredentialPrevious marks a login with the previous password of a
+	// rotated credential, still inside its grace period, so stragglers can
+	// be found before it ends.
+	CredentialPrevious bool     `json:"credential_previous,omitempty"`
+	Cluster            string   `json:"cluster,omitempty"`
+	Transport          string   `json:"transport"`
+	From               string   `json:"from,omitempty"`
+	To                 []string `json:"to"`
+	Policy             string   `json:"policy,omitempty"`
+	Backend            string   `json:"backend,omitempty"`
+	Decision           Decision `json:"decision"`
+	Reason             string   `json:"reason,omitempty"`
 }
 
 // Logger records audit events. Implementations must be safe for concurrent use.
@@ -83,6 +91,25 @@ func (l *JSONLogger) Record(e Event) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	_, _ = l.w.Write(b)
+}
+
+// WithCluster sets the cluster field (--cluster-name, US-4.5) on every
+// record written through l. An empty name returns l unchanged.
+func WithCluster(l Logger, cluster string) Logger {
+	if cluster == "" {
+		return l
+	}
+	return clusterLogger{l, cluster}
+}
+
+type clusterLogger struct {
+	Logger
+	cluster string
+}
+
+func (c clusterLogger) Record(e Event) {
+	e.Cluster = c.cluster
+	c.Logger.Record(e)
 }
 
 // FromFlag builds a Logger from the --audit-log flag value:

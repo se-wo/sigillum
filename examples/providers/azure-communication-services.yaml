@@ -1,0 +1,47 @@
+# Azure Communication Services (ACS) Email via SMTP, authenticated with a
+# Microsoft Entra application instead of a mailbox password. Works for
+# tenants without SMTP AUTH Basic authentication.
+#
+# Setup (Azure portal or CLI):
+#   1. An Email Communication Service with a verified (custom) domain,
+#      connected to a Communication Services resource.
+#   2. An Entra app registration with a client secret, granted the
+#      "Communication and Email Service Owner" role on the Communication
+#      Services resource (or a custom role with
+#      Microsoft.Communication/CommunicationServices/Read and /Write and
+#      Microsoft.Communication/EmailServices/write).
+#   3. Username: an SMTP Username resource on the Communication Services
+#      resource (email format, in a linked domain), or
+#      "<communication-resource-name>.<application-id>.<tenant-id>".
+#      The latter is 70 to 90 characters long.
+#   4. Password: the app's client secret. Client secrets expire (24 months
+#      at most); rotate the Secret below before that, for example with
+#      External Secrets from Key Vault.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: azure-communication-services-smtp
+  namespace: sigillum-system
+type: Opaque
+stringData:
+  username: "noreply@mail.example.com"   # SMTP Username resource, or <resource>.<app-id>.<tenant-id>
+  password: "REPLACE-ME"                 # Entra client secret; set out of band
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: ClusterMailBackend
+metadata:
+  name: azure-communication-services
+spec:
+  type: smtp
+  smtp:
+    endpoints:
+      - host: smtp.azurecomm.net
+        port: 587
+        tls: starttls
+    authType: LOGIN
+    credentialsRef:
+      name: azure-communication-services-smtp
+      namespace: sigillum-system
+    connectionTimeoutSeconds: 10
+  healthCheck:
+    intervalSeconds: 300

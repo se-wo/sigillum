@@ -1,0 +1,30 @@
+# Postmark SMTP. Username and password are both the Server API token, or use
+# a dedicated SMTP token (access key as username, secret key as password).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postmark-smtp
+  namespace: sigillum-system
+type: Opaque
+stringData:
+  username: "REPLACE-ME"   # the Server API token, like the password
+  password: "REPLACE-ME"   # set out of band, never commit it
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: ClusterMailBackend
+metadata:
+  name: postmark
+spec:
+  type: smtp
+  smtp:
+    endpoints:
+      - host: smtp.postmarkapp.com
+        port: 587
+        tls: starttls
+    authType: PLAIN
+    credentialsRef:
+      name: postmark-smtp
+      namespace: sigillum-system
+    connectionTimeoutSeconds: 10
+  healthCheck:
+    intervalSeconds: 300

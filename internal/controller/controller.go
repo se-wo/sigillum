@@ -1,12 +1,15 @@
 // Package controller hosts the controller-runtime manager that reconciles
-// MailBackend, ClusterMailBackend and MailPolicy and serves the validating
+// MailBackend, ClusterMailBackend, MailPolicy and MailCredential and serves the validating
 // admission webhooks.
 package controller
 
 import (
+	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -19,6 +22,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	"github.com/se-wo/sigillum/internal/crdcheck"
+	"github.com/se-wo/sigillum/internal/credential"
+	"github.com/se-wo/sigillum/internal/kubecache"
 	whv1 "github.com/se-wo/sigillum/internal/webhook"
 
 	// pull in the SMTP driver so the registry has it at startup
@@ -47,13 +53,23 @@ func Run(logger *slog.Logger) error {
 func init() {
 	run = func(_ *slog.Logger) error {
 		var (
-			metricsAddr           string
-			probeAddr             string
-			webhookPort           int
-			enableLeaderElection  bool
-			leaderElectionID      string
-			webhookCertDir        string
-			disableWebhook        bool
+			metricsAddr          string
+			probeAddr            string
+			webhookPort          int
+			enableLeaderElection bool
+			leaderElectionID     string
+			webhookCertDir       string
+			disableWebhook       bool
+			clusterName          string
+			secretNamespaces     string
+			credentialsGenerated bool
+			credentialExclude    string
+			credentialGuardName  string
+			credentialGuardCheck time.Duration
+			serviceAccountName   string
+			credentialSMTPHost   string
+			credentialSMTPPort   int
+			skipCRDCheck         bool
 		)
 		fs := flag.NewFlagSet("controller", flag.ContinueOnError)
 		// --mode is consumed by the entrypoint; accept it here so Parse does
@@ -66,14 +82,41 @@ func init() {
 		fs.StringVar(&leaderElectionID, "leader-elect-id", "sigillum-controller.sigillum.dev", "leader election lock name")
 		fs.StringVar(&webhookCertDir, "webhook-cert-dir", "/etc/sigillum/webhook-tls", "directory holding webhook tls.crt and tls.key")
 		fs.BoolVar(&disableWebhook, "disable-webhook", false, "disable the validating webhook server")
+		fs.StringVar(&clusterName, "cluster-name", "", "cluster name added to every log line (US-4.5)")
+		fs.StringVar(&secretNamespaces, "secret-namespaces", "", "comma-separated namespaces whose Secrets may be read (backend credentials); default: the pod's namespace")
+		fs.BoolVar(&credentialsGenerated, "credentials-generated", false, "issue generated MailCredential passwords into Secrets; needs the credential Secret guard, POD_NAMESPACE and the ServiceAccount name (the chart sets all of them)")
+		fs.StringVar(&credentialExclude, "credential-exclude-namespaces", "kube-*", "comma-separated namespaces (exact, or prefixes ending in *) that may not hold MailCredentials; the pod's namespace is always excluded")
+		fs.StringVar(&credentialGuardName, "credential-guard-name", "sigillum-credential-guard", "name of the credential Secret guard ValidatingAdmissionPolicy and binding")
+		fs.DurationVar(&credentialGuardCheck, "credential-guard-check-interval", 5*time.Minute, "how often the credential Secret guard is re-verified")
+		fs.StringVar(&serviceAccountName, "service-account-name", os.Getenv("POD_SERVICE_ACCOUNT"), "the controller's own ServiceAccount (the guard only applies to it)")
+		fs.StringVar(&credentialSMTPHost, "credential-smtp-host", "", "SMTP proxy host written into generated credential Secrets")
+		fs.IntVar(&credentialSMTPPort, "credential-smtp-port", 587, "SMTP proxy port written into generated credential Secrets")
+		fs.BoolVar(&skipCRDCheck, "skip-crd-check", false, crdcheck.SkipFlagUsage)
 
 		// Allow flags to be passed after --mode=controller.
 		if err := fs.Parse(os.Args[1:]); err != nil && err != flag.ErrHelp {
 			return err
 		}
 
-		ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
+		if credentialGuardCheck <= 0 {
+			return fmt.Errorf("--credential-guard-check-interval must be positive, got %s", credentialGuardCheck)
+		}
+
+		zlog := zap.New(zap.UseDevMode(false))
+		if clusterName != "" {
+			zlog = zlog.WithValues("cluster", clusterName)
+		}
+		ctrl.SetLogger(zlog)
 		setupLog := log.Log.WithName("setup")
+
+		releaseNs := os.Getenv("POD_NAMESPACE")
+		exclusions := credential.ParseExclusions(credentialExclude, releaseNs)
+		if err := exclusions.Validate(); err != nil {
+			return fmt.Errorf("--credential-exclude-namespaces: %w", err)
+		}
+		if credentialSMTPPort < 1 || credentialSMTPPort > 65535 {
+			return fmt.Errorf("--credential-smtp-port must be between 1 and 65535, got %d", credentialSMTPPort)
+		}
 
 		opts := ctrl.Options{
 			Scheme:                  scheme,
@@ -81,8 +124,9 @@ func init() {
 			HealthProbeBindAddress:  probeAddr,
 			LeaderElection:          enableLeaderElection,
 			LeaderElectionID:        leaderElectionID,
-			LeaderElectionNamespace: os.Getenv("POD_NAMESPACE"),
+			LeaderElectionNamespace: releaseNs,
 		}
+		kubecache.RestrictSecretCache(&opts.Cache, kubecache.SecretNamespaces(secretNamespaces))
 		if !disableWebhook {
 			opts.WebhookServer = webhook.NewServer(webhook.Options{
 				Port:    webhookPort,
@@ -90,7 +134,16 @@ func init() {
 			})
 		}
 
-		mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), opts)
+		cfg, err := ctrl.GetConfig()
+		if err != nil {
+			return err
+		}
+		if !skipCRDCheck {
+			if err := crdcheck.Wait(context.Background(), cfg, crdcheck.Required, crdcheck.Timeout); err != nil {
+				return err
+			}
+		}
+		mgr, err := ctrl.NewManager(cfg, opts)
 		if err != nil {
 			return err
 		}
@@ -105,6 +158,42 @@ func init() {
 			return err
 		}
 
+		credReconciler := &MailCredentialReconciler{
+			Client:           mgr.GetClient(),
+			APIReader:        mgr.GetAPIReader(),
+			Exclusions:       exclusions,
+			GeneratedEnabled: credentialsGenerated,
+			SMTPHost:         credentialSMTPHost,
+			SMTPPort:         int32(credentialSMTPPort),
+		}
+		if credentialsGenerated {
+			if releaseNs == "" || serviceAccountName == "" {
+				return fmt.Errorf("--credentials-generated needs POD_NAMESPACE and --service-account-name to verify the credential Secret guard")
+			}
+			guard := credential.Guard{
+				Name:               credentialGuardName,
+				ControllerUsername: "system:serviceaccount:" + releaseNs + ":" + serviceAccountName,
+				Exclusions:         exclusions,
+			}
+			checker := NewGuardChecker(guard, mgr.GetAPIReader(), mgr.GetClient(), credentialGuardCheck,
+				log.Log.WithName("credential-guard"))
+			// Verify before any reconciler runs, so none acts on an
+			// unknown verdict.
+			checkCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			checker.Check(checkCtx)
+			cancel()
+			if err := mgr.Add(checker); err != nil {
+				return err
+			}
+			if err := mgr.Add(checker.Requeuer()); err != nil {
+				return err
+			}
+			credReconciler.Guard = checker
+		}
+		if err := credReconciler.SetupWithManager(mgr); err != nil {
+			return err
+		}
+
 		if !disableWebhook {
 			if err := whv1.SetupMailBackendWebhook(mgr); err != nil {
 				return err
@@ -115,6 +204,12 @@ func init() {
 			if err := whv1.SetupMailPolicyWebhook(mgr); err != nil {
 				return err
 			}
+			if err := whv1.SetupMailCredentialWebhook(mgr, &whv1.MailCredentialValidator{
+				Exclusions:       exclusions,
+				GeneratedEnabled: credentialsGenerated,
+			}); err != nil {
+				return err
+			}
 		}
 
 		if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
@@ -123,7 +218,8 @@ func init() {
 		if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
 			return err
 		}
-		setupLog.Info("starting controller manager")
+		setupLog.Info("starting controller manager", "credentials_generated", credentialsGenerated,
+			"credential_exclude_namespaces", credentialExclude)
 		return mgr.Start(ctrl.SetupSignalHandler())
 	}
 }

@@ -41,6 +41,18 @@ func SetupClusterMailBackendWebhook(mgr ctrl.Manager) error {
 		Complete()
 }
 
+// NewMailBackendValidator returns the validator for namespace-scoped
+// MailBackends (used by tests outside this package).
+func NewMailBackendValidator() *MailBackendValidator[*sigv1.MailBackend] {
+	return &MailBackendValidator[*sigv1.MailBackend]{clusterScoped: false}
+}
+
+// NewClusterMailBackendValidator returns the validator for
+// ClusterMailBackends.
+func NewClusterMailBackendValidator() *MailBackendValidator[*sigv1.ClusterMailBackend] {
+	return &MailBackendValidator[*sigv1.ClusterMailBackend]{clusterScoped: true}
+}
+
 // compile-time interface assertions
 var (
 	_ admission.Validator[*sigv1.MailBackend]        = &MailBackendValidator[*sigv1.MailBackend]{}

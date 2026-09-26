@@ -155,6 +155,39 @@ Arg: dict "root" $ "service" "<service name>".
 {{- end }}
 
 {{/*
+Common args of the mail-sending components: cluster name and the namespaces
+whose Secrets may be read (release namespace + rbac.allowedSecretNamespaces).
+*/}}
+{{- define "sigillum.commonArgs" -}}
+{{- with .Values.clusterName }}
+- --cluster-name={{ . }}
+{{- end }}
+- --secret-namespaces={{ prepend .Values.rbac.allowedSecretNamespaces .Release.Namespace | uniq | join "," }}
+{{- end }}
+
+{{/*
+True (non-empty) when generated MailCredentials are enabled. The
+controller's Secret-write permission is only ever rendered together with the
+credential Secret guard.
+*/}}
+{{- define "sigillum.credentials.guarded" -}}
+{{- if and .Values.controller.enabled .Values.credentials.enabled -}}
+true
+{{- end -}}
+{{- end }}
+
+{{- define "sigillum.credentials.guardName" -}}
+{{ include "sigillum.fullname" . }}-credential-guard
+{{- end }}
+
+{{/*
+Host written into generated credential Secrets.
+*/}}
+{{- define "sigillum.credentials.smtpHost" -}}
+{{- default (printf "%s.%s.svc" (include "sigillum.smtp.fullname" .) .Release.Namespace) .Values.credentials.smtpHost -}}
+{{- end }}
+
+{{/*
 Effective smtp.allowInsecureAuth: an explicit true/false wins, unset follows
 TLS (insecure AUTH only while no STARTTLS certificate is configured).
 */}}
@@ -164,4 +197,12 @@ TLS (insecure AUTH only while no STARTTLS certificate is configured).
 {{- else -}}
 {{- empty .Values.smtp.tls.secretName -}}
 {{- end -}}
+{{- end }}
+
+{{/*
+AUTH PLAIN / LOGIN with MailCredentials needs TLS; plaintext only with an
+explicit smtp.allowInsecureAuth: true (null, the default, does not count).
+*/}}
+{{- define "sigillum.smtp.allowInsecureCredentialAuth" -}}
+{{- and (kindIs "bool" .Values.smtp.allowInsecureAuth) .Values.smtp.allowInsecureAuth -}}
 {{- end }}

@@ -312,10 +312,13 @@ func TestSend_TransientFailureRefundsRateLimit(t *testing.T) {
 	}
 
 	permanent := &fakeDriver{err: fmt.Errorf("%w: 550 no such user", driver.ErrUpstreamPermanent)}
-	g2, _ := newGateway(t, permanent, testPolicy(), readyBackend("relay", true))
+	g2, rec := newGateway(t, permanent, testPolicy(), readyBackend("relay", true))
 	g2.Limiter = lim
 	if res := g2.Send(context.Background(), request("app@team.example")); !res.Permanent {
 		t.Fatalf("unexpected result %+v", res)
+	}
+	if ev := rec.last(t); ev.Reason != "upstream_rejected" {
+		t.Fatalf("permanent rejection must be audited as upstream_rejected, got %q", ev.Reason)
 	}
 	if lim.hits != 1 {
 		t.Fatalf("permanent rejection stays charged, want 1 hit, got %d", lim.hits)
@@ -345,5 +348,21 @@ func TestSend_SALookupFailureFailsClosed(t *testing.T) {
 	g, _ := newGateway(t, &fakeDriver{}, p, readyBackend("relay", true))
 	if res := g.Send(context.Background(), request("app@team.example")); res.Status != StatusDenied {
 		t.Fatalf("negative selector must not match when the SA lookup fails, got %+v", res)
+	}
+}
+
+func TestSend_CredentialIdentityIsAudited(t *testing.T) {
+	g, rec := newGateway(t, &fakeDriver{}, testPolicy(), readyBackend("relay", true))
+	req := request("app@team.example")
+	req.Transport = TransportSMTP
+	req.Identity.AuthMethod = AuthSMTPCredential
+	req.Identity.Credential = "grafana.team"
+	req.Identity.CredentialPrevious = true
+	if res := g.Send(context.Background(), req); res.Status != StatusAccepted {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	ev := rec.last(t)
+	if ev.AuthMethod != AuthSMTPCredential || ev.Credential != "grafana.team" || !ev.CredentialPrevious {
+		t.Fatalf("credential identity missing from audit record: %+v", ev)
 	}
 }

@@ -1,16 +1,21 @@
 //go:build e2e
 
 // Package e2e runs an end-to-end smoke test against a kind cluster:
-//   1. Assumes a kind cluster is up and the sigillum image is loaded
-//      (both driven by `helm/kind-action` + `make kind-load` in CI).
-//   2. Installs Mailpit (a disposable SMTP sink) into the cluster.
-//   3. Helm-installs the local chart with a ClusterMailBackend pointing at
-//      Mailpit and a permissive MailPolicy.
-//   4. Creates a ServiceAccount, mints a TokenRequest for it, and POSTs a
-//      message to the api-server.
-//   5. Asserts the message landed in Mailpit's HTTP inbox and was audited.
-//   6. Sends a second message through the SMTP proxy with AUTH OAUTHBEARER,
-//      checks a spoofed header From is refused, and asserts delivery.
+//  1. Assumes a kind cluster is up and the sigillum image is loaded
+//     (both driven by `helm/kind-action` + `make kind-load` in CI).
+//  2. Installs Mailpit (a disposable SMTP sink) into the cluster.
+//  3. Helm-installs the local chart with a ClusterMailBackend pointing at
+//     Mailpit and a permissive MailPolicy.
+//  4. Creates a ServiceAccount, mints a TokenRequest for it, and POSTs a
+//     message to the api-server.
+//  5. Asserts the message landed in Mailpit's HTTP inbox and was audited.
+//  6. Sends a second message through the SMTP proxy with AUTH OAUTHBEARER,
+//     checks a spoofed header From is refused, and asserts delivery.
+//  7. Issues a generated MailCredential, sends with AUTH PLAIN using the
+//     password from the controller-written Secret, rotates it, and checks
+//     that old (grace period) and new password both work (US-3.7).
+//  8. Applies the require-sender-restrictions admission recipe and checks
+//     that it refuses a MailPolicy without senders (US-5.7).
 //
 // All kubectl/helm calls shell out — this keeps the test independent of the
 // specific go kube client generation used in the rest of the code base and
@@ -19,6 +24,7 @@ package e2e
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +44,7 @@ import (
 const (
 	namespace  = "sigillum-e2e"
 	mailpitNS  = "mailpit"
+	appsNS     = "sigillum-e2e-apps"
 	chartPath  = "charts/sigillum"
 	imageRepo  = "ghcr.io/se-wo/sigillum"
 	imageTag   = "ci"
@@ -78,6 +85,11 @@ func TestE2E_Smoke(t *testing.T) {
 		"--set", "api.tokenAudience=sigillum",
 		"--set", "smtp.enabled=true",
 		"--set", "smtp.replicas=1",
+		"--set", "smtp.authModes={oauthbearer,credential}",
+		// No STARTTLS certificate in e2e: allow credential logins in
+		// plaintext (only ever over the port-forward).
+		"--set", "smtp.allowInsecureAuth=true",
+		"--set", "clusterName=e2e",
 		"--wait", "--timeout", "180s",
 	)
 
@@ -149,7 +161,7 @@ func TestE2E_Smoke(t *testing.T) {
 		}
 		for _, line := range strings.Split(out, "\n") {
 			if strings.Contains(line, `"stream":"audit"`) && strings.Contains(line, `"decision":"accept"`) &&
-				strings.Contains(line, `"service_account":"billing-mailer"`) {
+				strings.Contains(line, `"service_account":"billing-mailer"`) && strings.Contains(line, `"cluster":"e2e"`) {
 				return nil
 			}
 		}
@@ -185,6 +197,165 @@ func TestE2E_Smoke(t *testing.T) {
 	}
 	_ = c.Quit()
 	waitForMailpit(t, "e2e smtp hello")
+
+	testMailCredential(t, root)
+	testAdmissionRecipe(t, root)
+}
+
+// testMailCredential covers generated MailCredentials end to end: the
+// controller writes the Secret (through the credential Secret guard), the
+// proxy accepts AUTH PLAIN with it, and a rotation keeps the old password
+// valid for the grace period.
+func testMailCredential(t *testing.T, root string) {
+	// The release namespace never holds MailCredentials; use an app namespace.
+	run(t, root, "kubectl", "create", "namespace", appsNS)
+	t.Cleanup(func() {
+		run(t, root, "kubectl", "delete", "namespace", appsNS, "--ignore-not-found", "--wait=false")
+	})
+	run(t, root, "kubectl", "-n", appsNS, "create", "serviceaccount", "grafana")
+	apply(t, root, credentialManifest)
+	secretPassword := func() string {
+		t.Helper()
+		var pw string
+		if err := pollUntil(120*time.Second, func() error {
+			out, err := runOut(t, root, "kubectl", "-n", appsNS, "get", "secret", "grafana-smtp",
+				"-o", "jsonpath={.data.password}")
+			if err != nil || strings.TrimSpace(out) == "" {
+				return fmt.Errorf("secret not written yet: %v", err)
+			}
+			b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
+			pw = string(b)
+			return err
+		}); err != nil {
+			out, _ := runOut(t, root, "kubectl", "-n", appsNS, "get", "mailcredential", "grafana", "-o", "yaml")
+			t.Fatalf("credential Secret: %v\n%s", err, out)
+		}
+		return pw
+	}
+	waitReady := func() {
+		t.Helper()
+		if err := pollUntil(60*time.Second, func() error {
+			out, err := runOut(t, root, "kubectl", "-n", appsNS, "get", "mailcredential", "grafana",
+				"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+			if err != nil || strings.TrimSpace(out) != "True" {
+				return fmt.Errorf("not ready: %q %v", out, err)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("MailCredential never became Ready: %v", err)
+		}
+	}
+	waitReady()
+	first := secretPassword()
+	user := "grafana." + appsNS
+
+	sendAs := func(password, subject string) error {
+		c, err := smtp.Dial("127.0.0.1:" + smtpPort)
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		if err := c.Auth(sasl.NewPlainClient("", user, password)); err != nil {
+			return fmt.Errorf("AUTH PLAIN: %w", err)
+		}
+		msg := "From: grafana@example.com\r\nTo: bob@noreply.example.com\r\nSubject: " + subject + "\r\n\r\nvia credential\r\n"
+		if err := smtpSend(c, "grafana@example.com", "bob@noreply.example.com", msg); err != nil {
+			return err
+		}
+		return c.Quit()
+	}
+	if err := pollUntil(30*time.Second, func() error { return sendAs(first, "e2e credential hello") }); err != nil {
+		t.Fatalf("send with MailCredential: %v", err)
+	}
+	waitForMailpit(t, "e2e credential hello")
+	if err := sendAs("wrong-password", "never"); err == nil {
+		t.Fatal("a wrong password must be refused")
+	}
+
+	// allowedRecipients: a listed mailbox and a glob match pass, another
+	// mailbox in the same domain is refused (issue #6).
+	sendTo := func(rcpt, subject string) error {
+		c, err := smtp.Dial("127.0.0.1:" + smtpPort)
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		if err := c.Auth(sasl.NewPlainClient("", user, first)); err != nil {
+			return fmt.Errorf("AUTH PLAIN: %w", err)
+		}
+		msg := "From: grafana@example.com\r\nTo: " + rcpt + "\r\nSubject: " + subject + "\r\n\r\nrecipient check\r\n"
+		if err := smtpSend(c, "grafana@example.com", rcpt, msg); err != nil {
+			return err
+		}
+		return c.Quit()
+	}
+	if err := sendTo("pager@oncall.example.com", "e2e glob recipient"); err != nil {
+		t.Fatalf("glob-matched recipient must be accepted: %v", err)
+	}
+	waitForMailpit(t, "e2e glob recipient")
+	var se *smtp.SMTPError
+	if err := sendTo("eve@noreply.example.com", "never"); !errors.As(err, &se) || se.Code != 550 {
+		t.Fatalf("mailbox outside allowedRecipients must be refused with 550, got %v", err)
+	}
+
+	// Rotate on demand; both passwords work during the grace period.
+	run(t, root, "kubectl", "-n", appsNS, "annotate", "mailcredential", "grafana", "sigillum.dev/rotate=1", "--overwrite")
+	var second string
+	if err := pollUntil(60*time.Second, func() error {
+		second = secretPassword()
+		if second == first {
+			return fmt.Errorf("not rotated yet")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("rotation: %v", err)
+	}
+	waitReady()
+	if err := pollUntil(30*time.Second, func() error { return sendAs(second, "e2e rotated hello") }); err != nil {
+		t.Fatalf("send with rotated password: %v", err)
+	}
+	if err := sendAs(first, "e2e previous hello"); err != nil {
+		t.Fatalf("previous password must work during the grace period: %v", err)
+	}
+	waitForMailpit(t, "e2e previous hello")
+
+	if err := pollUntil(30*time.Second, func() error {
+		out, err := runOut(t, root, "kubectl", "-n", namespace, "logs", "-l", "app.kubernetes.io/component=smtp", "--tail=-1")
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, `"stream":"audit"`) && strings.Contains(line, `"auth_method":"smtp_credential"`) &&
+				strings.Contains(line, `"credential_previous":true`) && strings.Contains(line, `"decision":"accept"`) {
+				return nil
+			}
+		}
+		return fmt.Errorf("no audit record for the previous password yet")
+	}); err != nil {
+		t.Fatalf("audit stream: %v", err)
+	}
+}
+
+// testAdmissionRecipe applies examples/admission/vap-require-sender-restrictions.yaml.
+func testAdmissionRecipe(t *testing.T, root string) {
+	recipe := filepath.Join(root, "examples", "admission", "vap-require-sender-restrictions.yaml")
+	run(t, root, "kubectl", "apply", "-f", recipe)
+	t.Cleanup(func() { run(t, root, "kubectl", "delete", "-f", recipe, "--ignore-not-found") })
+	if err := pollUntil(60*time.Second, func() error {
+		cmd := exec.Command("kubectl", "apply", "--dry-run=server", "-f", "-")
+		cmd.Dir = root
+		cmd.Stdin = strings.NewReader(noSendersPolicyManifest)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return fmt.Errorf("policy without senders was admitted")
+		}
+		if !strings.Contains(string(out), "allowedSenders") {
+			return fmt.Errorf("unexpected error: %v: %s", err, out)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("admission recipe: %v", err)
+	}
 }
 
 func smtpSend(c *smtp.Client, from, to, msg string) error {
@@ -392,6 +563,54 @@ spec:
       tls: none
     authType: NONE
     connectionTimeoutSeconds: 5
+`
+
+const credentialManifest = `---
+apiVersion: sigillum.dev/v1alpha1
+kind: MailCredential
+metadata:
+  name: grafana
+  namespace: sigillum-e2e-apps
+spec:
+  serviceAccountName: grafana
+  secretName: grafana-smtp
+  rotation:
+    gracePeriod: 1h
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: MailPolicy
+metadata:
+  name: grafana
+  namespace: sigillum-e2e-apps
+spec:
+  subjects:
+  - serviceAccount:
+      name: grafana
+  backendRef:
+    name: mailpit
+    kind: ClusterMailBackend
+  senderRestrictions:
+    allowedSenders:
+    - grafana@example.com
+  recipientRestrictions:        # issue #6: single mailboxes and domain globs
+    allowedRecipients:
+    - bob@noreply.example.com
+    - "*@oncall.example.com"
+`
+
+const noSendersPolicyManifest = `---
+apiVersion: sigillum.dev/v1alpha1
+kind: MailPolicy
+metadata:
+  name: no-senders
+  namespace: sigillum-e2e
+spec:
+  subjects:
+  - serviceAccount:
+      name: billing-mailer
+  backendRef:
+    name: mailpit
+    kind: ClusterMailBackend
 `
 
 const policyManifest = `---

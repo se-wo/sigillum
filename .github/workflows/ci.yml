@@ -85,7 +85,11 @@ jobs:
         run: chmod +x bin/sigillum
       - uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
-          version: v0.23.0
+          # Test on a current Kubernetes (the chart supports >= 1.32, see
+          # kubeVersion in charts/sigillum/Chart.yaml). The node image is the
+          # one kind v0.33.0 was released with, pinned by digest.
+          version: v0.33.0
+          node_image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
           cluster_name: kind
       - name: build image
         run: docker build -f Dockerfile.ci -t ghcr.io/se-wo/sigillum:ci .

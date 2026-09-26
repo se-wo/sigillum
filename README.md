@@ -5,15 +5,18 @@ their ServiceAccount token, POST JSON to the api-server, and Sigillum applies a
 declarative `MailPolicy` (sender/recipient allowlists, size limits, rate limits)
 before forwarding through a `MailBackend` (SMTP) relay.
 
-- **Custom resources:** `MailBackend`, `ClusterMailBackend`, `MailPolicy`
+- **Custom resources:** `MailBackend`, `ClusterMailBackend`, `MailPolicy`,
+  `MailCredential`
 - **Transports:** REST (`POST /v1/messages`) and an optional SMTP submission
-  proxy for legacy workloads
+  proxy for legacy workloads and off-the-shelf apps
 - **Auth:** projected ServiceAccount tokens, verified via `TokenReview`
-  (REST: `Authorization: Bearer`, SMTP: `AUTH OAUTHBEARER`); opt-in pod-IP
-  fallback for SMTP clients that cannot authenticate
-- **Policy:** sender allowlists (envelope and header), recipient domain
-  allow/denylists, size and recipient limits, sliding-window rate limits
-  (in-memory or Redis for multi-replica deployments)
+  (REST: `Authorization: Bearer`, SMTP: `AUTH OAUTHBEARER`); Sigillum-issued
+  SMTP usernames and passwords bound to a ServiceAccount (`AUTH PLAIN` /
+  `LOGIN`); opt-in pod-IP fallback for SMTP clients that cannot authenticate
+- **Policy:** sender allowlists (envelope and header), recipient domain and
+  address allowlists and domain denylists, size and recipient limits,
+  sliding-window rate limits (in-memory or Redis for multi-replica
+  deployments)
 - **Drivers:** SMTP (STARTTLS, PLAIN/LOGIN/CRAM-MD5). Microsoft
   Graph / SendGrid / Gmail are reserved enum values, not implemented.
 - **Observability:** structured slog (JSON), separate audit stream,
@@ -78,9 +81,10 @@ spec:
   backendRef: { name: corporate-smtp, kind: ClusterMailBackend }
   senderRestrictions:
     allowedSenders: ["noreply@example.com", "*@billing.example.com"]
-  recipientRestrictions:         # domain-wide: every mailbox in a listed domain
-    allowedDomains: ["example.com", "customer.example.com"]
-    blockedDomains: []            # denylist wins over allowlist
+  recipientRestrictions:
+    allowedDomains: ["example.com", "customer.example.com"]  # every mailbox in these domains
+    allowedRecipients: ["alerts@partner.example.org", "*@oncall.example.com"]  # plus single mailboxes / globs
+    blockedDomains: []            # denylist wins over both allowlists
   messageLimits:
     maxRecipients: 50
   rateLimits:
@@ -118,8 +122,47 @@ Messages need exactly one `From` field, and the null sender `<>` is refused.
 transfer-encoding overhead (an 8 MiB attachment counts as 8 MiB, as on the
 REST path); headers and MIME framing count on SMTP.
 Policy denials answer `550`, rate limits `421`, retryable upstream problems
-`451`. The message is relayed byte-for-byte with a `Received` header that
+`451`, permanent upstream rejections `554`. The message is relayed byte-for-byte with a `Received` header that
 carries the Sigillum message id.
+
+### SMTP credentials for off-the-shelf apps
+
+Grafana, Alertmanager, Gitea, Nextcloud, Keycloak and most other
+third-party software only take an SMTP username and password. Enable
+`smtp.authModes: [oauthbearer, credential]` (and STARTTLS via
+`smtp.tls.secretName`), then commit a `MailCredential` next to the app's
+`MailPolicy`:
+
+```yaml
+apiVersion: sigillum.dev/v1alpha1
+kind: MailCredential
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  serviceAccountName: grafana    # the identity policies see
+  secretName: grafana-smtp       # created by the controller
+  rotation:
+    interval: 90d                # optional; or annotate sigillum.dev/rotate=<anything new>
+    gracePeriod: 24h             # the previous password keeps working this long
+```
+
+The controller writes a random 256-bit password into the Secret
+`grafana-smtp` (`username`, `password`, `host`, `port`) and stores only its
+hash; nothing secret goes into Git. The app logs in as
+`grafana.monitoring` and is then treated exactly like the `grafana`
+ServiceAccount. Deleting the `MailCredential` revokes it immediately. Teams
+that bring their own Secret set `spec.passwordHash` (argon2id) instead of
+`secretName`.
+
+The controller may write
+Secrets in any namespace except `credentials.excludeNamespaces` (default
+`kube-*`) and the release namespace, and the chart confines that permission
+with a `ValidatingAdmissionPolicy` guard that only admits labelled Secrets
+owned by a `MailCredential`. The controller checks the guard and writes
+nothing while it is missing or changed. Passwords are only accepted over
+STARTTLS unless `smtp.allowInsecureAuth: true`. Per-app settings and TLS
+advice: [`examples/clients/`](examples/clients/).
 
 For clients that cannot do SASL at all, `smtp.authModes: [oauthbearer, podip]`
 identifies them by source pod IP. This is deliberately weak: it only matches
@@ -134,6 +177,55 @@ callers. STARTTLS is offered when `smtp.tls.secretName` is set.
 | Multi-replica rate limits | `rateLimit.backend=redis`, `rateLimit.redis.addrs`, optional `masterName` (Sentinel) and `existingSecret`. Fails closed (`503`) when Redis is down unless `rateLimit.failOpen=true`. |
 | Audit stream | One JSON line per request (accepted or rejected) on stdout, tagged `"stream":"audit"`; `audit.output: stdout\|stderr\|none`. Never contains subject or body. |
 | Tracing | `tracing.endpoint` (OTLP/HTTP, e.g. `http://otel-collector:4318`) plus the standard `OTEL_*` variables. Spans: `http.request` → `auth.tokenreview`, `policy.evaluate`, `ratelimit.allow`, `backend.send`. |
+| Several clusters | `clusterName: prod-eu` adds a `cluster` field to every audit record and log line and a `cluster` target label to the ServiceMonitor. |
+| Rolling updates | On SIGTERM a pod fails readiness for `shutdownDelay` (5s) while still serving, then drains for up to `shutdownTimeout` (25s); `terminationGracePeriodSeconds` is 35. |
+| Upstream errors (REST) | `502 upstream-error` is transient, retry with backoff; `422 upstream-rejected` means the relay refused this message for good. |
+| Backend credentials in other namespaces | List them in `rbac.allowedSecretNamespaces`; components only read Secrets there and in the release namespace. |
+
+## Recipes
+
+[`examples/`](examples/) holds tested configurations of standard tools
+rather than more Sigillum features: a local-development profile with
+Mailpit, NetworkPolicy/Cilium rules that block direct SMTP egress so
+Sigillum cannot be bypassed, admission policies (ValidatingAdmissionPolicy
+and Kyverno) for policy authors, backends for Microsoft 365 (including the
+options that survive the retirement of SMTP AUTH passwords), Azure
+Communication Services, Google Workspace, Amazon SES, Mailgun, Postmark and
+Brevo, MailCredential setups for common apps, and a Stakater Reloader recipe
+for credential rotation.
+
+## Upgrading
+
+Helm installs CRDs only on first install. Apply them before upgrading the
+release:
+
+```sh
+kubectl apply --server-side -f charts/sigillum/crds/
+helm upgrade sigillum ./charts/sigillum -n sigillum-system --reuse-values
+```
+
+All changes per release: [`CHANGELOG.md`](CHANGELOG.md) (also the notes of
+each [GitHub Release](https://github.com/se-wo/sigillum/releases)). Changes in
+0.3.0 that may need attention:
+
+- New CRD `MailCredential`, new field `recipientRestrictions.allowedRecipients`.
+  Apply the CRDs first. With the 0.2 CRDs the API server would drop
+  `allowedRecipients` without an error, and a policy restricted only by it
+  would allow every recipient that is not blocked. From 0.3.0 on, every
+  component checks the installed CRDs at startup and refuses to start
+  until they are updated, so the old pods keep serving.
+- REST: permanent upstream rejections answer `422 upstream-rejected`
+  instead of `502 upstream-error`; audit and metric reason
+  `upstream_rejected` on both transports.
+- The chart requires Kubernetes 1.32 or later (`kubeVersion`), the oldest
+  version still in (LTS) support.
+- With `credentials.enabled` (default), the controller gets cluster-wide
+  `create`/`patch` on Secrets, confined by the credential Secret guard. Set
+  `credentials.enabled=false` to opt out.
+- Components now read Secrets only from the release namespace and
+  `rbac.allowedSecretNamespaces` (a `MailBackend`'s credentials in another
+  namespace need that namespace listed, as the RBAC already required).
+- `terminationGracePeriodSeconds` is 35 for the api-server and SMTP proxy.
 
 ## Supply chain
 
@@ -195,23 +287,26 @@ api/v1alpha1/                  # CRD types + generated deepcopy
 internal/driver/               # Driver interface + registry
 internal/driver/smtp/          # SMTP driver (STARTTLS, PLAIN/LOGIN/CRAM-MD5, MIME)
 internal/policy/               # priority+tiebreak engine, sliding-window rate limit (memory, Redis)
+internal/credential/           # MailCredential usernames, hashing, verification, Secret guard
 internal/gateway/              # transport-agnostic send pipeline shared by REST and SMTP
 internal/apiserver/            # chi router, TokenReview auth, RFC-7807 problems
-internal/smtpproxy/            # SMTP submission proxy (OAUTHBEARER, pod-IP fallback)
+internal/smtpproxy/            # SMTP submission proxy (OAUTHBEARER, PLAIN/LOGIN credentials, pod-IP fallback)
 internal/audit/                # audit stream
-internal/controller/           # MailBackend / ClusterMailBackend / MailPolicy reconcilers
-internal/webhook/              # ValidatingWebhook for all three CRDs
+internal/controller/           # MailBackend / ClusterMailBackend / MailPolicy / MailCredential reconcilers
+internal/webhook/              # ValidatingWebhook for all four CRDs
 internal/telemetry/            # slog JSON logger, Prometheus registry, OpenTelemetry
 config/{crd,rbac,webhook}/     # generated manifests
 charts/sigillum/               # Helm chart (CRDs in crds/, api + controller + optional smtp)
+examples/                      # recipes: local dev, egress, admission, providers, clients, Reloader
+test/chart/, test/examples/    # chart rendering and recipe checks (helm, envtest)
+test/e2e/                      # kind + Mailpit end-to-end suite
 ```
 
 ## Not yet implemented
 
-Next up: Sigillum-issued SMTP credentials for apps that only speak
-`AUTH PLAIN`/`LOGIN`, per-address recipient allowlists, and tested egress and
-admission-policy recipes (v0.3.0); install without cert-manager, preflight and
-a `kubectl` plugin, dashboards and alerts (v0.4.0); OAuth (XOAUTH2) upstream
+Next up: install without cert-manager, preflight and a `kubectl` plugin
+(including `credential create` / `rotate`), SMTPS on port 465, an OpenAPI
+description, dashboards and alerts (v0.4.0); OAuth (XOAUTH2) upstream
 auth for Microsoft 365 and Google Workspace (v0.5.0). Sigillum stays below 1.0
 until it has production users. See the roadmap and feature decisions in
 [`docs/SPEC.md`](docs/SPEC.md#8-roadmap).

@@ -30,8 +30,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	"github.com/se-wo/sigillum/internal/credential"
 	whv1 "github.com/se-wo/sigillum/internal/webhook"
 )
+
+// testReleaseNamespace plays the Sigillum release namespace in the
+// credential tests; it is always excluded from mail credentials.
+const testReleaseNamespace = "sigillum-system-it"
+
+var testExclusions = credential.ParseExclusions("kube-*", testReleaseNamespace)
 
 var (
 	testEnv    *envtest.Environment
@@ -92,6 +99,12 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	if err := whv1.SetupMailPolicyWebhook(mgr); err != nil {
+		panic(err)
+	}
+	if err := whv1.SetupMailCredentialWebhook(mgr, &whv1.MailCredentialValidator{
+		Exclusions:       testExclusions,
+		GeneratedEnabled: true,
+	}); err != nil {
 		panic(err)
 	}
 

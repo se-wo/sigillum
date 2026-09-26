@@ -297,3 +297,95 @@ func TestMatch_NegativeSelectorFailsClosedWithoutLabels(t *testing.T) {
 		t.Fatal("resolved SA without the label should match a NotIn selector")
 	}
 }
+
+func TestEvaluate_AllowedRecipients(t *testing.T) {
+	p := policy("p", "ns", 1, "sa", "*@x.com")
+	p.Spec.RecipientRestrictions = &sigv1.RecipientRestrictions{
+		AllowedRecipients: []string{"QA@staging.example.com"},
+		BlockedDomains:    []string{"blocked.example.com"},
+	}
+	cases := []struct {
+		name    string
+		rcpts   []string
+		replyTo []string
+		ok      bool
+	}{
+		{"listed address", []string{"qa@staging.example.com"}, nil, true},
+		{"case-insensitive", []string{"Qa@Staging.Example.com"}, nil, true},
+		{"other mailbox in same domain", []string{"dev@staging.example.com"}, nil, false},
+		{"one bad recipient fails all", []string{"qa@staging.example.com", "x@other.com"}, nil, false},
+		{"reply-to checked too", []string{"qa@staging.example.com"}, []string{"x@other.com"}, false},
+	}
+	for _, tc := range cases {
+		got := Evaluate(&p, MessageView{From: "a@x.com", Recipients: tc.rcpts, ReplyTo: tc.replyTo})
+		if got.Allowed != tc.ok {
+			t.Fatalf("%s: want %v got %+v", tc.name, tc.ok, got)
+		}
+	}
+
+	// Both allowlists combine; blockedDomains wins over both.
+	p.Spec.RecipientRestrictions.AllowedDomains = []string{"example.com"}
+	p.Spec.RecipientRestrictions.AllowedRecipients = append(p.Spec.RecipientRestrictions.AllowedRecipients,
+		"ops@blocked.example.com")
+	for rcpt, ok := range map[string]bool{
+		"anyone@example.com":      true,
+		"qa@staging.example.com":  true,
+		"dev@staging.example.com": false,
+		"ops@blocked.example.com": false,
+	} {
+		if got := Evaluate(&p, MessageView{From: "a@x.com", Recipients: []string{rcpt}}); got.Allowed != ok {
+			t.Fatalf("%s: want %v got %+v", rcpt, ok, got)
+		}
+	}
+}
+
+func TestEvaluate_AllowedRecipientsGlob(t *testing.T) {
+	p := policy("p", "ns", 1, "sa", "*@x.com")
+	p.Spec.RecipientRestrictions = &sigv1.RecipientRestrictions{
+		AllowedRecipients: []string{"alerts@contoso.com", "*@oncall.contoso.com"},
+		BlockedDomains:    []string{"blocked.oncall.contoso.com"},
+	}
+	for rcpt, ok := range map[string]bool{
+		"alerts@contoso.com":           true,
+		"ALERTS@Contoso.com":           true,
+		"anyone@oncall.contoso.com":    true,
+		"Pager@OnCall.Contoso.com":     true,
+		"ceo@contoso.com":              false, // same domain, not listed
+		"x@sub.oncall.contoso.com":     false, // the glob is anchored on the domain
+		"x@blocked.oncall.contoso.com": false,
+		"alerts@contoso.com.evil.test": false,
+		"oncall@contoso.com":           false,
+	} {
+		got := Evaluate(&p, MessageView{From: "a@x.com", Recipients: []string{rcpt}})
+		if got.Allowed != ok {
+			t.Errorf("%s: want %v got %+v", rcpt, ok, got)
+		}
+		if !ok && got.DenyReason != DenyRecipientBlocked {
+			t.Errorf("%s: want recipient_not_allowed, got %s", rcpt, got.DenyReason)
+		}
+	}
+	if got := Evaluate(&p, MessageView{From: "a@x.com", Recipients: []string{"alerts@contoso.com"},
+		ReplyTo: []string{"ceo@contoso.com"}}); got.Allowed {
+		t.Fatal("Reply-To outside allowedRecipients must be denied")
+	}
+}
+
+// Review of #20: '/' is a valid local-part character, and a glob's * must
+// match it like any other character.
+func TestAddressMatchesSlashInLocalPart(t *testing.T) {
+	cases := []struct {
+		addr, pattern string
+		want          bool
+	}{
+		{"team/a@oncall.contoso.com", "*@oncall.contoso.com", true},
+		{"a/b/c@oncall.contoso.com", "a?b*@oncall.contoso.com", true},
+		{"team/a@oncall.contoso.com", "team/a@oncall.contoso.com", true},
+		{"team/a@other.example", "*@oncall.contoso.com", false},
+		{"x@evil.example/oncall.contoso.com", "*@oncall.contoso.com", false},
+	}
+	for _, tc := range cases {
+		if got := AddressMatches(tc.addr, tc.pattern); got != tc.want {
+			t.Errorf("AddressMatches(%q, %q) = %v, want %v", tc.addr, tc.pattern, got, tc.want)
+		}
+	}
+}

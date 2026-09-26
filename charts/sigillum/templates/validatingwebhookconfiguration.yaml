@@ -57,4 +57,20 @@ webhooks:
         resources: [mailpolicies]
         operations: [CREATE, UPDATE]
         scope: Namespaced
+  - name: vmailcredential.sigillum.dev
+    admissionReviewVersions: [v1]
+    sideEffects: {{ .Values.webhook.sideEffects }}
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    clientConfig:
+      service:
+        name: {{ include "sigillum.webhook.serviceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-sigillum-dev-v1alpha1-mailcredential
+        port: 443
+    rules:
+      - apiGroups: [sigillum.dev]
+        apiVersions: [v1alpha1]
+        resources: [mailcredentials]
+        operations: [CREATE, UPDATE]
+        scope: Namespaced
 {{- end }}

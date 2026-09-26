@@ -1,5 +1,7 @@
 {{- if and .Values.rbac.create .Values.rbac.aggregateClusterRoles }}
-# view: read-only access to sigillum CRs.
+# view: read-only access to sigillum CRs. MailCredentials are left out:
+# a bring-your-own spec.passwordHash would let viewers try offline guessing
+# of a weak password. edit and admin see them.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -21,8 +23,10 @@ metadata:
     rbac.authorization.k8s.io/aggregate-to-edit: "true"
     {{- include "sigillum.labels" . | nindent 4 }}
 rules:
+  # MailCredential status (the password hashes) is written by the controller
+  # only; no aggregated role grants mailcredentials/status.
   - apiGroups: [sigillum.dev]
-    resources: [mailbackends, mailpolicies]
+    resources: [mailbackends, mailpolicies, mailcredentials]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [sigillum.dev]
     resources: [clustermailbackends]
@@ -38,6 +42,6 @@ metadata:
     {{- include "sigillum.labels" . | nindent 4 }}
 rules:
   - apiGroups: [sigillum.dev]
-    resources: [mailbackends, mailpolicies, clustermailbackends]
+    resources: [mailbackends, mailpolicies, mailcredentials, clustermailbackends]
     verbs: [get, list, watch, create, update, patch, delete]
 {{- end }}

@@ -5,8 +5,25 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net/mail"
 	"strings"
 )
+
+// ValidatePlainAddress checks that s parses as a single plain address,
+// without display name or comments and equal to its parsed form, whose
+// local part has no routing semantics (ValidateMailbox). SMTP paths and
+// allowedRecipients entries use it, so both agree on what counts as a
+// plain address.
+func ValidatePlainAddress(s string) error {
+	a, err := mail.ParseAddress(s)
+	if err != nil {
+		return err
+	}
+	if a.Name != "" || a.Address != s {
+		return fmt.Errorf("%q is not a plain address", s)
+	}
+	return ValidateMailbox(a.Address)
+}
 
 // ValidateMailbox checks a parsed addr-spec (mail.Address.Address) for local
 // parts that carry routing semantics of their own. Recipient restrictions

@@ -3,6 +3,7 @@ package apiserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,8 +16,15 @@ import (
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	"github.com/se-wo/sigillum/internal/apiserver/auth"
 	"github.com/se-wo/sigillum/internal/audit"
 	"github.com/se-wo/sigillum/internal/gateway"
 )
@@ -40,8 +48,8 @@ func (fixedLimiter) Allow(context.Context, string, int32, int32) (bool, time.Dur
 	return true, 0, nil
 }
 
-func newTestServer() (*Server, *auditSink) {
-	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+func newTestServer(objs ...client.Object) (*Server, *auditSink) {
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 	sink := &auditSink{}
 	return &Server{
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -110,6 +118,19 @@ func TestWriteResult_UnavailableIs503(t *testing.T) {
 	writeResult(w, "m", gateway.Result{Status: gateway.StatusUnavailable, Policy: "p"})
 	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "unavailable") {
 		t.Fatalf("got %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWriteResult_UpstreamTransientVsPermanent(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeResult(w, "m", gateway.Result{Status: gateway.StatusUpstreamError, Policy: "p", Detail: "relay down"})
+	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "errors/upstream-error") {
+		t.Fatalf("transient failure: got %d %s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	writeResult(w, "m", gateway.Result{Status: gateway.StatusUpstreamError, Permanent: true, Policy: "p", Detail: "550 no such user"})
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "errors/upstream-rejected") {
+		t.Fatalf("permanent rejection: got %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -219,5 +240,83 @@ func TestEstimateSizeCountsSubjectAndHeaders(t *testing.T) {
 	}
 	if got, want := estimateSize(req, nil), int64(100+len("X-Data")+200+4); got != want {
 		t.Fatalf("estimateSize = %d, want %d", got, want)
+	}
+}
+
+func TestReadyz_FailsWhileDrainingButRequestsAreServed(t *testing.T) {
+	s, _ := newTestServer()
+	s.cacheSynced.Store(true)
+	w := httptest.NewRecorder()
+	s.handleReadyz(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("want ready, got %d", w.Code)
+	}
+	// Shutdown delay (G-3): readiness fails, mail is still accepted.
+	s.draining.Store(true)
+	w = httptest.NewRecorder()
+	s.handleReadyz(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503 while draining, got %d", w.Code)
+	}
+	if w := post(s, `{}`); w.Code == http.StatusServiceUnavailable {
+		t.Fatalf("requests must still be served during the shutdown delay, got %d", w.Code)
+	}
+}
+
+func TestHandleSendMessage_AllowedRecipients(t *testing.T) {
+	pol := &sigv1.MailPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "alerts-only", Namespace: "team"},
+		Spec: sigv1.MailPolicySpec{
+			Subjects:   []sigv1.PolicySubject{{ServiceAccount: &sigv1.ServiceAccountSubject{Name: "mailer"}}},
+			BackendRef: sigv1.BackendRef{Name: "relay", Kind: sigv1.KindClusterMailBackend},
+			RecipientRestrictions: &sigv1.RecipientRestrictions{
+				AllowedRecipients: []string{"alerts@contoso.com", "*@oncall.contoso.com"},
+			},
+		},
+	}
+	s, sink := newTestServer(pol)
+
+	w := post(s, `{"from":"a@team.example","to":["alerts@contoso.com"],"cc":["ceo@contoso.com"]}`)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "errors/recipient-not-allowed") {
+		t.Fatalf("mailbox outside allowedRecipients: want 403 recipient-not-allowed, got %d %s", w.Code, w.Body.String())
+	}
+	if ev := sink.events[len(sink.events)-1]; ev.Reason != "recipient_not_allowed" || ev.Policy != "alerts-only" {
+		t.Fatalf("unexpected audit record %+v", ev)
+	}
+
+	// Allowed recipients pass the policy; this test has no backend, so the
+	// request stops at backend resolution instead.
+	w = post(s, `{"from":"a@team.example","to":["alerts@contoso.com","pager@oncall.contoso.com"]}`)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "errors/backend-not-ready") {
+		t.Fatalf("allowed recipients: want to pass the policy, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// Review of #20: a TokenReview outage answers 503 and is audited as
+// auth_unavailable, not as an invalid token (a 401 that brute-force alerts
+// on sigillum_auth_failures_total{reason="invalid_token"} would count).
+func TestAuthMiddleware_TokenReviewOutageIs503(t *testing.T) {
+	cs := k8sfake.NewSimpleClientset()
+	cs.PrependReactor("create", "tokenreviews", func(_ k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, errors.New("connection refused")
+	})
+	authn, err := auth.New(cs, []string{"sigillum"}, 16, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, sink := newTestServer()
+	s.authn = authn
+	h := s.authMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("request must not pass authentication")
+	}))
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "unavailable") {
+		t.Fatalf("want 503 unavailable, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.events) != 1 || sink.events[0].Reason != "auth_unavailable" {
+		t.Fatalf("want one auth_unavailable audit record, got %+v", sink.events)
 	}
 }

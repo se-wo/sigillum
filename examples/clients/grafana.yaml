@@ -1,0 +1,29 @@
+# Grafana alerts and reports. Username: grafana.monitoring, Secret: grafana-smtp.
+apiVersion: sigillum.dev/v1alpha1
+kind: MailCredential
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  serviceAccountName: grafana
+  secretName: grafana-smtp
+  rotation:
+    interval: 90d
+    gracePeriod: 24h
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: MailPolicy
+metadata:
+  name: grafana-mail
+  namespace: monitoring
+spec:
+  subjects:
+    - serviceAccount: { name: grafana }
+  backendRef:
+    name: corporate-smtp
+    kind: ClusterMailBackend
+  senderRestrictions:
+    allowedSenders: ["grafana@monitoring.example.com"]
+  rateLimits:
+    messagesPerMinute: 30
+    messagesPerHour: 500

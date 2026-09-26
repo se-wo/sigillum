@@ -1,6 +1,7 @@
 // Package smtpproxy implements the SMTP submission front end for legacy
 // workloads (US-1.2). Callers authenticate with their ServiceAccount token via
-// AUTH OAUTHBEARER (US-3.4) or, only where a policy explicitly opts in, by the
+// AUTH OAUTHBEARER (US-3.4), with a Sigillum-issued MailCredential via AUTH
+// PLAIN or LOGIN (US-3.7) or, only where a policy explicitly opts in, by the
 // source pod's IP (US-3.5). Accepted messages run through the same
 // gateway pipeline as the REST path and are relayed byte-for-byte.
 package smtpproxy
@@ -26,6 +27,7 @@ import (
 
 	"github.com/se-wo/sigillum/internal/apiserver/auth"
 	"github.com/se-wo/sigillum/internal/audit"
+	"github.com/se-wo/sigillum/internal/credential"
 	"github.com/se-wo/sigillum/internal/driver"
 	"github.com/se-wo/sigillum/internal/gateway"
 	"github.com/se-wo/sigillum/internal/policy"
@@ -51,6 +53,13 @@ type Backend struct {
 	Tokens TokenAuthenticator
 	// Pods enables the pod-IP legacy fallback when non-nil.
 	Pods PodResolver
+	// Credentials enables AUTH PLAIN and LOGIN with MailCredentials when
+	// non-nil. They are offered on TLS connections only, unless
+	// AllowInsecureCredentialAuth is set.
+	Credentials                 CredentialVerifier
+	AllowInsecureCredentialAuth bool
+	// AuthFailures throttles repeated failed credential logins (nil: off).
+	AuthFailures *FailureLimiter
 	// AuthTimeout bounds TokenReview and pod lookups.
 	AuthTimeout time.Duration
 	// SendTimeout bounds the pipeline for one message (rate limiter and
@@ -64,16 +73,21 @@ type Backend struct {
 
 // NewSession implements smtp.Backend.
 func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
-	return &session{b: b, remoteIP: remoteIP(c.Conn().RemoteAddr())}, nil
+	return &session{b: b, conn: c, remoteIP: remoteIP(c.Conn().RemoteAddr())}, nil
 }
 
 type session struct {
 	b        *Backend
+	conn     *smtp.Conn
 	remoteIP string
 
-	identity *gateway.Identity // set by AUTH or pod-IP lookup
+	identity *gateway.Identity  // set by AUTH or pod-IP lookup
+	cred     *credential.Result // set by a credential login
 	from     string
 	rcpts    []string
+	// revoked is set once the credential was revoked mid-session; every
+	// later MAIL is refused.
+	revoked bool
 }
 
 var (
@@ -83,30 +97,56 @@ var (
 
 var errAuthRequired = &smtp.SMTPError{
 	Code: 530, EnhancedCode: smtp.EnhancedCode{5, 7, 0},
-	Message: "Authentication required (AUTH OAUTHBEARER with a ServiceAccount token)",
+	Message: "Authentication required",
 }
 
 // AuthMechanisms implements smtp.AuthSession.
 func (s *session) AuthMechanisms() []string {
-	if s.b.Tokens == nil {
-		return nil
+	var mechs []string
+	if s.b.Tokens != nil {
+		mechs = append(mechs, sasl.OAuthBearer)
 	}
-	return []string{sasl.OAuthBearer}
+	if s.credentialAuthAllowed() {
+		mechs = append(mechs, sasl.Plain, sasl.Login)
+	}
+	return mechs
 }
 
 // Auth implements smtp.AuthSession.
 func (s *session) Auth(mech string) (sasl.Server, error) {
-	if mech != sasl.OAuthBearer || s.b.Tokens == nil {
+	switch mech {
+	case sasl.Plain, sasl.Login:
+		return s.credentialAuth(mech)
+	case sasl.OAuthBearer:
+	default:
 		return nil, smtp.ErrAuthUnknownMechanism
 	}
+	if s.b.Tokens == nil {
+		return nil, smtp.ErrAuthUnknownMechanism
+	}
+	var unavailable bool
 	srv := sasl.NewOAuthBearerServer(func(opts sasl.OAuthBearerOptions) *sasl.OAuthBearerError {
 		ctx, cancel := context.WithTimeout(context.Background(), s.b.AuthTimeout)
 		defer cancel()
 		ctx, span := telemetry.Tracer().Start(ctx, "auth.tokenreview")
 		defer span.End()
 		subj, err := s.b.Tokens.Authenticate(ctx, opts.Token)
+		if errors.Is(err, auth.ErrUnavailable) {
+			// Not a rejected token: answered with 454 below.
+			span.SetStatus(codes.Error, "token review failed")
+			telemetry.AuthFailuresTotal.WithLabelValues(gateway.TransportSMTP, gateway.AuthOAuthBearer, "auth_unavailable").Inc()
+			s.b.Logger.Warn("smtp token review failed", "remote_ip", s.remoteIP, "err", err)
+			s.b.Sender.Reject(audit.Event{
+				MessageID:  uuid.NewString(),
+				AuthMethod: gateway.AuthOAuthBearer,
+				Transport:  gateway.TransportSMTP,
+			}, "auth_unavailable")
+			unavailable = true
+			return &sasl.OAuthBearerError{Status: "invalid_token", Schemes: "bearer"}
+		}
 		if err != nil {
 			span.SetStatus(codes.Error, "token rejected")
+			telemetry.AuthFailuresTotal.WithLabelValues(gateway.TransportSMTP, gateway.AuthOAuthBearer, "invalid_token").Inc()
 			s.b.Logger.Info("smtp auth failed", "remote_ip", s.remoteIP, "err", err)
 			s.b.Sender.Reject(audit.Event{
 				MessageID:  uuid.NewString(),
@@ -122,16 +162,36 @@ func (s *session) Auth(mech string) (sasl.Server, error) {
 		}
 		return nil
 	})
-	return authFailedAs535{srv}, nil
+	return authFailedAs535{unavailableAs454{srv, &unavailable}}, nil
+}
+
+// unavailableAs454 answers a failed OAUTHBEARER exchange with a temporary
+// 454 when the token could not be reviewed, instead of 535.
+type unavailableAs454 struct {
+	sasl.Server
+	unavailable *bool
+}
+
+func (u unavailableAs454) Next(response []byte) ([]byte, bool, error) {
+	challenge, done, err := u.Server.Next(response)
+	if err != nil && *u.unavailable {
+		return nil, false, errAuthUnavailable
+	}
+	return challenge, done, err
 }
 
 // authFailedAs535 maps any SASL failure to "535 5.7.8 Authentication
 // credentials invalid" as required by US-3.4 (go-smtp would answer 454).
+// Explicit SMTP replies (throttling, temporary failures) pass through.
 type authFailedAs535 struct{ sasl.Server }
 
 func (a authFailedAs535) Next(response []byte) ([]byte, bool, error) {
 	challenge, done, err := a.Server.Next(response)
 	if err != nil {
+		var se *smtp.SMTPError
+		if errors.As(err, &se) {
+			return nil, false, se
+		}
 		return nil, false, &smtp.SMTPError{
 			Code: 535, EnhancedCode: smtp.EnhancedCode{5, 7, 8},
 			Message: "Authentication credentials invalid",
@@ -144,6 +204,9 @@ func (a authFailedAs535) Next(response []byte) ([]byte, bool, error) {
 // its pod IP if (and only if) the fallback is enabled for this deployment;
 // whether a policy then accepts it is decided by legacyAuth.podIPFallback.
 func (s *session) Mail(from string, _ *smtp.MailOptions) error {
+	if err := s.checkCredential(uuid.NewString(), from, nil); err != nil {
+		return err
+	}
 	if s.identity == nil {
 		if err := s.identifyByPodIP(); err != nil {
 			return err
@@ -167,7 +230,12 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 
 // rejectCommand audits a refused MAIL or RCPT command for an identified caller.
 func (s *session) rejectCommand(reason, from string, to []string) {
-	s.b.Sender.Reject(s.event(uuid.NewString(), from, to), reason)
+	s.rejectMessage(uuid.NewString(), reason, from, to)
+}
+
+// rejectMessage audits a refusal under an existing message ID.
+func (s *session) rejectMessage(msgID, reason, from string, to []string) {
+	s.b.Sender.Reject(s.event(msgID, from, to), reason)
 }
 
 // event is the audit skeleton for the identified caller.
@@ -177,6 +245,8 @@ func (s *session) event(msgID, from string, to []string) audit.Event {
 		ev.Namespace = s.identity.Namespace
 		ev.ServiceAccount = s.identity.ServiceAccount
 		ev.AuthMethod = s.identity.AuthMethod
+		ev.Credential = s.identity.Credential
+		ev.CredentialPrevious = s.identity.CredentialPrevious
 	}
 	return ev
 }
@@ -250,7 +320,7 @@ func (s *session) Data(r io.Reader) error {
 
 	// Read straight into a buffer that already holds the Received trace
 	// header, so the relayed message is never copied a second time.
-	trace := receivedHeader(s.remoteIP, msgID, s.identity.AuthMethod)
+	trace := receivedHeader(s.remoteIP, msgID, s.identity.AuthMethod, s.isTLS())
 	buf := bytes.NewBuffer(make([]byte, 0, len(trace)+64*1024))
 	buf.WriteString(trace)
 	// go-smtp enforces Server.MaxMessageBytes while we read.
@@ -269,6 +339,10 @@ func (s *session) Data(r io.Reader) error {
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 6, 0}, Message: err.Error()}
 	}
 
+	// The credential may have been revoked since MAIL FROM.
+	if err := s.checkCredential(msgID, s.from, s.rcpts); err != nil {
+		return withMessageID(err, msgID)
+	}
 	to := make([]driver.Address, len(s.rcpts))
 	for i, rc := range s.rcpts {
 		to[i] = driver.Address{Address: rc}
@@ -335,19 +409,9 @@ func resultError(res gateway.Result, msgID string) error {
 var errNoFrom = errors.New("message has no valid From header")
 
 // checkPath validates a MAIL FROM or RCPT TO path as go-smtp hands it over:
-// quotes already removed, any source route stripped. It must parse as a
-// single plain address, equal to what is relayed, whose local part has no
-// routing semantics (see policy.ValidateMailbox).
-func checkPath(path string) error {
-	a, err := mail.ParseAddress(path)
-	if err != nil {
-		return err
-	}
-	if a.Name != "" || a.Address != path {
-		return fmt.Errorf("%q is not a plain address", path)
-	}
-	return policy.ValidateMailbox(a.Address)
-}
+// quotes already removed, any source route stripped. It must be a plain
+// address, equal to what is relayed (policy.ValidatePlainAddress).
+func checkPath(path string) error { return policy.ValidatePlainAddress(path) }
 
 // addressHeaders holds the header addresses the policy checks.
 type addressHeaders struct {
@@ -442,11 +506,15 @@ func addressField(h mail.Header, k string) ([]string, error) {
 }
 
 // receivedHeader builds the RFC 5321 trace header that is prepended to the
-// relayed message, so it can be correlated with the audit log.
-func receivedHeader(remoteIP, msgID, authMethod string) string {
+// relayed message, so it can be correlated with the audit log. The protocol
+// follows RFC 3848: S for TLS, A for SMTP AUTH.
+func receivedHeader(remoteIP, msgID, authMethod string, tls bool) string {
 	proto := "ESMTP"
-	if authMethod == gateway.AuthOAuthBearer {
-		proto = "ESMTPA" // RFC 3848
+	if tls {
+		proto += "S"
+	}
+	if authMethod == gateway.AuthOAuthBearer || authMethod == gateway.AuthSMTPCredential {
+		proto += "A"
 	}
 	return fmt.Sprintf("Received: from [%s] by sigillum with %s id %s;\r\n\t%s\r\n",
 		remoteIP, proto, msgID, time.Now().UTC().Format(time.RFC1123Z))
@@ -458,4 +526,53 @@ func remoteIP(a net.Addr) string {
 		return strings.Trim(a.String(), "[]")
 	}
 	return host
+}
+
+// withMessageID appends the message ID to an SMTP reply, as for every
+// other reply after DATA, so the client can quote it.
+func withMessageID(err error, msgID string) error {
+	var se *smtp.SMTPError
+	if !errors.As(err, &se) {
+		return err
+	}
+	c := *se
+	c.Message += " (id " + msgID + ")"
+	return &c
+}
+
+// checkCredential re-checks a credential login before MAIL and before a
+// message is relayed. A revoked session stays revoked: go-smtp allows no
+// second AUTH, and falling back to the pod IP would continue the session
+// under another identity.
+// msgID is the audit message ID of a refusal (the message's own at DATA).
+func (s *session) checkCredential(msgID, from string, to []string) error {
+	if s.revoked {
+		return errCredentialRevoked
+	}
+	if s.cred == nil {
+		return nil
+	}
+	previous, err := s.credentialStillValid()
+	switch {
+	case errors.Is(err, credential.ErrInvalid):
+		// Deleted or rotated out since AUTH: revocation also ends open
+		// sessions (US-3.7).
+		s.rejectMessage(msgID, "invalid_credentials", from, to)
+		s.identity, s.cred, s.revoked = nil, nil, true
+		return errCredentialRevoked
+	case err != nil:
+		s.b.Logger.Warn("smtp credential lookup failed", "remote_ip", s.remoteIP, "err", err)
+		s.rejectMessage(msgID, "auth_unavailable", from, to)
+		return errAuthUnavailable
+	}
+	// After a rotation the session's password may now be the previous
+	// one; audit it as such.
+	s.identity.CredentialPrevious = previous
+	return nil
+}
+
+func (s *session) credentialStillValid() (previous bool, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.b.AuthTimeout)
+	defer cancel()
+	return s.b.Credentials.StillValid(ctx, s.cred)
 }

@@ -2,6 +2,9 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -138,5 +141,94 @@ func TestNew_RequiresAudience(t *testing.T) {
 		if _, err := New(fake.NewSimpleClientset(), auds, 0, time.Minute); err == nil {
 			t.Errorf("audiences %q: want error", auds)
 		}
+	}
+}
+
+// jwtWithExp builds an (unsigned) JWT-shaped token with the given exp.
+func jwtWithExp(exp int64) string {
+	enc := base64.RawURLEncoding.EncodeToString
+	return enc([]byte(`{"alg":"RS256"}`)) + "." + enc([]byte(fmt.Sprintf(`{"sub":"x","exp":%d}`, exp))) + ".sig"
+}
+
+func TestAuthenticator_CacheBoundedByTokenExpiry(t *testing.T) {
+	calls := 0
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("create", "tokenreviews", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		calls++
+		return true, &authv1.TokenReview{Status: authv1.TokenReviewStatus{
+			Authenticated: true,
+			User:          authv1.UserInfo{Username: "system:serviceaccount:billing:billing-mailer"},
+			Audiences:     []string{"sigillum"},
+		}}, nil
+	})
+	a, err := New(cs, []string{"sigillum"}, 16, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_000_000, 0)
+	a.now = func() time.Time { return now }
+
+	// Token expiring in 30s: cached, but only until exp, not for the 5 min TTL.
+	tok := jwtWithExp(now.Unix() + 30)
+	for i := 0; i < 2; i++ {
+		if _, err := a.Authenticate(context.Background(), tok); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("want 1 TokenReview within exp, got %d", calls)
+	}
+	now = now.Add(31 * time.Second)
+	if _, err := a.Authenticate(context.Background(), tok); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("cache entry must end at the token's exp; TokenReview calls = %d", calls)
+	}
+
+	// Already expired according to its claim: never cached.
+	expired := jwtWithExp(now.Unix() - 1)
+	for i := 0; i < 2; i++ {
+		_, _ = a.Authenticate(context.Background(), expired)
+	}
+	if calls != 4 {
+		t.Fatalf("expired token must not be cached; TokenReview calls = %d", calls)
+	}
+
+	// A far-future exp does not extend the TTL.
+	long := jwtWithExp(now.Unix() + 3600)
+	_, _ = a.Authenticate(context.Background(), long)
+	now = now.Add(5*time.Minute + time.Second)
+	_, _ = a.Authenticate(context.Background(), long)
+	if calls != 6 {
+		t.Fatalf("TTL must still apply; TokenReview calls = %d", calls)
+	}
+}
+
+func TestTokenExpiry(t *testing.T) {
+	if _, ok := tokenExpiry("opaque-token"); ok {
+		t.Fatal("non-JWT must have no expiry")
+	}
+	if _, ok := tokenExpiry("a.!!!.c"); ok {
+		t.Fatal("bad base64 must have no expiry")
+	}
+	if exp, ok := tokenExpiry(jwtWithExp(42)); !ok || exp.Unix() != 42 {
+		t.Fatalf("exp = %v %v", exp, ok)
+	}
+}
+
+// Review of #20: a failed TokenReview request is ErrUnavailable, and is
+// not cached as a rejection.
+func TestAuthenticator_ReviewFailureIsUnavailable(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("create", "tokenreviews", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("connection refused")
+	})
+	a, err := New(cs, []string{"sigillum"}, 16, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Authenticate(context.Background(), "tok"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("want ErrUnavailable, got %v", err)
 	}
 }

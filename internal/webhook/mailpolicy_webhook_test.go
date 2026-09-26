@@ -61,3 +61,43 @@ func TestMailPolicyValidator_InvalidSelectorOperator(t *testing.T) {
 		t.Fatal("expected invalid selector operator to be rejected")
 	}
 }
+
+func TestMailPolicyValidator_AllowedRecipients(t *testing.T) {
+	cases := []struct {
+		name    string
+		rcpts   []string
+		wantErr string
+	}{
+		{name: "valid", rcpts: []string{"qa@staging.example.com", "QA-Team@example.com"}},
+		{name: "globs anchored on a domain", rcpts: []string{"*@oncall.example.com", "alerts-?@example.com", "team-[ab]@example.com"}},
+		{name: "domain only", rcpts: []string{"example.com"}, wantErr: "allowedRecipients[0]"},
+		{name: "star", rcpts: []string{"*"}, wantErr: "<local-part pattern>@<domain>"},
+		{name: "star at star", rcpts: []string{"*@*"}, wantErr: "must not contain wildcards"},
+		{name: "unanchored domain", rcpts: []string{"*@*.example.com"}, wantErr: "must not contain wildcards"},
+		{name: "glob across the at sign", rcpts: []string{"*example.com"}, wantErr: "<local-part pattern>@<domain>"},
+		{name: "two at signs", rcpts: []string{"*@x@example.com"}, wantErr: "<local-part pattern>@<domain>"},
+		{name: "empty local part", rcpts: []string{"@example.com"}, wantErr: "allowedRecipients[0]"},
+		{name: "routing in pattern", rcpts: []string{"*%evil.test@example.com"}, wantErr: "routing"},
+		{name: "bad glob", rcpts: []string{"[a@example.com"}, wantErr: "invalid glob"},
+		{name: "display name", rcpts: []string{"QA <qa@example.com>"}, wantErr: "plain address"},
+		{name: "percent hack", rcpts: []string{"qa%evil.test@example.com"}, wantErr: "allowedRecipients[0]"},
+		{name: "empty", rcpts: []string{""}, wantErr: "allowedRecipients[0]"},
+	}
+	v := &MailPolicyValidator{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mp := validPolicy()
+			mp.Spec.RecipientRestrictions = &sigv1.RecipientRestrictions{AllowedRecipients: tc.rcpts}
+			_, err := v.ValidateCreate(context.Background(), mp)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}

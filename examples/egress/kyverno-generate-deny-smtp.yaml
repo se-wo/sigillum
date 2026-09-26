@@ -1,0 +1,43 @@
+# Generate sigillum-deny-smtp-egress into every namespace except the Sigillum
+# release namespace and kube-*, including namespaces created later (US-5.7).
+# Kyverno needs RBAC to manage NetworkPolicies (its background controller
+# ClusterRole; see the Kyverno docs on generate rules).
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: sigillum-generate-deny-smtp-egress
+  annotations:
+    policies.kyverno.io/title: Block direct SMTP egress
+    policies.kyverno.io/description: >-
+      Every namespace gets a NetworkPolicy that allows all egress except TCP
+      25, 465 and 587, so mail can only leave through Sigillum.
+spec:
+  generateExisting: true
+  rules:
+    - name: deny-smtp-egress
+      match:
+        any:
+          - resources:
+              kinds: [Namespace]
+      exclude:
+        any:
+          - resources:
+              names: [sigillum-system, "kube-*"]
+      generate:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        name: sigillum-deny-smtp-egress
+        namespace: "{{request.object.metadata.name}}"
+        synchronize: true
+        data:
+          spec:
+            podSelector: {}
+            policyTypes: [Egress]
+            egress:
+              - ports:
+                  - { protocol: TCP, port: 1, endPort: 24 }
+                  - { protocol: TCP, port: 26, endPort: 464 }
+                  - { protocol: TCP, port: 466, endPort: 586 }
+                  - { protocol: TCP, port: 588, endPort: 65535 }
+                  - { protocol: UDP, port: 1, endPort: 65535 }
+                  - { protocol: SCTP, port: 1, endPort: 65535 }

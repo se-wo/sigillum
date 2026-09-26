@@ -33,8 +33,9 @@ import (
 
 // Auth methods, as logged in the authMethod field (US-4.2).
 const (
-	AuthOAuthBearer = "oauth_bearer"
-	AuthPodIPLegacy = "pod_ip_legacy"
+	AuthOAuthBearer    = "oauth_bearer"
+	AuthPodIPLegacy    = "pod_ip_legacy"
+	AuthSMTPCredential = "smtp_credential"
 )
 
 // Transports, as recorded in the audit stream.
@@ -70,6 +71,11 @@ type Identity struct {
 	AuthMethod     string
 	// PodLabels is set only for pod-IP legacy auth, where the pod is known.
 	PodLabels map[string]string
+	// Credential is the MailCredential username (smtp_credential only), and
+	// CredentialPrevious marks a login with the previous password during a
+	// rotation's grace period.
+	Credential         string
+	CredentialPrevious bool
 }
 
 // Request is one message to push through the pipeline.
@@ -117,7 +123,8 @@ type Result struct {
 	Detail     string
 	RetryAfter time.Duration // StatusRateLimited only
 	// Permanent marks an upstream rejection that will not succeed on retry
-	// (StatusUpstreamError only). SMTP maps it to 5xx instead of 4xx.
+	// (StatusUpstreamError only). SMTP maps it to 5xx instead of 4xx, REST
+	// to 422 upstream-rejected instead of 502 upstream-error.
 	Permanent  bool
 	UpstreamID string
 	AcceptedAt time.Time
@@ -146,6 +153,12 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 		"authMethod", id.AuthMethod,
 		"transport", req.Transport,
 	)
+	if id.Credential != "" {
+		logger = logger.With("credential", id.Credential)
+		if id.CredentialPrevious {
+			logger = logger.With("credential_previous", true)
+		}
+	}
 	if tid := telemetry.TraceID(ctx); tid != "" {
 		logger = logger.With("trace_id", tid)
 	}
@@ -158,13 +171,15 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 		SizeBytes:    req.SizeBytes,
 	}
 	ev := audit.Event{
-		MessageID:      req.MessageID,
-		Namespace:      id.Namespace,
-		ServiceAccount: id.ServiceAccount,
-		AuthMethod:     id.AuthMethod,
-		Transport:      req.Transport,
-		From:           view.From,
-		To:             view.Recipients,
+		MessageID:          req.MessageID,
+		Namespace:          id.Namespace,
+		ServiceAccount:     id.ServiceAccount,
+		AuthMethod:         id.AuthMethod,
+		Credential:         id.Credential,
+		CredentialPrevious: id.CredentialPrevious,
+		Transport:          req.Transport,
+		From:               view.From,
+		To:                 view.Recipients,
 	}
 
 	evalCtx, evalSpan := telemetry.Tracer().Start(ctx, "policy.evaluate", trace.WithAttributes(
@@ -262,13 +277,19 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 	sendSpan.End()
 
 	if err != nil {
-		const resultLabel = "upstream_error"
+		// A permanent rejection (5xx to MAIL, RCPT or DATA) and a transient
+		// failure get different reasons, so SIEM rules and dashboards can
+		// tell "fix the message" from "the relay is down" (G-1).
+		permanent := errors.Is(err, driver.ErrUpstreamPermanent)
+		resultLabel := "upstream_error"
+		if permanent {
+			resultLabel = "upstream_rejected"
+		}
 		telemetry.BackendDurationSeconds.WithLabelValues(p.Namespace, p.Name, backendKey, resultLabel).Observe(dur)
 		telemetry.MessagesTotal.WithLabelValues(p.Namespace, p.Name, backendKey, resultLabel).Inc()
 		logger.Error("upstream send failed", "policy", p.Name, "backend", backendKey, "err", err, "result", resultLabel)
-		ev.Decision, ev.Reason = audit.DecisionReject, "upstream_error"
+		ev.Decision, ev.Reason = audit.DecisionReject, resultLabel
 		g.Audit.Record(ev)
-		permanent := errors.Is(err, driver.ErrUpstreamPermanent)
 		// A transient failure will be retried by the caller (SMTP clients do
 		// so automatically on 4xx); give the hit back so retries through an
 		// outage do not exhaust the budget. A permanent rejection was a real

@@ -1,0 +1,47 @@
+# Senders must stay within the namespace's mail domain (US-5.7): in a
+# namespace labelled sigillum.dev/sender-domain=billing.example.com, every
+# allowedSenders entry must end in "@billing.example.com" (exact addresses
+# and patterns like "*@billing.example.com"). Subdomains need their own
+# label value, which keeps "*example.com"-style patterns out.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: sigillum-sender-domain
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [sigillum.dev]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [mailpolicies]
+  variables:
+    - name: domain
+      expression: >-
+        has(namespaceObject.metadata.labels) &&
+        'sigillum.dev/sender-domain' in namespaceObject.metadata.labels
+        ? namespaceObject.metadata.labels['sigillum.dev/sender-domain'].lowerAscii() : ''
+  validations:
+    - expression: >-
+        variables.domain != '' &&
+        has(object.spec.senderRestrictions) &&
+        has(object.spec.senderRestrictions.allowedSenders) &&
+        size(object.spec.senderRestrictions.allowedSenders) > 0 &&
+        object.spec.senderRestrictions.allowedSenders.all(s, s.lowerAscii().endsWith('@' + variables.domain))
+      messageExpression: >-
+        'every spec.senderRestrictions.allowedSenders entry must end in @' + variables.domain +
+        ' (namespace label sigillum.dev/sender-domain)'
+      reason: Forbidden
+---
+# Applies to namespaces that carry the label.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: sigillum-sender-domain
+spec:
+  policyName: sigillum-sender-domain
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - { key: sigillum.dev/sender-domain, operator: Exists }

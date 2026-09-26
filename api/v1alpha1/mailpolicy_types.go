@@ -59,16 +59,24 @@ type SenderRestrictions struct {
 	AllowedSenders []string `json:"allowedSenders,omitempty"`
 }
 
-// RecipientRestrictions restrict the domains of To/Cc/Bcc recipients and of
-// Reply-To addresses (US-2.4). Domains match exactly and case-insensitively;
+// RecipientRestrictions restrict To/Cc/Bcc recipients and Reply-To
+// addresses (US-2.4). Domains match exactly and case-insensitively;
 // subdomains must be listed separately. BlockedDomains takes precedence over
-// AllowedDomains. The restriction is domain-wide: allowing "example.com"
-// allows every mailbox in it; single addresses cannot be allowed.
+// both allowlists. A recipient is allowed if its domain is in AllowedDomains
+// or the address matches an AllowedRecipients entry.
 type RecipientRestrictions struct {
-	// AllowedDomains, if non-empty, is the exhaustive list of recipient
-	// domains. Empty means "any domain not blocked".
+	// AllowedDomains lists recipient domains allowed as a whole. If both
+	// AllowedDomains and AllowedRecipients are empty, any domain that is not
+	// blocked is allowed.
 	// +optional
 	AllowedDomains []string `json:"allowedDomains,omitempty"`
+	// AllowedRecipients lists allowed addresses: exact addresses or glob
+	// patterns anchored on a bare domain ("alerts@example.com",
+	// "*@oncall.example.com"), matched case-insensitively like
+	// allowedSenders. For example the alerting inbox of a workload, or the
+	// QA inbox of a staging cluster.
+	// +optional
+	AllowedRecipients []string `json:"allowedRecipients,omitempty"`
 	// BlockedDomains are always rejected, even if also allowed.
 	// +optional
 	BlockedDomains []string `json:"blockedDomains,omitempty"`

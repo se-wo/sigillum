@@ -50,4 +50,12 @@ var (
 		},
 		[]string{"namespace", "policy", "reason"},
 	)
+
+	AuthFailuresTotal = promauto.With(Registry).NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "sigillum_auth_failures_total",
+			Help: "Failed authentication attempts, by transport, auth method and reason.",
+		},
+		[]string{"transport", "auth_method", "reason"},
+	)
 )

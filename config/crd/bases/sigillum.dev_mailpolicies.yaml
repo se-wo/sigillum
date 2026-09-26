@@ -130,16 +130,27 @@ spec:
                 type: object
               recipientRestrictions:
                 description: |-
-                  RecipientRestrictions restrict the domains of To/Cc/Bcc recipients and of
-                  Reply-To addresses (US-2.4). Domains match exactly and case-insensitively;
+                  RecipientRestrictions restrict To/Cc/Bcc recipients and Reply-To
+                  addresses (US-2.4). Domains match exactly and case-insensitively;
                   subdomains must be listed separately. BlockedDomains takes precedence over
-                  AllowedDomains. The restriction is domain-wide: allowing "example.com"
-                  allows every mailbox in it; single addresses cannot be allowed.
+                  both allowlists. A recipient is allowed if its domain is in AllowedDomains
+                  or the address matches an AllowedRecipients entry.
                 properties:
                   allowedDomains:
                     description: |-
-                      AllowedDomains, if non-empty, is the exhaustive list of recipient
-                      domains. Empty means "any domain not blocked".
+                      AllowedDomains lists recipient domains allowed as a whole. If both
+                      AllowedDomains and AllowedRecipients are empty, any domain that is not
+                      blocked is allowed.
+                    items:
+                      type: string
+                    type: array
+                  allowedRecipients:
+                    description: |-
+                      AllowedRecipients lists allowed addresses: exact addresses or glob
+                      patterns anchored on a bare domain ("alerts@example.com",
+                      "*@oncall.example.com"), matched case-insensitively like
+                      allowedSenders. For example the alerting inbox of a workload, or the
+                      QA inbox of a staging cluster.
                     items:
                       type: string
                     type: array

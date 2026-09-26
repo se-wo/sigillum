@@ -1,0 +1,33 @@
+# No pod-IP legacy authentication in production namespaces (US-5.7, US-3.5).
+# Pod IPs are not bound to an identity; use AUTH OAUTHBEARER or a
+# MailCredential instead.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: sigillum-forbid-podip-fallback
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [sigillum.dev]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [mailpolicies]
+  validations:
+    - expression: >-
+        !has(object.spec.legacyAuth) ||
+        !has(object.spec.legacyAuth.podIPFallback) ||
+        !object.spec.legacyAuth.podIPFallback
+      message: spec.legacyAuth.podIPFallback is not allowed in production namespaces; use AUTH OAUTHBEARER or a MailCredential
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: sigillum-forbid-podip-fallback
+spec:
+  policyName: sigillum-forbid-podip-fallback
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels: { environment: production }
