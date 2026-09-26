@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -95,9 +96,14 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// from the API server. Other reconciles write status with the cached
 	// resourceVersion; a stale one conflicts and is retried.
 	if rotationLooksDue(&mc, now) {
-		if err := r.apiReader().Get(ctx, req.NamespacedName, &mc); err != nil {
+		// Decode into a new object: decoding into the cached copy would
+		// keep fields the fresh one omits, such as a cleared
+		// status.previous or a removed rotate annotation.
+		var fresh sigv1.MailCredential
+		if err := r.apiReader().Get(ctx, req.NamespacedName, &fresh); err != nil {
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
+		mc = fresh
 	}
 	st := &mc.Status
 	accepted := st.Current // keeps CreatedAt of an unchanged bring-your-own hash
@@ -149,8 +155,10 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 	if !finished {
-		var sa corev1.ServiceAccount
-		err := r.Get(ctx, types.NamespacedName{Namespace: mc.Namespace, Name: mc.Spec.ServiceAccountName}, &sa)
+		// Only existence matters; the ServiceAccount cache holds metadata.
+		sa := &metav1.PartialObjectMetadata{}
+		sa.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("ServiceAccount"))
+		err := r.Get(ctx, types.NamespacedName{Namespace: mc.Namespace, Name: mc.Spec.ServiceAccountName}, sa)
 		switch {
 		case apierrors.IsNotFound(err):
 			fail(sigv1.ReasonServiceAccountNotFound, fmt.Sprintf("ServiceAccount %s/%s not found", mc.Namespace, mc.Spec.ServiceAccountName))
@@ -226,15 +234,6 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 					"previous_valid_until", previousUntil(st.Previous))
 			}
 		}
-		if r.GeneratedEnabled {
-			managed := metav1.Condition{Type: sigv1.ConditionSecretsManaged, Status: metav1.ConditionTrue,
-				LastTransitionTime: metav1.NewTime(now), ObservedGeneration: mc.Generation,
-				Reason: sigv1.ReasonReady, Message: "credential Secret guard verified"}
-			if !guardOK {
-				managed.Status, managed.Reason, managed.Message = metav1.ConditionFalse, sigv1.ReasonGuardMissing, guardMsg
-			}
-			st.Conditions = setCondition(st.Conditions, managed)
-		}
 		if !finished {
 			ready, reason = metav1.ConditionTrue, sigv1.ReasonReady
 			if message == "" {
@@ -243,7 +242,18 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		result.RequeueAfter = minPositive(result.RequeueAfter, nextCredentialEvent(st, now, interval))
 	}
-	if !mc.Generated() || !r.GeneratedEnabled {
+	// SecretsManaged reports the guard on every path of a generated
+	// credential, also one that failed before the guard mattered.
+	if mc.Generated() && r.GeneratedEnabled {
+		guardOK, guardMsg := r.Guard.OK()
+		managed := metav1.Condition{Type: sigv1.ConditionSecretsManaged, Status: metav1.ConditionTrue,
+			LastTransitionTime: metav1.NewTime(now), ObservedGeneration: mc.Generation,
+			Reason: sigv1.ReasonReady, Message: "credential Secret guard verified"}
+		if !guardOK {
+			managed.Status, managed.Reason, managed.Message = metav1.ConditionFalse, sigv1.ReasonGuardMissing, guardMsg
+		}
+		st.Conditions = setCondition(st.Conditions, managed)
+	} else {
 		meta.RemoveStatusCondition(&st.Conditions, sigv1.ConditionSecretsManaged)
 	}
 
@@ -460,7 +470,8 @@ func (r *MailCredentialReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&sigv1.MailCredential{}).
-		Watches(&corev1.ServiceAccount{}, handler.EnqueueRequestsFromMapFunc(r.credentialsForServiceAccount))
+		Watches(&corev1.ServiceAccount{}, handler.EnqueueRequestsFromMapFunc(r.credentialsForServiceAccount),
+			builder.OnlyMetadata)
 	if r.Guard != nil {
 		b = b.WatchesRawSource(source.Channel(r.Guard.Events(), &handler.EnqueueRequestForObject{}))
 	}

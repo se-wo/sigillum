@@ -4,7 +4,7 @@
 package policy
 
 import (
-	"path/filepath"
+	"path"
 	"sort"
 	"strings"
 
@@ -214,7 +214,7 @@ func senderAllowed(from string, allowed []string) bool {
 
 // AddressMatches reports whether addr matches an allowedSenders or
 // allowedRecipients entry: case-insensitively, exactly or, if the entry
-// contains *, ? or [, as a filepath.Match glob over the whole address.
+// contains *, ? or [, as a path.Match glob over the whole address.
 // A glob's * also matches '@', so entries must anchor on the domain
 // ("*@example.com"); the webhook enforces that for allowedRecipients.
 func AddressMatches(addr, pattern string) bool {
@@ -224,11 +224,15 @@ func AddressMatches(addr, pattern string) bool {
 		return true
 	}
 	if strings.ContainsAny(p, "*?[") {
-		ok, _ := filepath.Match(p, a)
+		// path.Match's * and ? stop at '/', which is a valid local-part
+		// character; map it to a byte no address contains.
+		ok, _ := path.Match(globSlash.Replace(p), globSlash.Replace(a))
 		return ok
 	}
 	return false
 }
+
+var globSlash = strings.NewReplacer("/", "\x00")
 
 // recipientAllowed applies recipientRestrictions; nil allows every
 // recipient. blockedDomains always wins. Otherwise a recipient passes if its

@@ -101,3 +101,17 @@ func TestEvaluate_SenderAndReplyTo(t *testing.T) {
 		}
 	}
 }
+
+// ValidatePlainAddress is shared by SMTP paths and the MailPolicy webhook.
+func TestValidatePlainAddress(t *testing.T) {
+	for _, ok := range []string{"alerts@example.com", "team/a@oncall.example.com"} {
+		if err := ValidatePlainAddress(ok); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"Alerts <alerts@example.com>", "alerts@example.com (ops)", "user%evil.example@example.com", "not an address"} {
+		if err := ValidatePlainAddress(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

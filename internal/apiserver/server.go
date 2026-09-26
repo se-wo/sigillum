@@ -301,6 +301,19 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			span.SetStatus(codes.Error, "token rejected")
 		}
 		span.End()
+		if errors.Is(err, auth.ErrUnavailable) {
+			// Not a rejected token: the kube-apiserver could not be asked.
+			s.logger.Warn("token review failed", "err", err)
+			telemetry.AuthFailuresTotal.WithLabelValues(gateway.TransportREST, gateway.AuthOAuthBearer, "auth_unavailable").Inc()
+			s.gw.Reject(audit.Event{
+				MessageID: uuid.NewString(),
+				Transport: gateway.TransportREST,
+			}, "auth_unavailable")
+			w.Header().Set("Retry-After", "5")
+			problem.Write(w, problem.New(problem.TypeUnavailable, http.StatusServiceUnavailable,
+				"Service temporarily unavailable", "the token could not be reviewed, try again later"))
+			return
+		}
 		if err != nil {
 			telemetry.AuthFailuresTotal.WithLabelValues(gateway.TransportREST, gateway.AuthOAuthBearer, "invalid_token").Inc()
 			s.gw.Reject(audit.Event{

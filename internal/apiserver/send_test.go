@@ -3,6 +3,7 @@ package apiserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,10 +17,14 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	"github.com/se-wo/sigillum/internal/apiserver/auth"
 	"github.com/se-wo/sigillum/internal/audit"
 	"github.com/se-wo/sigillum/internal/gateway"
 )
@@ -284,5 +289,34 @@ func TestHandleSendMessage_AllowedRecipients(t *testing.T) {
 	w = post(s, `{"from":"a@team.example","to":["alerts@contoso.com","pager@oncall.contoso.com"]}`)
 	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "errors/backend-not-ready") {
 		t.Fatalf("allowed recipients: want to pass the policy, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// Review of #20: a TokenReview outage answers 503 and is audited as
+// auth_unavailable, not as an invalid token (a 401 that brute-force alerts
+// on sigillum_auth_failures_total{reason="invalid_token"} would count).
+func TestAuthMiddleware_TokenReviewOutageIs503(t *testing.T) {
+	cs := k8sfake.NewSimpleClientset()
+	cs.PrependReactor("create", "tokenreviews", func(_ k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, errors.New("connection refused")
+	})
+	authn, err := auth.New(cs, []string{"sigillum"}, 16, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, sink := newTestServer()
+	s.authn = authn
+	h := s.authMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("request must not pass authentication")
+	}))
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "unavailable") {
+		t.Fatalf("want 503 unavailable, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(sink.events) != 1 || sink.events[0].Reason != "auth_unavailable" {
+		t.Fatalf("want one auth_unavailable audit record, got %+v", sink.events)
 	}
 }

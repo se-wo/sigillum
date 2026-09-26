@@ -124,12 +124,26 @@ func (s *session) Auth(mech string) (sasl.Server, error) {
 	if s.b.Tokens == nil {
 		return nil, smtp.ErrAuthUnknownMechanism
 	}
+	var unavailable bool
 	srv := sasl.NewOAuthBearerServer(func(opts sasl.OAuthBearerOptions) *sasl.OAuthBearerError {
 		ctx, cancel := context.WithTimeout(context.Background(), s.b.AuthTimeout)
 		defer cancel()
 		ctx, span := telemetry.Tracer().Start(ctx, "auth.tokenreview")
 		defer span.End()
 		subj, err := s.b.Tokens.Authenticate(ctx, opts.Token)
+		if errors.Is(err, auth.ErrUnavailable) {
+			// Not a rejected token: answered with 454 below.
+			span.SetStatus(codes.Error, "token review failed")
+			telemetry.AuthFailuresTotal.WithLabelValues(gateway.TransportSMTP, gateway.AuthOAuthBearer, "auth_unavailable").Inc()
+			s.b.Logger.Warn("smtp token review failed", "remote_ip", s.remoteIP, "err", err)
+			s.b.Sender.Reject(audit.Event{
+				MessageID:  uuid.NewString(),
+				AuthMethod: gateway.AuthOAuthBearer,
+				Transport:  gateway.TransportSMTP,
+			}, "auth_unavailable")
+			unavailable = true
+			return &sasl.OAuthBearerError{Status: "invalid_token", Schemes: "bearer"}
+		}
 		if err != nil {
 			span.SetStatus(codes.Error, "token rejected")
 			telemetry.AuthFailuresTotal.WithLabelValues(gateway.TransportSMTP, gateway.AuthOAuthBearer, "invalid_token").Inc()
@@ -148,7 +162,22 @@ func (s *session) Auth(mech string) (sasl.Server, error) {
 		}
 		return nil
 	})
-	return authFailedAs535{srv}, nil
+	return authFailedAs535{unavailableAs454{srv, &unavailable}}, nil
+}
+
+// unavailableAs454 answers a failed OAUTHBEARER exchange with a temporary
+// 454 when the token could not be reviewed, instead of 535.
+type unavailableAs454 struct {
+	sasl.Server
+	unavailable *bool
+}
+
+func (u unavailableAs454) Next(response []byte) ([]byte, bool, error) {
+	challenge, done, err := u.Server.Next(response)
+	if err != nil && *u.unavailable {
+		return nil, false, errAuthUnavailable
+	}
+	return challenge, done, err
 }
 
 // authFailedAs535 maps any SASL failure to "535 5.7.8 Authentication
@@ -375,19 +404,9 @@ func resultError(res gateway.Result, msgID string) error {
 var errNoFrom = errors.New("message has no valid From header")
 
 // checkPath validates a MAIL FROM or RCPT TO path as go-smtp hands it over:
-// quotes already removed, any source route stripped. It must parse as a
-// single plain address, equal to what is relayed, whose local part has no
-// routing semantics (see policy.ValidateMailbox).
-func checkPath(path string) error {
-	a, err := mail.ParseAddress(path)
-	if err != nil {
-		return err
-	}
-	if a.Name != "" || a.Address != path {
-		return fmt.Errorf("%q is not a plain address", path)
-	}
-	return policy.ValidateMailbox(a.Address)
-}
+// quotes already removed, any source route stripped. It must be a plain
+// address, equal to what is relayed (policy.ValidatePlainAddress).
+func checkPath(path string) error { return policy.ValidatePlainAddress(path) }
 
 // addressHeaders holds the header addresses the policy checks.
 type addressHeaders struct {

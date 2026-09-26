@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -366,6 +367,46 @@ func TestSteadyStateReconcileSkipsAPIReader(t *testing.T) {
 	}
 	if uncached != 0 {
 		t.Fatalf("a credential with nothing due must not be read uncached, got %d reads", uncached)
+	}
+}
+
+// Review of #20: a JSON decode into a filled object keeps fields the JSON
+// omits, so the uncached read must decode into an empty object, or a
+// cleared status.previous would come back from the cached copy.
+func TestFreshReadUsesEmptyObject(t *testing.T) {
+	r, base := credReconciler(t, issuedCredential("1h"), interceptor.Funcs{})
+	var dirty bool
+	r.APIReader = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if mc, ok := obj.(*sigv1.MailCredential); ok && (mc.Name != "" || mc.Status.Previous != nil) {
+				dirty = true
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: credKey}); err != nil {
+		t.Fatal(err)
+	}
+	if dirty {
+		t.Fatal("the uncached read decoded into the cached copy")
+	}
+}
+
+// Review of #20: a generated credential that fails early (here an invalid
+// interval) still gets a current SecretsManaged condition.
+func TestSecretsManagedOnEarlyFailure(t *testing.T) {
+	mc := issuedCredential("1h")
+	mc.Spec.Rotation.Interval = "90s"
+	mc.Status.Conditions = []metav1.Condition{{Type: sigv1.ConditionSecretsManaged, Status: metav1.ConditionTrue,
+		Reason: sigv1.ReasonReady, Message: "credential Secret guard verified", LastTransitionTime: metav1.Now()}}
+	r, c := credReconciler(t, mc, interceptor.Funcs{})
+	r.Guard = &GuardChecker{checked: true, err: fmt.Errorf("ValidatingAdmissionPolicy deleted")}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: credKey}); err != nil {
+		t.Fatal(err)
+	}
+	managed := meta.FindStatusCondition(getCredential(t, c).Status.Conditions, sigv1.ConditionSecretsManaged)
+	if managed == nil || managed.Status != metav1.ConditionFalse || managed.Reason != sigv1.ReasonGuardMissing {
+		t.Fatalf("SecretsManaged must follow the guard on every path, got %+v", managed)
 	}
 }
 

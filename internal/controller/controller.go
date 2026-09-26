@@ -84,7 +84,7 @@ func init() {
 		fs.BoolVar(&disableWebhook, "disable-webhook", false, "disable the validating webhook server")
 		fs.StringVar(&clusterName, "cluster-name", "", "cluster name added to every log line (US-4.5)")
 		fs.StringVar(&secretNamespaces, "secret-namespaces", "", "comma-separated namespaces whose Secrets may be read (backend credentials); default: the pod's namespace")
-		fs.BoolVar(&credentialsGenerated, "credentials-generated", true, "issue generated MailCredential passwords into Secrets (requires the credential Secret guard)")
+		fs.BoolVar(&credentialsGenerated, "credentials-generated", false, "issue generated MailCredential passwords into Secrets; needs the credential Secret guard, POD_NAMESPACE and the ServiceAccount name (the chart sets all of them)")
 		fs.StringVar(&credentialExclude, "credential-exclude-namespaces", "kube-*", "comma-separated namespaces (exact, or prefixes ending in *) that may not hold MailCredentials; the pod's namespace is always excluded")
 		fs.StringVar(&credentialGuardName, "credential-guard-name", "sigillum-credential-guard", "name of the credential Secret guard ValidatingAdmissionPolicy and binding")
 		fs.DurationVar(&credentialGuardCheck, "credential-guard-check-interval", 5*time.Minute, "how often the credential Secret guard is re-verified")
@@ -162,7 +162,7 @@ func init() {
 		}
 		if credentialsGenerated {
 			if releaseNs == "" || serviceAccountName == "" {
-				return fmt.Errorf("generated credentials need POD_NAMESPACE and --service-account-name to verify the credential Secret guard")
+				return fmt.Errorf("--credentials-generated needs POD_NAMESPACE and --service-account-name to verify the credential Secret guard")
 			}
 			guard := credential.Guard{
 				Name:               credentialGuardName,

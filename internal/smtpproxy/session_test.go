@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -47,6 +48,9 @@ func (s *stubSender) Reject(ev audit.Event, reason string) {
 type stubTokens struct{}
 
 func (stubTokens) Authenticate(_ context.Context, token string) (*auth.Subject, error) {
+	if token == "review-down" {
+		return nil, fmt.Errorf("%w: connection refused", auth.ErrUnavailable)
+	}
 	if token != "good-token" {
 		return nil, errors.New("invalid")
 	}
@@ -164,6 +168,38 @@ func TestOAuthBearer_AcceptedMessageReachesGateway(t *testing.T) {
 	if !strings.HasPrefix(raw, "Received: from [127.0.0.1] by sigillum with ESMTPA id "+req.MessageID) ||
 		!strings.Contains(raw, "Subject: hi\r\n\r\nhello") {
 		t.Fatalf("raw message not relayed as expected:\n%s", raw)
+	}
+}
+
+// Review of #20: a TokenReview outage is a temporary failure, audited and
+// counted as auth_unavailable, not as an invalid token.
+func TestOAuthBearer_TokenReviewOutageIs454(t *testing.T) {
+	sender := &stubSender{}
+	conn, err := textproto.Dial("tcp", startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	expect := func(code int) string {
+		t.Helper()
+		_, msg, err := conn.ReadResponse(code)
+		if err != nil {
+			t.Fatalf("want %d: %v", code, err)
+		}
+		return msg
+	}
+	expect(220)
+	_ = conn.PrintfLine("EHLO client.test")
+	expect(250)
+	ir := base64.StdEncoding.EncodeToString([]byte("n,,\x01auth=Bearer review-down\x01\x01"))
+	_ = conn.PrintfLine("AUTH OAUTHBEARER %s", ir)
+	expect(334)
+	_ = conn.PrintfLine("%s", base64.StdEncoding.EncodeToString([]byte{0x01}))
+	if msg := expect(454); !strings.HasPrefix(msg, "4.7.0 ") {
+		t.Fatalf("want 454 4.7.0, got %q", msg)
+	}
+	if len(sender.rejects) != 1 || sender.rejects[0] != "auth_unavailable" {
+		t.Fatalf("want one auth_unavailable reject, got %v", sender.rejects)
 	}
 }
 

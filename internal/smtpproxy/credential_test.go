@@ -269,8 +269,8 @@ func TestCredential_PreviousPasswordAndRevocation(t *testing.T) {
 	if err := cl.Delete(context.Background(), mc); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Mail("grafana@monitoring.example", nil); smtpCode(err) != 530 {
-		t.Fatalf("want 530 after revocation, got %v", err)
+	if err := c.Mail("grafana@monitoring.example", nil); smtpCode(err) != 454 {
+		t.Fatalf("want 454 after revocation, got %v", err)
 	}
 }
 
@@ -291,8 +291,8 @@ func TestCredential_RevokedSessionDoesNotFallBackToPodIP(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		if err := c.Mail("grafana@monitoring.example", nil); smtpCode(err) != 530 {
-			t.Fatalf("MAIL %d after revocation: want 530, got %v", i, err)
+		if err := c.Mail("grafana@monitoring.example", nil); smtpCode(err) != 454 {
+			t.Fatalf("MAIL %d after revocation: want 454, got %v", i, err)
 		}
 	}
 	if len(sender.reqs) != 0 {
@@ -326,8 +326,9 @@ func TestCredential_RevokedBeforeDataIsNotRelayed(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = io.WriteString(w, "From: grafana@monitoring.example\r\nTo: ops@example.com\r\nSubject: x\r\n\r\nbody\r\n")
-	if err := w.Close(); smtpCode(err) != 530 {
-		t.Fatalf("want 530 at the end of DATA, got %v", err)
+	// Temporary: a message queued before a rotation must not bounce.
+	if err := w.Close(); smtpCode(err) != 454 {
+		t.Fatalf("want 454 at the end of DATA, got %v", err)
 	}
 	if len(sender.reqs) != 0 {
 		t.Fatalf("a revoked credential's message must not be relayed: %+v", sender.reqs)

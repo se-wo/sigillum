@@ -2,7 +2,6 @@ package webhook
 
 import (
 	"context"
-	"net/mail"
 	"path/filepath"
 	"strings"
 
@@ -141,15 +140,8 @@ func validateRecipients(p *field.Path, entries []string) field.ErrorList {
 
 func recipientEntryError(e string) string {
 	if !strings.ContainsAny(e, "*?[") {
-		parsed, err := mail.ParseAddress(e)
-		switch {
-		case err != nil:
-			return err.Error()
-		case parsed.Name != "" || parsed.Address != e:
-			return "must be a plain address such as alerts@example.com"
-		}
-		if err := policy.ValidateMailbox(e); err != nil {
-			return err.Error()
+		if err := policy.ValidatePlainAddress(e); err != nil {
+			return err.Error() + " (must be a plain address such as alerts@example.com)"
 		}
 		return ""
 	}

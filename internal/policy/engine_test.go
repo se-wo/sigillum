@@ -369,3 +369,23 @@ func TestEvaluate_AllowedRecipientsGlob(t *testing.T) {
 		t.Fatal("Reply-To outside allowedRecipients must be denied")
 	}
 }
+
+// Review of #20: '/' is a valid local-part character, and a glob's * must
+// match it like any other character.
+func TestAddressMatchesSlashInLocalPart(t *testing.T) {
+	cases := []struct {
+		addr, pattern string
+		want          bool
+	}{
+		{"team/a@oncall.contoso.com", "*@oncall.contoso.com", true},
+		{"a/b/c@oncall.contoso.com", "a?b*@oncall.contoso.com", true},
+		{"team/a@oncall.contoso.com", "team/a@oncall.contoso.com", true},
+		{"team/a@other.example", "*@oncall.contoso.com", false},
+		{"x@evil.example/oncall.contoso.com", "*@oncall.contoso.com", false},
+	}
+	for _, tc := range cases {
+		if got := AddressMatches(tc.addr, tc.pattern); got != tc.want {
+			t.Errorf("AddressMatches(%q, %q) = %v, want %v", tc.addr, tc.pattern, got, tc.want)
+		}
+	}
+}

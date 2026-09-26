@@ -71,6 +71,10 @@ func New(c kubernetes.Interface, audiences []string, cacheSize int, ttl time.Dur
 	return a, nil
 }
 
+// ErrUnavailable marks a token that could not be reviewed (the TokenReview
+// request failed), as opposed to one the kube-apiserver rejected.
+var ErrUnavailable = errors.New("token review unavailable")
+
 // Authenticate validates token and returns the Kubernetes identity.
 func (a *Authenticator) Authenticate(ctx context.Context, token string) (*Subject, error) {
 	token = strings.TrimSpace(token)
@@ -97,7 +101,7 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (*Subjec
 	}
 	resp, err := a.client.AuthenticationV1().TokenReviews().Create(ctx, tr, metav1.CreateOptions{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	if !resp.Status.Authenticated {
 		if a.cache != nil {

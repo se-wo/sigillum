@@ -53,9 +53,11 @@ Works with off-the-shelf apps and cannot be bypassed (SPEC §8.2).
   only over STARTTLS unless `smtp.allowInsecureAuth: true`. Failed logins
   are audited; failed logins of bring-your-own-hash credentials are
   throttled per username and source IP. Deleting a `MailCredential` also
-  ends open sessions. A spec edit does not interrupt logins while the
-  controller catches up, except a changed ServiceAccount or password hash,
-  which takes effect once accepted.
+  ends open sessions (`454 4.7.0`, so a message queued before a rotation
+  is retried with the new password instead of bouncing). A spec edit
+  does not interrupt logins while the controller catches up, except a
+  changed ServiceAccount or password hash, which takes effect once
+  accepted.
 - Credential Secret guard: a `ValidatingAdmissionPolicy` that confines the
   controller's Secret writes to `Opaque` credential Secrets outside
   excluded namespaces. The controller verifies it and writes nothing while it is
@@ -69,7 +71,10 @@ Works with off-the-shelf apps and cannot be bypassed (SPEC §8.2).
 - Audit fields `credential`, `credential_previous` and `cluster`; reasons
   `invalid_credentials`, `auth_rate_limited`, `auth_unavailable`,
   `upstream_rejected`.
-- Metric `sigillum_auth_failures_total`.
+- Metric `sigillum_auth_failures_total`. A failed TokenReview (kube-apiserver
+  unreachable) counts as `auth_unavailable`, not `invalid_token`, and
+  answers `503 unavailable` (REST) or `454 4.7.0` (SMTP) instead of an
+  authentication failure.
 - `--shutdown-delay` (chart `api.shutdownDelay`, `smtp.shutdownDelay`).
 - Startup check of the installed CRDs: every component exits with an
   error naming the missing kinds and fields when the CRDs are older than

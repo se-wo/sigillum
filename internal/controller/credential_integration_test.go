@@ -19,6 +19,7 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 	"github.com/se-wo/sigillum/internal/credential"
@@ -325,4 +326,52 @@ func TestIntegration_MailCredentialWebhookRejectsExcludedNamespace(t *testing.T)
 	if err == nil || !strings.Contains(err.Error(), "excluded") {
 		t.Fatalf("webhook must reject excluded namespaces, got %v", err)
 	}
+}
+
+// Review of #20: the controller watches ServiceAccounts as metadata only.
+// A credential created before its ServiceAccount becomes Ready once the
+// ServiceAccount appears, through that watch and the metadata cache.
+func TestIntegration_ServiceAccountWatchIsMetadataOnly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr, err := ctrl.NewManager(testCfg, ctrl.Options{Scheme: testScheme,
+		Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &MailCredentialReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Exclusions: testExclusions}
+	if err := r.SetupWithManager(mgr); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = mgr.Start(ctx) }()
+
+	ns := "sa-watch-it"
+	ensureNamespace(t, ns)
+	mc := &sigv1.MailCredential{ObjectMeta: metav1.ObjectMeta{Name: "late", Namespace: ns},
+		Spec: sigv1.MailCredentialSpec{ServiceAccountName: "late-sa",
+			PasswordHash: credential.HashArgon2id("pw", []byte("0123456789abcdef"), 7*1024, 5, 1)}}
+	if err := testClient.Create(ctx, mc); err != nil {
+		t.Fatal(err)
+	}
+	waitReason := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			var got sigv1.MailCredential
+			if err := testClient.Get(ctx, client.ObjectKeyFromObject(mc), &got); err == nil {
+				if c := readyCondition(&got); c != nil && c.Reason == want {
+					return
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("Ready reason %s not reached", want)
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+	waitReason(sigv1.ReasonServiceAccountNotFound)
+	if err := testClient.Create(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "late-sa", Namespace: ns}}); err != nil {
+		t.Fatal(err)
+	}
+	waitReason(sigv1.ReasonBringYourOwnHash)
 }

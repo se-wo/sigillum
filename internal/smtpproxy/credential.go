@@ -46,8 +46,11 @@ var (
 		Code: 454, EnhancedCode: smtp.EnhancedCode{4, 7, 0},
 		Message: "Temporary authentication failure",
 	}
+	// errCredentialRevoked is temporary: after a rotation the client can
+	// reconnect with the new password and deliver the message it retries,
+	// and a deleted credential then fails AUTH permanently (535).
 	errCredentialRevoked = &smtp.SMTPError{
-		Code: 530, EnhancedCode: smtp.EnhancedCode{5, 7, 0},
+		Code: 454, EnhancedCode: smtp.EnhancedCode{4, 7, 0},
 		Message: "Credential no longer valid; reconnect and authenticate again",
 	}
 )

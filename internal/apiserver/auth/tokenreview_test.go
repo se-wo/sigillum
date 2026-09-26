@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -213,5 +214,21 @@ func TestTokenExpiry(t *testing.T) {
 	}
 	if exp, ok := tokenExpiry(jwtWithExp(42)); !ok || exp.Unix() != 42 {
 		t.Fatalf("exp = %v %v", exp, ok)
+	}
+}
+
+// Review of #20: a failed TokenReview request is ErrUnavailable, and is
+// not cached as a rejection.
+func TestAuthenticator_ReviewFailureIsUnavailable(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("create", "tokenreviews", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("connection refused")
+	})
+	a, err := New(cs, []string{"sigillum"}, 16, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Authenticate(context.Background(), "tok"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("want ErrUnavailable, got %v", err)
 	}
 }
