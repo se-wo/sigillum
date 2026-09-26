@@ -19,8 +19,8 @@ before forwarding through a `MailBackend` (SMTP) relay.
 - **Observability:** structured slog (JSON), separate audit stream,
   Prometheus metrics with optional `ServiceMonitor`, OpenTelemetry tracing
 
-See [`docs/SPEC.md`](docs/SPEC.md) for the full specification and
-[`docs/PLAN.md`](docs/PLAN.md) for the v0.1.0 implementation plan.
+See [`docs/SPEC.md`](docs/SPEC.md) for the full specification, roadmap and
+known gaps.
 
 ## Install
 
