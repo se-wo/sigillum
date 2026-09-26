@@ -66,9 +66,14 @@ func FuzzValidateAddressHeader(f *testing.F) {
 		if err := ValidateAddressHeader(raw, n+1); err != nil {
 			t.Fatalf("ValidateAddressHeader(%q) accepted for %d, not %d: %v", raw, n, n+1, err)
 		}
-		// One more address whose display name holds '@' must be caught.
-		if v := raw + `, "x@evil.example" <a@b>`; ValidateAddressHeader(v, n+1) == nil {
-			t.Fatalf("ValidateAddressHeader(%q, %d) = nil", v, n+1)
+		// With no '@' to spare, one more address whose display name holds
+		// '@' must be caught.
+		tight := 0
+		for ValidateAddressHeader(raw, tight) != nil {
+			tight++
+		}
+		if v := raw + `, "x@evil.example" <a@b>`; ValidateAddressHeader(v, tight+1) == nil {
+			t.Fatalf("ValidateAddressHeader(%q, %d) = nil", v, tight+1)
 		}
 	})
 }
