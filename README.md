@@ -135,12 +135,51 @@ callers. STARTTLS is offered when `smtp.tls.secretName` is set.
 | Audit stream | One JSON line per request (accepted or rejected) on stdout, tagged `"stream":"audit"`; `audit.output: stdout\|stderr\|none`. Never contains subject or body. |
 | Tracing | `tracing.endpoint` (OTLP/HTTP, e.g. `http://otel-collector:4318`) plus the standard `OTEL_*` variables. Spans: `http.request` → `auth.tokenreview`, `policy.evaluate`, `ratelimit.allow`, `backend.send`. |
 
+## Supply chain
+
+Releases after v0.2.1 are built and published only by
+[`release.yml`](.github/workflows/release.yml) from a `v*` tag. For each
+release:
+
+- the image (`ghcr.io/se-wo/sigillum`) and chart
+  (`oci://ghcr.io/se-wo/charts/sigillum`) are signed keyless with cosign and
+  carry a GitHub [artifact attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations)
+  (SLSA build provenance), both tied to the release workflow's identity;
+- the image also carries an SPDX SBOM and BuildKit provenance for each
+  platform (the SBOMs are attached to the workflow run as well);
+- base images are pinned by digest and all Actions by commit SHA.
+
+Verify before deploying (replace `0.3.0` with the version):
+
+```sh
+# cosign signature (image; same for ghcr.io/se-wo/charts/sigillum)
+cosign verify ghcr.io/se-wo/sigillum:0.3.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/se-wo/sigillum/\.github/workflows/release\.yml@refs/tags/v'
+
+# build provenance
+gh attestation verify oci://ghcr.io/se-wo/sigillum:0.3.0 --repo se-wo/sigillum
+gh attestation verify oci://ghcr.io/se-wo/charts/sigillum:0.3.0 --repo se-wo/sigillum
+
+# SBOM for one platform
+docker buildx imagetools inspect ghcr.io/se-wo/sigillum:0.3.0 \
+  --format '{{ json (index .SBOM "linux/amd64").SPDX }}'
+```
+
+In CI, `govulncheck` fails the build on known vulnerabilities that the code
+actually reaches, dependency review blocks PRs that add vulnerable
+dependencies, and CodeQL scans the Go code and the workflows. Dependabot
+opens weekly update PRs for Go modules, Actions and base images, after a
+7-day cooldown; security updates skip the cooldown. See
+[SECURITY.md](SECURITY.md) to report a vulnerability.
+
 ## Development
 
 ```sh
 make build              # compile bin/sigillum
 make manifests generate # regenerate CRDs + deepcopy
 make test               # unit + envtest suite
+make vulncheck          # govulncheck against the Go vulnerability database
 make e2e                # kind + MailHog smoke (needs docker)
 ```
 

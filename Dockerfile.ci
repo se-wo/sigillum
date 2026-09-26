@@ -4,7 +4,7 @@
 # artifact instead of compiling again inside a Go layer. Keeps the E2E
 # job's image build under a few seconds.
 
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
 WORKDIR /
 COPY bin/sigillum /sigillum
 USER 65532:65532

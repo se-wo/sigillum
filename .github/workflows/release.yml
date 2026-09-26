@@ -2,9 +2,18 @@ name: release
 
 # Only GitHub-owned actions are used: the repository's Actions policy allows
 # actions owned by se-wo, created by GitHub, or helm/kind-action. Docker
-# buildx and Helm are preinstalled on ubuntu-latest and driven from shell.
+# buildx and Helm are preinstalled on ubuntu-latest and driven from shell;
+# cosign is a checksum-pinned release binary (.github/actions/setup-cosign).
 # Actions are pinned to commit SHAs (not tags); tag comments track which
-# human-readable release the SHA corresponds to. Bump deliberately.
+# human-readable release the SHA corresponds to. Dependabot bumps them.
+#
+# Supply chain: every published image and chart is
+#   - signed keyless with cosign (Sigstore, GitHub OIDC identity), and
+#   - given a SLSA build provenance attestation via actions/attest, stored in
+#     GitHub and pushed to the registry next to the artifact.
+# The image also carries BuildKit's SPDX SBOM and max-mode provenance per
+# platform; the SBOMs are exported as a workflow artifact too. See the
+# README's "Supply chain" section for the verify commands.
 #
 # Pull requests that touch the release inputs run the same build without
 # pushing, so a broken release is caught before a tag is cut.
@@ -14,6 +23,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - .github/actions/**
       - Dockerfile
       - charts/**
 
@@ -31,6 +41,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write      # Sigstore signing certificate (cosign, attest)
+      attestations: write  # store the provenance attestation in GitHub
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -65,7 +77,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
+      # Installed on PRs too so a bad version/checksum pin fails early.
+      - uses: ./.github/actions/setup-cosign
+
       - name: build (and push on tags)
+        id: build
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           TAGS: ${{ steps.meta.outputs.tags }}
@@ -79,11 +95,62 @@ jobs:
                 --label "org.opencontainers.image.revision=$GITHUB_SHA"
                 --label "org.opencontainers.image.version=$VERSION"
                 --label "org.opencontainers.image.created=$CREATED"
-                --provenance=false)
+                --provenance=mode=max
+                --sbom=true
+                --metadata-file "$RUNNER_TEMP/build-metadata.json")
           IFS=, read -ra tag_list <<< "$TAGS"
           for t in "${tag_list[@]}"; do args+=(--tag "$t"); done
           if [ "$PUBLISH" = true ]; then args+=(--push); fi
           docker buildx build "${args[@]}" .
+          if [ "$PUBLISH" = true ]; then
+            digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/build-metadata.json")
+            if [[ "$digest" != sha256:* ]]; then
+              echo "no image digest in build metadata: $digest"
+              exit 1
+            fi
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+            echo "pushed $IMAGE@$digest"
+          fi
+
+      # Signs the multi-arch index by digest; tags are just pointers to it.
+      - name: sign image
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+
+      - name: attest image provenance
+        if: env.PUBLISH == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          # Storage records are only supported for organization-owned repos.
+          create-storage-record: false
+
+      - name: export SBOMs
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p sbom
+          IFS=, read -ra platforms <<< "$PLATFORMS"
+          for p in "${platforms[@]}"; do
+            out="sbom/sigillum-${p//\//-}.spdx.json"
+            docker buildx imagetools inspect "$IMAGE@$DIGEST" \
+              --format "{{ json (index .SBOM \"$p\").SPDX }}" > "$out"
+            jq -e '.spdxVersion' "$out" >/dev/null
+          done
+          ls -l sbom
+
+      - name: upload SBOMs
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-${{ steps.meta.outputs.version }}
+          path: sbom/
+          if-no-files-found: error
 
   chart:
     runs-on: ubuntu-latest
@@ -91,8 +158,14 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write      # Sigstore signing certificate (cosign, attest)
+      attestations: write  # store the provenance attestation in GitHub
+    env:
+      CHART: ghcr.io/${{ github.repository_owner }}/charts/sigillum
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: ./.github/actions/setup-cosign
 
       - name: extract version
         id: v
@@ -123,10 +196,35 @@ jobs:
           helm package charts/sigillum --version "$VERSION" --app-version "$VERSION"
 
       - name: push chart to OCI registry
+        id: push
         if: env.PUBLISH == 'true'
         env:
           VERSION: ${{ steps.v.outputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -o pipefail
           echo "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          helm push "sigillum-$VERSION.tgz" "oci://ghcr.io/$GITHUB_REPOSITORY_OWNER/charts"
+          # cosign and actions/attest read registry credentials from Docker's config.
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          helm push "sigillum-$VERSION.tgz" "oci://${CHART%/*}" 2>&1 | tee "$RUNNER_TEMP/helm-push.log"
+          digest=$(awk '/^Digest:/ {print $2}' "$RUNNER_TEMP/helm-push.log")
+          if [[ "$digest" != sha256:* ]]; then
+            echo "no chart digest in helm push output"
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: sign chart
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "$CHART@$DIGEST"
+
+      - name: attest chart provenance
+        if: env.PUBLISH == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.CHART }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
