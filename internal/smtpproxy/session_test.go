@@ -359,18 +359,54 @@ func TestOversizedMessageIsAudited(t *testing.T) {
 func TestSizeIsMeasuredLikeREST(t *testing.T) {
 	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
 	c := authed(t, startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{}}))
-	attachment := strings.Repeat("A", 3000)
+	attachment := strings.Repeat("A", 30000)
+	encoded := wrap76(base64.StdEncoding.EncodeToString([]byte(attachment)))
 	msg := "From: app@billing.example\r\nTo: a@x.example\r\nMIME-Version: 1.0\r\n" +
 		"Content-Type: multipart/mixed; boundary=b1\r\n\r\n" +
 		"--b1\r\nContent-Type: text/plain\r\n\r\nhello\r\n" +
 		"--b1\r\nContent-Type: application/pdf\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
-		wrap76(base64.StdEncoding.EncodeToString([]byte(attachment))) + "\r\n--b1--\r\n"
+		encoded + "\r\n--b1--\r\n"
 	if err := send(c, "app@billing.example", []string{"a@x.example"}, msg); err != nil {
 		t.Fatal(err)
 	}
-	// "hello" plus CRLF before the boundary, plus the 3000 decoded attachment bytes.
-	if got := sender.reqs[0].SizeBytes; got != int64(len("hello")+3000) {
-		t.Fatalf("want decoded content size %d, got %d (raw %d)", len("hello")+3000, got, len(msg))
+	// Everything relayed counts except the base64 overhead of the attachment.
+	want := int64(len(msg) - (len(encoded) - len(attachment)))
+	if got := sender.reqs[0].SizeBytes; got != want {
+		t.Fatalf("want %d (raw %d minus base64 overhead), got %d", want, len(msg), got)
+	}
+}
+
+func TestBccHeaderIsNotRelayed(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	c := authed(t, startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{}}))
+	msg := "From: app@billing.example\r\nTo: a@x.example\r\nBcc: hidden@x.example\r\nSubject: s\r\n\r\nbody\r\n"
+	if err := send(c, "app@billing.example", []string{"a@x.example", "hidden@x.example"}, msg); err != nil {
+		t.Fatal(err)
+	}
+	req := sender.reqs[0]
+	if strings.Contains(string(req.Raw), "hidden@") {
+		t.Fatalf("Bcc header must be stripped before relaying:\n%s", req.Raw)
+	}
+	if got := gateway.Recipients(req.Message); len(got) != 2 {
+		t.Fatalf("the Bcc recipient still gets the message via the envelope, got %v", got)
+	}
+}
+
+func TestBusyProxyAnswers451(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	slots := make(chan struct{}, 1)
+	slots <- struct{}{} // the only slot is taken
+	c := authed(t, startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{},
+		Slots: slots, SendTimeout: 100 * time.Millisecond}))
+	if err := send(c, "app@billing.example", []string{"a@x.example"}, testMessage); smtpCode(err) != 451 {
+		t.Fatalf("want 451 when no slot frees up in time, got %v", err)
+	}
+	if len(sender.reqs) != 0 || len(sender.rejects) != 1 || sender.rejects[0] != "busy" {
+		t.Fatalf("want an audited busy reject, got reqs=%d rejects=%v", len(sender.reqs), sender.rejects)
+	}
+	<-slots
+	if err := send(c, "app@billing.example", []string{"a@x.example"}, testMessage); err != nil {
+		t.Fatalf("session must stay usable once a slot is free: %v", err)
 	}
 }
 

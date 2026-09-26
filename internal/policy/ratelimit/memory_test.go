@@ -77,3 +77,17 @@ func TestNoLimit(t *testing.T) {
 		t.Fatal("NoLimit.Allow must always allow")
 	}
 }
+
+func TestMemoryLimiter_Refund(t *testing.T) {
+	l := NewMemoryLimiter()
+	ctx := context.Background()
+	l.Allow(ctx, "k", 1, 0)
+	if ok, _, _ := l.Allow(ctx, "k", 1, 0); ok {
+		t.Fatal("second hit must be rejected")
+	}
+	_ = l.Refund(ctx, "k")
+	if ok, _, _ := l.Allow(ctx, "k", 1, 0); !ok {
+		t.Fatal("refunded hit must free the budget")
+	}
+	_ = l.Refund(ctx, "unknown") // no-op, must not panic
+}

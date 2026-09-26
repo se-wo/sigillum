@@ -34,6 +34,8 @@ func (a *auditSink) Record(e audit.Event) {
 
 type fixedLimiter struct{}
 
+func (fixedLimiter) Refund(context.Context, string) error { return nil }
+
 func (fixedLimiter) Allow(context.Context, string, int32, int32) (bool, time.Duration, error) {
 	return true, 0, nil
 }
@@ -153,5 +155,16 @@ func TestRouter_TracesOnlyTheMailAPI(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
 	if spans := exp.GetSpans(); len(spans) != 1 || spans[0].Name != "http.request" {
 		t.Fatalf("want one http.request span for /v1, got %+v", spans)
+	}
+}
+
+func TestHandleSendMessage_OversizedBodyAuditedAsMessageTooLarge(t *testing.T) {
+	s, sink := newTestServer()
+	big := `{"from":"a@team.example","to":["b@x.example"],"body":{"text":"` + strings.Repeat("x", 33*1024*1024) + `"}}`
+	if w := post(s, big); w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("want 413, got %d", w.Code)
+	}
+	if len(sink.events) != 1 || sink.events[0].Reason != "message_too_large" {
+		t.Fatalf("want the same reason as the SMTP path, got %+v", sink.events)
 	}
 }

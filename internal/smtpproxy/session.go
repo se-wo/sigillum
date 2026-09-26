@@ -53,6 +53,13 @@ type Backend struct {
 	Pods PodResolver
 	// AuthTimeout bounds TokenReview and pod lookups.
 	AuthTimeout time.Duration
+	// SendTimeout bounds the pipeline for one message (rate limiter and
+	// upstream relay). Zero means no bound.
+	SendTimeout time.Duration
+	// Slots, when non-nil, caps how many messages are buffered and relayed
+	// at once; each holds up to MaxMessageBytes in memory. Its capacity is
+	// the limit.
+	Slots chan struct{}
 }
 
 // NewSession implements smtp.Backend.
@@ -223,9 +230,31 @@ func (s *session) Data(r io.Reader) error {
 		return errAuthRequired
 	}
 	baseEvent := s.event(msgID, s.from, s.rcpts)
+
+	if s.b.SendTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.b.SendTimeout)
+		defer cancel()
+	}
+	if s.b.Slots != nil {
+		select {
+		case s.b.Slots <- struct{}{}:
+			defer func() { <-s.b.Slots }()
+		case <-ctx.Done():
+			// go-smtp drains the rest of DATA after we return.
+			s.b.Sender.Reject(baseEvent, "busy")
+			return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 2},
+				Message: "Too many concurrent messages, try again later (id " + msgID + ")"}
+		}
+	}
+
+	// Read straight into a buffer that already holds the Received trace
+	// header, so the relayed message is never copied a second time.
+	trace := receivedHeader(s.remoteIP, msgID, s.identity.AuthMethod)
+	buf := bytes.NewBuffer(make([]byte, 0, len(trace)+64*1024))
+	buf.WriteString(trace)
 	// go-smtp enforces Server.MaxMessageBytes while we read.
-	raw, err := io.ReadAll(r)
-	if err != nil {
+	if _, err := io.Copy(buf, r); err != nil {
 		reason := "invalid_payload"
 		if errors.Is(err, smtp.ErrDataTooLarge) {
 			reason = "message_too_large"
@@ -233,6 +262,7 @@ func (s *session) Data(r io.Reader) error {
 		s.b.Sender.Reject(baseEvent, reason)
 		return err
 	}
+	raw := stripBcc(buf.Bytes()[len(trace):])
 	msg, headerFrom, err := parseMessage(raw)
 	if err != nil {
 		s.b.Sender.Reject(baseEvent, "invalid_payload")
@@ -248,7 +278,7 @@ func (s *session) Data(r io.Reader) error {
 		Transport:    gateway.TransportSMTP,
 		MessageID:    msgID,
 		Message:      &driver.Message{From: driver.Address{Address: headerFrom}, To: to},
-		Raw:          withReceivedHeader(raw, s.remoteIP, msgID, s.identity.AuthMethod),
+		Raw:          buf.Bytes()[:len(trace)+len(raw)],
 		EnvelopeFrom: s.from,
 		SizeBytes:    contentSize(msg, len(raw)),
 	})
@@ -332,16 +362,15 @@ func parseMessage(raw []byte) (*mail.Message, string, error) {
 	return msg, list[0].Address, nil
 }
 
-// withReceivedHeader prepends an RFC 5321 trace header so the relayed
-// message can be correlated with the audit log.
-func withReceivedHeader(raw []byte, remoteIP, msgID, authMethod string) []byte {
+// receivedHeader builds the RFC 5321 trace header that is prepended to the
+// relayed message, so it can be correlated with the audit log.
+func receivedHeader(remoteIP, msgID, authMethod string) string {
 	proto := "ESMTP"
 	if authMethod == gateway.AuthOAuthBearer {
 		proto = "ESMTPA" // RFC 3848
 	}
-	h := fmt.Sprintf("Received: from [%s] by sigillum with %s id %s;\r\n\t%s\r\n",
+	return fmt.Sprintf("Received: from [%s] by sigillum with %s id %s;\r\n\t%s\r\n",
 		remoteIP, proto, msgID, time.Now().UTC().Format(time.RFC1123Z))
-	return append([]byte(h), raw...)
 }
 
 func remoteIP(a net.Addr) string {

@@ -108,6 +108,11 @@ func (l *RedisLimiter) Allow(ctx context.Context, key string, perMinute, perHour
 	return false, ceilToSecond(time.Duration(res[1]) * time.Millisecond), nil
 }
 
+// Refund implements Limiter.Refund by removing the newest hit for key.
+func (l *RedisLimiter) Refund(ctx context.Context, key string) error {
+	return l.client.ZPopMax(ctx, l.prefix+key, 1).Err()
+}
+
 // member returns a unique sorted-set member so concurrent hits in the same
 // millisecond are all counted.
 func member() string {

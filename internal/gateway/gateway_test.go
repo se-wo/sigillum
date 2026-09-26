@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -66,11 +67,28 @@ func (f *fakeDriver) Send(_ context.Context, m *driver.Message) (*driver.SendRes
 
 type denyLimiter struct{}
 
+func (denyLimiter) Refund(context.Context, string) error { return nil }
+
+// countingLimiter admits everything and counts hits minus refunds.
+type countingLimiter struct{ hits int }
+
+func (c *countingLimiter) Allow(context.Context, string, int32, int32) (bool, time.Duration, error) {
+	c.hits++
+	return true, 0, nil
+}
+
+func (c *countingLimiter) Refund(context.Context, string) error {
+	c.hits--
+	return nil
+}
+
 func (denyLimiter) Allow(context.Context, string, int32, int32) (bool, time.Duration, error) {
 	return false, 42 * time.Second, nil
 }
 
 type brokenLimiter struct{}
+
+func (brokenLimiter) Refund(context.Context, string) error { return nil }
 
 func (brokenLimiter) Allow(context.Context, string, int32, int32) (bool, time.Duration, error) {
 	return false, 0, ratelimit.ErrUnavailable
@@ -278,5 +296,54 @@ func TestSend_SpanHierarchy(t *testing.T) {
 		if parents[child] != parent {
 			t.Errorf("%s: parent %q, want %q (all: %v)", child, parents[child], parent, parents)
 		}
+	}
+}
+
+func TestSend_TransientFailureRefundsRateLimit(t *testing.T) {
+	transient := &fakeDriver{err: fmt.Errorf("%w: relay down", driver.ErrUpstreamTransient)}
+	g, _ := newGateway(t, transient, testPolicy(), readyBackend("relay", true))
+	lim := &countingLimiter{}
+	g.Limiter = lim
+	if res := g.Send(context.Background(), request("app@team.example")); res.Status != StatusUpstreamError || res.Permanent {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	if lim.hits != 0 {
+		t.Fatalf("transient failure must refund the hit, %d left", lim.hits)
+	}
+
+	permanent := &fakeDriver{err: fmt.Errorf("%w: 550 no such user", driver.ErrUpstreamPermanent)}
+	g2, _ := newGateway(t, permanent, testPolicy(), readyBackend("relay", true))
+	g2.Limiter = lim
+	if res := g2.Send(context.Background(), request("app@team.example")); !res.Permanent {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	if lim.hits != 1 {
+		t.Fatalf("permanent rejection stays charged, want 1 hit, got %d", lim.hits)
+	}
+}
+
+func TestSend_BackendNotReadyDoesNotChargeRateLimit(t *testing.T) {
+	g, _ := newGateway(t, &fakeDriver{}, testPolicy(), readyBackend("relay", false))
+	lim := &countingLimiter{}
+	g.Limiter = lim
+	if res := g.Send(context.Background(), request("app@team.example")); res.Status != StatusBackendNotReady {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	if lim.hits != 0 {
+		t.Fatalf("an unavailable backend must not use up the budget, got %d hits", lim.hits)
+	}
+}
+
+func TestSend_SALookupFailureFailsClosed(t *testing.T) {
+	p := testPolicy()
+	p.Spec.Subjects = []sigv1.PolicySubject{{ServiceAccountSelector: &sigv1.LabelSelectorSubject{
+		MatchExpressions: []metav1.LabelSelectorRequirement{{
+			Key: "tier", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"untrusted"},
+		}},
+	}}}
+	// No ServiceAccount object exists, so the lookup fails.
+	g, _ := newGateway(t, &fakeDriver{}, p, readyBackend("relay", true))
+	if res := g.Send(context.Background(), request("app@team.example")); res.Status != StatusDenied {
+		t.Fatalf("negative selector must not match when the SA lookup fails, got %+v", res)
 	}
 }

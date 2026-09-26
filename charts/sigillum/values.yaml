@@ -82,6 +82,12 @@ smtp:
     secretName: ""    # enables STARTTLS with tls.crt / tls.key
   maxMessageBytes: 33554432
   maxRecipients: 100
+  # Messages buffered and relayed at once per pod. Each can hold up to
+  # maxMessageBytes in memory, so keep maxConcurrentMessages x
+  # maxMessageBytes well below resources.limits.memory. Further messages
+  # wait up to sendTimeout, then get a retryable 451.
+  maxConcurrentMessages: 4
+  sendTimeout: 60s
   shutdownTimeout: 25s
   resources:
     requests:

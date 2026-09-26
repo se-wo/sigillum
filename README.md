@@ -114,8 +114,9 @@ AUTH OAUTHBEARER base64("n,a=<any>,\x01auth=Bearer <token>\x01\x01")
 Both the envelope sender (`MAIL FROM`) and the header `From` must satisfy
 `allowedSenders`; recipients are checked against the envelope (`RCPT TO`).
 Messages need exactly one `From` field, and the null sender `<>` is refused.
-`maxSizeBytes` counts decoded content (bodies and attachments), the same
-measure as on the REST path.
+`Bcc:` header fields are removed before relaying. `maxSizeBytes` ignores
+transfer-encoding overhead (an 8 MiB attachment counts as 8 MiB, as on the
+REST path); headers and MIME framing count on SMTP.
 Policy denials answer `550`, rate limits `421`, retryable upstream problems
 `451`. The message is relayed byte-for-byte with a `Received` header that
 carries the Sigillum message id.

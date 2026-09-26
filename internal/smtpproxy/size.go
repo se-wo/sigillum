@@ -15,25 +15,26 @@ import (
 // without limit.
 const maxMIMEDepth = 16
 
-// contentSize measures a message the way the REST path measures a request
-// for maxSizeBytes: decoded bytes of every leaf body part (text, HTML,
-// attachments), without headers, MIME framing or transfer-encoding
-// overhead. An 8 MiB PDF therefore counts as 8 MiB on both transports,
-// not as its ~11 MiB base64 form.
+// contentSize measures a message for maxSizeBytes: the raw size minus only
+// the transfer-encoding overhead of base64 and quoted-printable leaf parts.
+// An 8 MiB PDF therefore counts as roughly 8 MiB, not as its ~11 MiB base64
+// form, which keeps SMTP in line with the REST path. Every other byte that
+// is relayed (headers, MIME boundaries, preamble, epilogue) is counted, so
+// none of them can be used to smuggle data past the limit.
 //
-// Any parse or decode error makes it fall back to rawLen, which is always
-// the larger number, so malformed MIME can never shrink the measured size.
-// Bytes outside leaf parts (headers, boundaries, preamble) are not
-// counted; the raw message as a whole is still capped by --max-message-bytes.
+// Any parse or decode error returns rawLen unchanged: malformed MIME can
+// never shrink the measured size.
 func contentSize(msg *mail.Message, rawLen int) int64 {
-	n, ok := partSize(textproto.MIMEHeader(msg.Header), msg.Body, 0)
-	if !ok {
+	savings, ok := encodingSavings(textproto.MIMEHeader(msg.Header), msg.Body, 0)
+	if !ok || savings < 0 || savings > int64(rawLen) {
 		return int64(rawLen)
 	}
-	return n
+	return int64(rawLen) - savings
 }
 
-func partSize(h textproto.MIMEHeader, body io.Reader, depth int) (int64, bool) {
+// encodingSavings returns how many bytes the transfer encodings of all leaf
+// parts under h/body add on top of their decoded content.
+func encodingSavings(h textproto.MIMEHeader, body io.Reader, depth int) (int64, bool) {
 	if depth > maxMIMEDepth {
 		return 0, false
 	}
@@ -53,7 +54,7 @@ func partSize(h textproto.MIMEHeader, body io.Reader, depth int) (int64, bool) {
 			if err != nil {
 				return 0, false
 			}
-			n, ok := partSize(p.Header, p, depth+1)
+			n, ok := encodingSavings(p.Header, p, depth+1)
 			if !ok {
 				return 0, false
 			}
@@ -61,16 +62,28 @@ func partSize(h textproto.MIMEHeader, body io.Reader, depth int) (int64, bool) {
 		}
 	}
 
-	var r io.Reader = body
+	enc := &countingReader{r: body}
+	var r io.Reader = enc
 	switch strings.ToLower(strings.TrimSpace(h.Get("Content-Transfer-Encoding"))) {
 	case "base64":
-		r = base64.NewDecoder(base64.StdEncoding, body) // skips CR/LF
+		r = base64.NewDecoder(base64.StdEncoding, enc) // skips CR/LF
 	case "quoted-printable":
-		r = quotedprintable.NewReader(body)
+		r = quotedprintable.NewReader(enc)
 	}
-	n, err := io.Copy(io.Discard, r)
+	decoded, err := io.Copy(io.Discard, r)
 	if err != nil {
 		return 0, false
 	}
-	return n, true
+	return enc.n - decoded, true
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }

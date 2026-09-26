@@ -22,6 +22,11 @@ type Caller struct {
 	// transport layer. Only needed when a candidate policy uses a
 	// serviceAccountSelector (see NeedsSALabels).
 	SALabels map[string]string
+	// SALabelsKnown reports that SALabels were actually resolved. Without it
+	// serviceAccountSelector subjects never match: a selector made only of
+	// negative operators (NotIn, DoesNotExist) matches an empty label set,
+	// so treating "lookup failed" as "no labels" would fail open.
+	SALabelsKnown bool
 	// LegacyPodIP is set when the caller was identified by pod-IP lookup on
 	// the SMTP path (US-3.5). Only policies with legacyAuth.podIPFallback
 	// accept such callers, and only then are podSelector subjects consulted.
@@ -114,7 +119,7 @@ func subjectMatches(p sigv1.MailPolicy, caller Caller) bool {
 		if s.ServiceAccount != nil && s.ServiceAccount.Name == caller.ServiceAccount {
 			return true
 		}
-		if s.ServiceAccountSelector != nil && selectorMatches(s.ServiceAccountSelector, caller.SALabels) {
+		if s.ServiceAccountSelector != nil && caller.SALabelsKnown && selectorMatches(s.ServiceAccountSelector, caller.SALabels) {
 			return true
 		}
 		if s.PodSelector != nil && caller.LegacyPodIP && selectorMatches(s.PodSelector, caller.PodLabels) {

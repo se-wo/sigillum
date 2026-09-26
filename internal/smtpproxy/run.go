@@ -55,6 +55,8 @@ type Options struct {
 	ReadTimeout       time.Duration
 	WriteTimeout      time.Duration
 	AuthTimeout       time.Duration
+	SendTimeout       time.Duration
+	MaxConcurrent     int
 	ShutdownTimeout   time.Duration
 	TokenAudience     string
 	TokenCacheSize    int
@@ -79,6 +81,8 @@ func ParseFlags(args []string) (*Options, error) {
 	fs.DurationVar(&o.ReadTimeout, "read-timeout", 60*time.Second, "per-command read timeout")
 	fs.DurationVar(&o.WriteTimeout, "write-timeout", 60*time.Second, "per-reply write timeout")
 	fs.DurationVar(&o.AuthTimeout, "auth-timeout", 10*time.Second, "timeout for TokenReview and pod lookups")
+	fs.DurationVar(&o.SendTimeout, "send-timeout", 60*time.Second, "timeout for relaying one message (rate limiter and upstream)")
+	fs.IntVar(&o.MaxConcurrent, "max-concurrent-messages", 4, "messages buffered and relayed at once; each may hold up to --max-message-bytes in memory (0 = unlimited)")
 	fs.DurationVar(&o.ShutdownTimeout, "shutdown-timeout", 25*time.Second, "graceful shutdown deadline")
 	fs.StringVar(&o.TokenAudience, "token-audience", "sigillum", "expected audience in projected ServiceAccount tokens")
 	fs.IntVar(&o.TokenCacheSize, "token-cache-size", 4096, "LRU cache capacity for TokenReview results")
@@ -166,7 +170,10 @@ func Run(logger *slog.Logger) error {
 		_ = shutdownTracing(flushCtx)
 	}()
 
-	backend := &Backend{Logger: logger, AuthTimeout: o.AuthTimeout}
+	backend := &Backend{Logger: logger, AuthTimeout: o.AuthTimeout, SendTimeout: o.SendTimeout}
+	if o.MaxConcurrent > 0 {
+		backend.Slots = make(chan struct{}, o.MaxConcurrent)
+	}
 	if o.has(ModeOAuthBearer) {
 		clientset, err := kubernetes.NewForConfig(cfg)
 		if err != nil {

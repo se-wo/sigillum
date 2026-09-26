@@ -367,3 +367,82 @@ func TestSMTPDriver_HandshakeRejectionIsTransient(t *testing.T) {
 		t.Fatalf("a 5xx before MAIL reflects backend config, not the message; want transient, got %v", err)
 	}
 }
+
+// stallingServer accepts the SMTP conversation and never answers the final dot.
+func stallingServer(t *testing.T) (port int32, dataSeen chan struct{}) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	dataSeen = make(chan struct{}, 1)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				w := func(s string) { _, _ = c.Write([]byte(s + "\r\n")) }
+				w("220 slow ESMTP")
+				for {
+					line, err := br.ReadString('\n')
+					if err != nil {
+						return
+					}
+					switch up := strings.ToUpper(strings.TrimSpace(line)); {
+					case up == "DATA":
+						w("354 go ahead")
+					case up == ".":
+						dataSeen <- struct{}{}
+						time.Sleep(10 * time.Second) // never acknowledge
+						return
+					case strings.HasPrefix(up, "EHLO"), strings.HasPrefix(up, "HELO"),
+						strings.HasPrefix(up, "MAIL"), strings.HasPrefix(up, "RCPT"):
+						w("250 ok")
+					}
+				}
+			}(c)
+		}
+	}()
+	_, p, _ := net.SplitHostPort(ln.Addr().String())
+	var n int
+	fmt.Sscanf(p, "%d", &n)
+	return int32(n), dataSeen
+}
+
+func TestSMTPDriver_StalledRelayHonoursDeadlineAndDoesNotFailOver(t *testing.T) {
+	stalled, dataSeen := stallingServer(t)
+	second := newFakeSMTP(t)
+	defer second.close()
+	d, err := driver.New(driver.Config{Type: driver.TypeSMTP, SMTP: &driver.SMTPConfig{
+		Endpoints: []driver.SMTPEndpoint{
+			{Host: "127.0.0.1", Port: stalled, TLS: "none"},
+			{Host: "127.0.0.1", Port: second.port(), TLS: "none"},
+		},
+		AuthType: "NONE", Timeout: 5,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = d.(driver.RawSender).SendRaw(ctx, "a@x.example", []string{"b@x.example"}, []byte("Subject: x\r\n\r\nbody\r\n"))
+	if err == nil {
+		t.Fatal("want an error from the stalled relay")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("send must honour the context deadline, took %v", elapsed)
+	}
+	<-dataSeen
+	if _, ok := second.lastEnvelope(); ok {
+		t.Fatal("after the first relay received the whole message, it must not be re-sent to the next endpoint")
+	}
+	if !errors.Is(err, driver.ErrUpstreamTransient) {
+		t.Fatalf("a lost final reply is transient, got %v", err)
+	}
+}

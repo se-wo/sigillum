@@ -91,7 +91,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// pipeline and still leaves an audit record.
 	rejectPayload := func(p problem.Problem) {
 		p.MessageID = msgID
-		s.gw.Reject(ev, "invalid_payload")
+		// Same audit reasons as the SMTP proxy: SIEM rules key on them.
+		reason := "invalid_payload"
+		if p.Type == problem.TypeBase+problem.TypeMessageTooLarge {
+			reason = "message_too_large"
+		}
+		s.gw.Reject(ev, reason)
 		problem.Write(w, p)
 	}
 
@@ -170,13 +175,20 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			"Invalid 'bcc' address", err.Error()))
 		return
 	}
-	ev.From = from.Address
-	for _, list := range [][]mail.Address{to, cc, bcc} {
-		for _, a := range list {
-			ev.To = append(ev.To, a.Address)
-		}
+	msg := &driver.Message{
+		MessageID:   "<" + msgID + "@sigillum.local>",
+		From:        toDriverAddress(from),
+		To:          toDriverAddresses(to),
+		Cc:          toDriverAddresses(cc),
+		Bcc:         toDriverAddresses(bcc),
+		Subject:     req.Subject,
+		Body:        driver.Body{Text: req.Body.Text, HTML: req.Body.HTML},
+		Attachments: atts,
+		Headers:     req.Headers,
 	}
-	if len(to)+len(cc)+len(bcc) == 0 {
+	ev.From = from.Address
+	ev.To = gateway.Recipients(msg)
+	if len(ev.To) == 0 {
 		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 			"At least one recipient required", "provide one of to, cc or bcc"))
 		return
@@ -196,17 +208,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		},
 		Transport: gateway.TransportREST,
 		MessageID: msgID,
-		Message: &driver.Message{
-			MessageID:   "<" + msgID + "@sigillum.local>",
-			From:        toDriverAddress(from),
-			To:          toDriverAddresses(to),
-			Cc:          toDriverAddresses(cc),
-			Bcc:         toDriverAddresses(bcc),
-			Subject:     req.Subject,
-			Body:        driver.Body{Text: req.Body.Text, HTML: req.Body.HTML},
-			Attachments: atts,
-			Headers:     req.Headers,
-		},
+		Message:   msg,
 		SizeBytes: estimateSize(req, atts),
 	})
 	writeResult(w, msgID, res)

@@ -87,3 +87,18 @@ func TestRedisLimiter_FailClosedAndOpen(t *testing.T) {
 		t.Fatalf("fail-open: want allow, got ok=%v err=%v", ok, err)
 	}
 }
+
+func TestRedisLimiter_Refund(t *testing.T) {
+	l, _ := newRedisLimiter(t)
+	ctx := context.Background()
+	l.Allow(ctx, "ns/p", 1, 0)
+	if ok, _, _ := l.Allow(ctx, "ns/p", 1, 0); ok {
+		t.Fatal("second hit must be rejected")
+	}
+	if err := l.Refund(ctx, "ns/p"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _, _ := l.Allow(ctx, "ns/p", 1, 0); !ok {
+		t.Fatal("refunded hit must free the budget")
+	}
+}

@@ -175,7 +175,7 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 		LegacyPodIP:    id.AuthMethod == AuthPodIPLegacy,
 	}
 	if policy.NeedsSALabels(policies) {
-		caller.SALabels = g.serviceAccountLabels(evalCtx, id.Namespace, id.ServiceAccount)
+		caller.SALabels, caller.SALabelsKnown = g.serviceAccountLabels(evalCtx, id.Namespace, id.ServiceAccount)
 	}
 	decision := policy.Evaluate(policy.Match(policies, caller), view)
 	evalSpan.SetAttributes(attribute.String("sigillum.policy", nameOf(decision.Policy)),
@@ -195,9 +195,24 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 	p := decision.Policy
 	ev.Policy = p.Name
 
+	// Resolve the backend before charging the rate limit, so an unavailable
+	// backend does not use up the budget of messages that were never sent.
+	d, backendKey, err := g.backendForPolicy(ctx, p)
+	if err != nil {
+		telemetry.PolicyDeniedTotal.WithLabelValues(p.Namespace, p.Name, "backend_not_ready").Inc()
+		logger.Warn("backend not ready", "policy", p.Name, "err", err)
+		ev.Decision, ev.Reason = audit.DecisionReject, "backend_not_ready"
+		g.Audit.Record(ev)
+		return Result{Status: StatusBackendNotReady, Policy: p.Name, Detail: err.Error()}
+	}
+	defer d.Close()
+	ev.Backend = backendKey
+
+	rlKey := p.Namespace + "/" + p.Name
+	charged := false
 	if rl := p.Spec.RateLimits; rl != nil && (rl.MessagesPerMinute > 0 || rl.MessagesPerHour > 0) {
 		rlCtx, rlSpan := telemetry.Tracer().Start(ctx, "ratelimit.allow")
-		ok, retry, err := g.Limiter.Allow(rlCtx, p.Namespace+"/"+p.Name, rl.MessagesPerMinute, rl.MessagesPerHour)
+		ok, retry, err := g.Limiter.Allow(rlCtx, rlKey, rl.MessagesPerMinute, rl.MessagesPerHour)
 		rlSpan.SetAttributes(attribute.Bool("sigillum.allowed", ok))
 		if err != nil {
 			rlSpan.SetStatus(codes.Error, err.Error())
@@ -217,18 +232,8 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 			return Result{Status: StatusRateLimited, Policy: p.Name, RetryAfter: retry,
 				Detail: "policy '" + p.Name + "' rate limit exceeded"}
 		}
+		charged = true
 	}
-
-	d, backendKey, err := g.backendForPolicy(ctx, p)
-	if err != nil {
-		telemetry.PolicyDeniedTotal.WithLabelValues(p.Namespace, p.Name, "backend_not_ready").Inc()
-		logger.Warn("backend not ready", "policy", p.Name, "err", err)
-		ev.Decision, ev.Reason = audit.DecisionReject, "backend_not_ready"
-		g.Audit.Record(ev)
-		return Result{Status: StatusBackendNotReady, Policy: p.Name, Detail: err.Error()}
-	}
-	defer d.Close()
-	ev.Backend = backendKey
 
 	sendCtx, sendSpan := telemetry.Tracer().Start(ctx, "backend.send", trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(attribute.String("sigillum.backend", backendKey), attribute.String("sigillum.policy", p.Name)))
@@ -257,8 +262,18 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 		logger.Error("upstream send failed", "policy", p.Name, "backend", backendKey, "err", err, "result", resultLabel)
 		ev.Decision, ev.Reason = audit.DecisionReject, "upstream_error"
 		g.Audit.Record(ev)
+		permanent := errors.Is(err, driver.ErrUpstreamPermanent)
+		// A transient failure will be retried by the caller (SMTP clients do
+		// so automatically on 4xx); give the hit back so retries through an
+		// outage do not exhaust the budget. A permanent rejection was a real
+		// attempt and stays charged.
+		if charged && !permanent {
+			if rerr := g.Limiter.Refund(ctx, rlKey); rerr != nil {
+				logger.Warn("rate limit refund failed", "policy", p.Name, "err", rerr)
+			}
+		}
 		return Result{Status: StatusUpstreamError, Policy: p.Name, Backend: backendKey, Detail: err.Error(),
-			Permanent: errors.Is(err, driver.ErrUpstreamPermanent)}
+			Permanent: permanent}
 	}
 	const resultLabel = "ok"
 	telemetry.BackendDurationSeconds.WithLabelValues(p.Namespace, p.Name, backendKey, resultLabel).Observe(dur)
@@ -277,9 +292,6 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 // whatever the transport managed to establish; empty fields are omitted.
 func (g *Gateway) Reject(ev audit.Event, reason string) {
 	ev.Decision, ev.Reason = audit.DecisionReject, reason
-	if ev.To == nil {
-		ev.To = []string{}
-	}
 	g.Audit.Record(ev)
 }
 
@@ -294,17 +306,17 @@ func Recipients(m *driver.Message) []string {
 	return out
 }
 
-// serviceAccountLabels returns the labels of the caller's ServiceAccount. A
-// lookup failure yields nil, so selector subjects simply do not match (fail
-// closed) instead of failing the request.
-func (g *Gateway) serviceAccountLabels(ctx context.Context, namespace, name string) map[string]string {
+// serviceAccountLabels returns the labels of the caller's ServiceAccount and
+// whether the lookup succeeded. On failure selector subjects are skipped
+// (fail closed) instead of failing the request.
+func (g *Gateway) serviceAccountLabels(ctx context.Context, namespace, name string) (map[string]string, bool) {
 	var sa corev1.ServiceAccount
 	if err := g.Reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &sa); err != nil {
 		g.Logger.Warn("service account lookup failed; selector subjects will not match",
 			"namespace", namespace, "service_account", name, "err", err)
-		return nil
+		return nil, false
 	}
-	return sa.Labels
+	return sa.Labels, true
 }
 
 // backendForPolicy resolves the policy's BackendRef into a live driver.

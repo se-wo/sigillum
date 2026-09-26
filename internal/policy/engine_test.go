@@ -56,6 +56,7 @@ func TestMatch_ServiceAccountSelector(t *testing.T) {
 		Namespace:      "billing",
 		ServiceAccount: "billing-mailer",
 		SALabels:       map[string]string{"app.kubernetes.io/component": "notifier"},
+		SALabelsKnown:  true,
 	}
 	policies := []sigv1.MailPolicy{
 		{
@@ -200,11 +201,11 @@ func TestMatch_ServiceAccountSelectorExpressions(t *testing.T) {
 	if !NeedsSALabels(policies) {
 		t.Fatal("NeedsSALabels must report selector subjects")
 	}
-	in := Caller{Namespace: "billing", ServiceAccount: "x", SALabels: map[string]string{"tier": "notify"}}
+	in := Caller{Namespace: "billing", ServiceAccount: "x", SALabels: map[string]string{"tier": "notify"}, SALabelsKnown: true}
 	if got := Match(policies, in); got == nil {
 		t.Fatal("expected matchExpressions to match")
 	}
-	out := Caller{Namespace: "billing", ServiceAccount: "x", SALabels: map[string]string{"tier": "web"}}
+	out := Caller{Namespace: "billing", ServiceAccount: "x", SALabels: map[string]string{"tier": "web"}, SALabelsKnown: true}
 	if got := Match(policies, out); got != nil {
 		t.Fatalf("expected no match, got %s", got.Name)
 	}
@@ -274,5 +275,25 @@ func TestEvaluate_EnvelopeSenderAlsoChecked(t *testing.T) {
 	env := Evaluate(&p, MessageView{From: "a@app.example", EnvelopeFrom: "x@other.example", Recipients: []string{"x@y"}})
 	if env.Allowed {
 		t.Fatal("envelope sender must be checked too")
+	}
+}
+
+func TestMatch_NegativeSelectorFailsClosedWithoutLabels(t *testing.T) {
+	p := sigv1.MailPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "not-untrusted", Namespace: "ns"},
+		Spec: sigv1.MailPolicySpec{Subjects: []sigv1.PolicySubject{{
+			ServiceAccountSelector: &sigv1.LabelSelectorSubject{MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key: "tier", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"untrusted"},
+			}}},
+		}}},
+	}
+	policies := []sigv1.MailPolicy{p}
+	// Lookup failed: labels unknown. A NotIn selector must not match.
+	if got := Match(policies, Caller{Namespace: "ns", ServiceAccount: "sa"}); got != nil {
+		t.Fatal("selector subjects must not match when SA labels could not be resolved")
+	}
+	// Resolved, and genuinely without the label: matches as the selector says.
+	if got := Match(policies, Caller{Namespace: "ns", ServiceAccount: "sa", SALabelsKnown: true}); got == nil {
+		t.Fatal("resolved SA without the label should match a NotIn selector")
 	}
 }

@@ -38,6 +38,8 @@ spec:
             - --token-cache-size={{ .Values.api.tokenCacheSize }}
             - --token-cache-ttl={{ .Values.api.tokenCacheTTL }}
             - --shutdown-timeout={{ .Values.smtp.shutdownTimeout }}
+            - --send-timeout={{ .Values.smtp.sendTimeout }}
+            - --max-concurrent-messages={{ .Values.smtp.maxConcurrentMessages }}
             - --audit-log={{ .Values.audit.output }}
             {{- include "sigillum.ratelimitArgs" . | nindent 12 }}
             {{- range .Values.smtp.extraArgs }}

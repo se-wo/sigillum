@@ -19,6 +19,10 @@ import (
 
 const driverHelo = "sigillum"
 
+// defaultSendTimeout bounds one upstream SMTP conversation when the caller's
+// context carries no deadline.
+const defaultSendTimeout = 60 * time.Second
+
 func init() {
 	driver.Register(driver.TypeSMTP, func(cfg driver.Config) (driver.Driver, error) {
 		if cfg.SMTP == nil {
@@ -82,6 +86,7 @@ func (d *Driver) probeEndpoint(ctx context.Context, ep driver.SMTPEndpoint) driv
 		return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: false, Message: err.Error()}
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
 
 	c, err := smtp.NewClient(conn, ep.Host)
 	if err != nil {
@@ -139,6 +144,14 @@ func (d *Driver) sendBody(ctx context.Context, from string, rcpts []string, body
 			if !isTransient(err) {
 				transient = false
 			}
+			// Once an endpoint has started judging the message, trying the
+			// next one would either repeat a rejection or, if the reply to
+			// the final dot was lost, deliver the message twice. Failover
+			// is only for endpoints we could not talk to at all.
+			var de deliveryError
+			if errors.As(err, &de) {
+				break
+			}
 			continue
 		}
 		return &driver.SendResult{UpstreamID: msgID, AcceptedAt: time.Now().UTC()}, nil
@@ -165,6 +178,15 @@ func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, from strin
 		return err
 	}
 	defer conn.Close()
+	// Bound the whole conversation, not just the dial: a relay that accepts
+	// the connection and then stalls must not block the caller forever.
+	deadline := time.Now().Add(defaultSendTimeout)
+	if dl, ok := ctx.Deadline(); ok {
+		deadline = dl
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return err
+	}
 
 	c, err := smtp.NewClient(conn, ep.Host)
 	if err != nil {

@@ -82,3 +82,13 @@ func ceilToSecond(d time.Duration) time.Duration {
 	}
 	return d
 }
+
+// Refund implements Limiter.Refund by dropping the newest hit for key.
+func (l *MemoryLimiter) Refund(_ context.Context, key string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if hist := l.hits[key]; len(hist) > 0 {
+		l.hits[key] = hist[:len(hist)-1]
+	}
+	return nil
+}
