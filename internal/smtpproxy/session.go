@@ -85,6 +85,9 @@ type session struct {
 	cred     *credential.Result // set by a credential login
 	from     string
 	rcpts    []string
+	// revoked is set once the credential was revoked mid-session; every
+	// later MAIL is refused.
+	revoked bool
 }
 
 var (
@@ -172,12 +175,28 @@ func (a authFailedAs535) Next(response []byte) ([]byte, bool, error) {
 // its pod IP if (and only if) the fallback is enabled for this deployment;
 // whether a policy then accepts it is decided by legacyAuth.podIPFallback.
 func (s *session) Mail(from string, _ *smtp.MailOptions) error {
-	if s.cred != nil && !s.credentialStillValid() {
-		// Deleted or rotated out since AUTH: revocation also ends open
-		// sessions (US-3.7).
-		s.rejectCommand("invalid_credentials", from, nil)
-		s.identity, s.cred = nil, nil
+	if s.revoked {
+		// go-smtp allows no second AUTH, and falling back to the pod IP
+		// would continue the session under another identity.
 		return errCredentialRevoked
+	}
+	if s.cred != nil {
+		previous, err := s.credentialStillValid()
+		switch {
+		case errors.Is(err, credential.ErrInvalid):
+			// Deleted or rotated out since AUTH: revocation also ends
+			// open sessions (US-3.7).
+			s.rejectCommand("invalid_credentials", from, nil)
+			s.identity, s.cred, s.revoked = nil, nil, true
+			return errCredentialRevoked
+		case err != nil:
+			s.b.Logger.Warn("smtp credential lookup failed", "remote_ip", s.remoteIP, "err", err)
+			s.rejectCommand("auth_unavailable", from, nil)
+			return errAuthUnavailable
+		}
+		// After a rotation the session's password may now be the
+		// previous one; audit it as such.
+		s.identity.CredentialPrevious = previous
 	}
 	if s.identity == nil {
 		if err := s.identifyByPodIP(); err != nil {
@@ -501,7 +520,7 @@ func remoteIP(a net.Addr) string {
 	return host
 }
 
-func (s *session) credentialStillValid() bool {
+func (s *session) credentialStillValid() (previous bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.b.AuthTimeout)
 	defer cancel()
 	return s.b.Credentials.StillValid(ctx, s.cred)

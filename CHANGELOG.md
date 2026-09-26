@@ -53,10 +53,12 @@ Works with off-the-shelf apps and cannot be bypassed (SPEC §8.2).
   only over STARTTLS unless `smtp.allowInsecureAuth: true`. Failed logins
   are audited; failed logins of bring-your-own-hash credentials are
   throttled per username and source IP. Deleting a `MailCredential` also
-  ends open sessions.
+  ends open sessions. A spec edit does not interrupt logins while the
+  controller catches up, except a changed ServiceAccount or password hash,
+  which takes effect once accepted.
 - Credential Secret guard: a `ValidatingAdmissionPolicy` that confines the
-  controller's Secret writes to credential Secrets outside excluded
-  namespaces. The controller verifies it and writes nothing while it is
+  controller's Secret writes to `Opaque` credential Secrets outside
+  excluded namespaces. The controller verifies it and writes nothing while it is
   missing or changed (`SecretsManaged` condition,
   `sigillum_credential_guard_ok` metric).
 - `recipientRestrictions.allowedRecipients`: exact mailboxes and globs

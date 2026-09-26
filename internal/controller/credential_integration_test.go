@@ -236,6 +236,20 @@ func TestIntegration_CredentialGuardEnforcement(t *testing.T) {
 	if err := cc.Create(ctx, s); err == nil {
 		t.Fatal("guard must deny a Secret without owner reference")
 	}
+	// Denied: a ServiceAccount token Secret, which the token controller
+	// would fill with a token of the named ServiceAccount.
+	s = credSecret("sa-token", ns)
+	s.Type = corev1.SecretTypeServiceAccountToken
+	s.Annotations[corev1.ServiceAccountNameKey] = "default"
+	if err := cc.Create(ctx, s); err == nil || !strings.Contains(err.Error(), "type Opaque") {
+		t.Fatalf("guard must deny non-Opaque Secrets, got %v", err)
+	}
+	// Denied: keys other than the credential's.
+	s = credSecret("extra-key", ns)
+	s.Data = map[string][]byte{sigv1.CredentialSecretPasswordKey: []byte("x"), ".dockerconfigjson": []byte("{}")}
+	if err := cc.Create(ctx, s); err == nil || !strings.Contains(err.Error(), "only write the keys") {
+		t.Fatalf("guard must deny other keys, got %v", err)
+	}
 	// Denied: excluded namespace, even with a proper shape.
 	if err := cc.Create(ctx, credSecret("app-smtp", "kube-guard-it")); err == nil || !strings.Contains(err.Error(), "excluded") {
 		t.Fatalf("guard must deny excluded namespaces, got %v", err)

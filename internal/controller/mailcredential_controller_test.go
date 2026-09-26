@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +114,97 @@ func TestRotationStatusWriteRetriedOnConflict(t *testing.T) {
 	}
 	if mc.Status.Previous == nil || !credential.VerifyGenerated(mc.Status.Previous.Hash, "current") {
 		t.Fatalf("the rotated-out password keeps its grace period: %+v", mc.Status.Previous)
+	}
+}
+
+// Review of #20: any status write failure after the Secret got a new
+// password is retried, not only a conflict. A timeout that was given up on
+// dropped the hash of the password in the Secret.
+func TestRotationStatusWriteRetriedOnTimeout(t *testing.T) {
+	failures := 0
+	r, c := credReconciler(t, issuedCredential("1h"), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if failures < 2 {
+				failures++
+				return apierrors.NewTimeoutError("request timed out", 1)
+			}
+			return cl.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: credKey}); err != nil {
+		t.Fatal(err)
+	}
+	mc := getCredential(t, c)
+	if failures != 2 || mc.Status.Current == nil || !credential.VerifyGenerated(mc.Status.Current.Hash, "new-password") {
+		t.Fatalf("hash of the written password must reach status after a timeout: %+v", mc.Status)
+	}
+}
+
+// Review of #20: pointing spec.secretName at a foreign Secret must not take
+// down a credential whose password is still in the previous Secret.
+func TestSecretConflictKeepsIssuedPassword(t *testing.T) {
+	mc := issuedCredential("1h")
+	mc.Annotations = nil
+	mc.Spec.SecretName = "tls-cert"
+	r, c := credReconciler(t, mc, interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*corev1.Secret); ok {
+				return apierrors.NewAlreadyExists(schema.GroupResource{Resource: "secrets"}, obj.GetName())
+			}
+			return cl.Create(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, p client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*corev1.Secret); ok {
+				return apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, obj.GetName(), nil)
+			}
+			return cl.Patch(ctx, obj, p, opts...)
+		},
+	})
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: credKey})
+	if err != nil || res.RequeueAfter == 0 {
+		t.Fatalf("a conflict is retried later: %v, %+v", err, res)
+	}
+	got := getCredential(t, c)
+	ready := meta.FindStatusCondition(got.Status.Conditions, sigv1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue || !strings.Contains(ready.Message, "not owned by this MailCredential") {
+		t.Fatalf("password in grafana-smtp stays usable, the conflict is reported: %+v", ready)
+	}
+	if got.Status.SecretName != "grafana-smtp" || !credential.VerifyGenerated(got.Status.Current.Hash, "current") {
+		t.Fatalf("status keeps the issued password: %+v", got.Status)
+	}
+}
+
+// Review of #20: logins follow the state the controller accepted. A
+// replaced bring-your-own hash stops working at once and the new one works
+// after the reconcile; the ServiceAccount is recorded in status.
+func TestBringYourOwnHashAcceptedIntoStatus(t *testing.T) {
+	mc := &sigv1.MailCredential{
+		ObjectMeta: metav1.ObjectMeta{Name: credKey.Name, Namespace: credKey.Namespace, UID: "uid-1", Generation: 1},
+		Spec: sigv1.MailCredentialSpec{ServiceAccountName: "grafana",
+			PasswordHash: credential.HashArgon2id("one", []byte("0123456789abcdef"), 7*1024, 5, 1)},
+	}
+	r, c := credReconciler(t, mc, interceptor.Funcs{})
+	reconcile := func() {
+		t.Helper()
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: credKey}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reconcile()
+	got := getCredential(t, c)
+	if !credential.Usable(got) || got.Status.ServiceAccountName != "grafana" || got.Status.Current.Hash != mc.Spec.PasswordHash {
+		t.Fatalf("accepted bring-your-own hash must be usable: %+v", got.Status)
+	}
+	got.Spec.PasswordHash = credential.HashArgon2id("two", []byte("0123456789abcdef"), 7*1024, 5, 1)
+	if err := c.Update(context.Background(), got); err != nil {
+		t.Fatal(err)
+	}
+	if credential.Usable(getCredential(t, c)) {
+		t.Fatal("a replaced hash must not be usable before the controller accepted it")
+	}
+	reconcile()
+	if got := getCredential(t, c); !credential.Usable(got) || got.Status.Current.Hash != got.Spec.PasswordHash {
+		t.Fatalf("the new hash must be usable once accepted: %+v", got.Status)
 	}
 }
 

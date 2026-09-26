@@ -8,6 +8,7 @@ import (
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -63,10 +64,21 @@ func NewVerifier(r client.Reader, maxArgon2 int) *Verifier {
 	return &Verifier{Reader: r, now: time.Now, slots: make(chan struct{}, maxArgon2), argonOK: c}
 }
 
-// Verify authenticates username and password.
+// Verify authenticates username and password (Lookup, then Check).
 func (v *Verifier) Verify(ctx context.Context, username, password string) (*Result, error) {
+	mc, err := v.Lookup(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	return v.Check(ctx, mc, password)
+}
+
+// Lookup returns the usable MailCredential that username names. It returns
+// ErrInvalid for a malformed or unknown username and for a credential that
+// is not usable, and other errors for failed lookups.
+func (v *Verifier) Lookup(ctx context.Context, username string) (*sigv1.MailCredential, error) {
 	ns, name, ok := ParseUsername(username)
-	if !ok || password == "" {
+	if !ok {
 		return nil, ErrInvalid
 	}
 	var mc sigv1.MailCredential
@@ -79,9 +91,17 @@ func (v *Verifier) Verify(ctx context.Context, username, password string) (*Resu
 	if !Usable(&mc) || mc.Status.Username != username {
 		return nil, ErrInvalid
 	}
-	res := &Result{Namespace: ns, ServiceAccount: mc.Spec.ServiceAccountName, Username: username, uid: mc.UID}
+	return &mc, nil
+}
+
+// Check verifies password against mc, as returned by Lookup.
+func (v *Verifier) Check(ctx context.Context, mc *sigv1.MailCredential, password string) (*Result, error) {
+	if password == "" {
+		return nil, ErrInvalid
+	}
+	res := &Result{Namespace: mc.Namespace, ServiceAccount: mc.Spec.ServiceAccountName, Username: mc.Status.Username, uid: mc.UID}
 	if !mc.Generated() {
-		ok, err := v.verifyArgon2id(ctx, username, mc.Spec.PasswordHash, password)
+		ok, err := v.verifyArgon2id(ctx, res.Username, mc.Spec.PasswordHash, password)
 		if err != nil {
 			return nil, err
 		}
@@ -104,38 +124,35 @@ func (v *Verifier) Verify(ctx context.Context, username, password string) (*Resu
 
 // StillValid reports whether an earlier Result still holds: the same
 // MailCredential exists, is usable, and the password that matched has not
-// been rotated out. The SMTP proxy calls it for every message of a
-// session, so deleting a MailCredential also cuts off open connections.
-func (v *Verifier) StillValid(ctx context.Context, r *Result) bool {
+// been rotated out. previous reports that the password is now the previous
+// one of a rotation. It returns ErrInvalid when the credential was revoked
+// and other errors when the lookup failed. The SMTP proxy calls it for
+// every message of a session, so deleting a MailCredential also cuts off
+// open connections.
+func (v *Verifier) StillValid(ctx context.Context, r *Result) (previous bool, err error) {
 	var mc sigv1.MailCredential
 	if err := v.Reader.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: nameOf(r.Username)}, &mc); err != nil {
-		return false
+		if apierrors.IsNotFound(err) {
+			return false, ErrInvalid
+		}
+		return false, err
 	}
 	if mc.UID != r.uid || !Usable(&mc) || mc.Spec.ServiceAccountName != r.ServiceAccount {
-		return false
+		return false, ErrInvalid
 	}
 	if !mc.Generated() {
-		return mc.Spec.PasswordHash == r.hash
+		if mc.Spec.PasswordHash == r.hash {
+			return false, nil
+		}
+		return false, ErrInvalid
 	}
 	if cur := mc.Status.Current; cur != nil && cur.Hash == r.hash {
-		return true
+		return false, nil
 	}
-	prev := mc.Status.Previous
-	return prev != nil && prev.Hash == r.hash && v.now().Before(prev.ValidUntil.Time)
-}
-
-// UserChosen reports whether username names an existing bring-your-own-hash
-// MailCredential (a user-chosen, possibly weak password).
-func (v *Verifier) UserChosen(ctx context.Context, username string) bool {
-	ns, name, ok := ParseUsername(username)
-	if !ok {
-		return false
+	if prev := mc.Status.Previous; prev != nil && prev.Hash == r.hash && v.now().Before(prev.ValidUntil.Time) {
+		return true, nil
 	}
-	var mc sigv1.MailCredential
-	if err := v.Reader.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &mc); err != nil {
-		return false
-	}
-	return !mc.Generated()
+	return false, ErrInvalid
 }
 
 func nameOf(username string) string {
@@ -171,18 +188,22 @@ func (v *Verifier) verifyArgon2id(ctx context.Context, username, phc, password s
 	return ok, nil
 }
 
-// Usable reports whether the controller has accepted the current spec of
-// mc: Ready=True for the current generation. The controller sets Ready=False
-// for excluded namespaces, missing ServiceAccounts and similar problems, and
-// status can only be written by the controller.
+// Usable reports whether the controller accepted mc: Ready=True, and the
+// fields that decide who the credential authenticates as, and with which
+// password, are the ones it accepted. Other spec edits do not suspend the
+// credential while the controller has not caught up (it may be down); a
+// changed ServiceAccount or bring-your-own hash does, so a replaced hash is
+// revoked at once. The controller sets Ready=False for excluded
+// namespaces, missing ServiceAccounts and similar problems, and status can
+// only be written by the controller.
 func Usable(mc *sigv1.MailCredential) bool {
-	if mc.Status.ObservedGeneration != mc.Generation {
+	ready := meta.FindStatusCondition(mc.Status.Conditions, sigv1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue ||
+		mc.Status.ServiceAccountName != mc.Spec.ServiceAccountName {
 		return false
 	}
-	for _, c := range mc.Status.Conditions {
-		if c.Type == sigv1.ConditionReady {
-			return c.Status == metav1.ConditionTrue && c.ObservedGeneration == mc.Generation
-		}
+	if !mc.Generated() {
+		return mc.Status.Current != nil && mc.Status.Current.Hash == mc.Spec.PasswordHash
 	}
-	return false
+	return true
 }

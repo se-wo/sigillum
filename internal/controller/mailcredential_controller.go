@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -89,6 +90,7 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	now := r.now()
 	st := &mc.Status
+	accepted := st.Current // keeps CreatedAt of an unchanged bring-your-own hash
 	st.Username = credential.Username(mc.Name, mc.Namespace)
 	st.ObservedGeneration = mc.Generation
 
@@ -109,8 +111,9 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		fail(sigv1.ReasonNamespaceExcluded, fmt.Sprintf("namespace %s may not hold mail credentials", mc.Namespace))
 	}
 	if !finished && !mc.Generated() {
-		// Bring your own hash: the proxy verifies spec.passwordHash; nothing
-		// generated may linger from an earlier generated-mode spec.
+		// Bring your own hash: the proxy verifies spec.passwordHash once it
+		// is accepted into status.current; nothing generated may linger
+		// from an earlier generated-mode spec.
 		st.SecretName, st.Current, st.Previous = "", nil, nil
 		if _, err := credential.ParseArgon2id(mc.Spec.PasswordHash); err != nil {
 			fail(sigv1.ReasonInvalidConfiguration, "spec.passwordHash: "+err.Error())
@@ -140,6 +143,10 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if !finished && !mc.Generated() {
 		ready, reason, message, finished = metav1.ConditionTrue, sigv1.ReasonBringYourOwnHash,
 			"credential ready; password verified against spec.passwordHash", true
+		st.Current = &sigv1.CredentialHash{Hash: mc.Spec.PasswordHash, CreatedAt: metav1.NewTime(now)}
+		if accepted != nil && accepted.Hash == mc.Spec.PasswordHash {
+			st.Current.CreatedAt = accepted.CreatedAt
+		}
 	}
 
 	if !finished {
@@ -148,9 +155,11 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			st.Previous = nil
 		}
 		why := rotationDue(&mc, now, interval)
-		// usable: a password issued earlier is still in the (unchanged)
-		// Secret, so a failed rotation need not take the credential down.
-		usable := st.Current != nil && st.SecretName == mc.Spec.SecretName
+		// usable: a password issued earlier is still in st.SecretName (also
+		// after spec.secretName changed; that Secret is only deleted with
+		// the MailCredential), so a failed rotation need not take the
+		// credential down.
+		usable := st.Current != nil && st.SecretName != ""
 		keepOrFail := func(rsn, msg string) {
 			if usable {
 				message = "password in Secret " + st.SecretName + " still valid, but rotation failed: " + msg
@@ -177,7 +186,7 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			conflict, err := r.writeSecret(ctx, &mc, st.Username, password)
 			switch {
 			case conflict:
-				fail(sigv1.ReasonSecretConflict, fmt.Sprintf("Secret %s/%s exists and is not owned by this MailCredential: %v",
+				keepOrFail(sigv1.ReasonSecretConflict, fmt.Sprintf("Secret %s/%s exists and is not owned by this MailCredential: %v",
 					mc.Namespace, mc.Spec.SecretName, err))
 				result.RequeueAfter = secretConflictRequeue
 			case err != nil:
@@ -220,6 +229,10 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		meta.RemoveStatusCondition(&st.Conditions, sigv1.ConditionSecretsManaged)
 	}
 
+	if ready == metav1.ConditionTrue {
+		// Logins authenticate as this ServiceAccount (credential.Usable).
+		st.ServiceAccountName = mc.Spec.ServiceAccountName
+	}
 	st.Conditions = setCondition(st.Conditions, metav1.Condition{
 		Type:               sigv1.ConditionReady,
 		Status:             ready,
@@ -235,17 +248,17 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 }
 
 // updateStatus writes mc.Status. After a new password was written to the
-// Secret (secretWritten), a conflict is retried against the latest object:
+// Secret (secretWritten), any failure is retried against the latest object:
 // giving up would drop the hash of the password now in the Secret, and the
 // next reconcile would rotate again, so apps that already read it would be
 // locked out without a grace period.
 func (r *MailCredentialReconciler) updateStatus(ctx context.Context, mc *sigv1.MailCredential, secretWritten bool) error {
 	err := r.Status().Update(ctx, mc)
-	if !secretWritten || !apierrors.IsConflict(err) {
+	if err == nil || !secretWritten {
 		return err
 	}
 	status := *mc.Status.DeepCopy()
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	return retry.OnError(statusRetryBackoff, func(error) bool { return true }, func() error {
 		var latest sigv1.MailCredential
 		if err := r.apiReader().Get(ctx, client.ObjectKeyFromObject(mc), &latest); err != nil {
 			return client.IgnoreNotFound(err)
@@ -257,6 +270,10 @@ func (r *MailCredentialReconciler) updateStatus(ctx context.Context, mc *sigv1.M
 		return r.Status().Update(ctx, &latest)
 	})
 }
+
+// statusRetryBackoff spans about 12s, enough to ride out a timeout or an
+// API server restart.
+var statusRetryBackoff = wait.Backoff{Steps: 6, Duration: 100 * time.Millisecond, Factor: 3, Jitter: 0.1}
 
 // rotationDue returns why the generated password must be (re)written, or
 // "" if it need not.

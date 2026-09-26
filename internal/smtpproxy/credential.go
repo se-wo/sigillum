@@ -12,6 +12,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"go.opentelemetry.io/otel/codes"
 
+	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 	"github.com/se-wo/sigillum/internal/audit"
 	"github.com/se-wo/sigillum/internal/credential"
 	"github.com/se-wo/sigillum/internal/gateway"
@@ -21,11 +22,11 @@ import (
 // CredentialVerifier checks AUTH PLAIN / LOGIN against MailCredentials
 // (US-3.7).
 type CredentialVerifier interface {
-	Verify(ctx context.Context, username, password string) (*credential.Result, error)
-	StillValid(ctx context.Context, r *credential.Result) bool
-	// UserChosen reports whether username belongs to a bring-your-own-hash
-	// credential, whose password may be weak.
-	UserChosen(ctx context.Context, username string) bool
+	Lookup(ctx context.Context, username string) (*sigv1.MailCredential, error)
+	Check(ctx context.Context, mc *sigv1.MailCredential, password string) (*credential.Result, error)
+	// StillValid returns credential.ErrInvalid once the credential is
+	// revoked, other errors for failed lookups.
+	StillValid(ctx context.Context, r *credential.Result) (previous bool, err error)
 }
 
 var (
@@ -96,23 +97,34 @@ func (s *session) credentialLogin(username, password string) error {
 	ctx, span := telemetry.Tracer().Start(ctx, "auth.credential")
 	defer span.End()
 
-	// Only bring-your-own-hash credentials are throttled; see FailureLimiter.
-	throttled := s.b.AuthFailures != nil && s.b.Credentials.UserChosen(ctx, username)
-	if throttled && s.b.AuthFailures.Blocked(username, s.remoteIP) {
-		span.SetStatus(codes.Error, "throttled")
-		s.authFailed(username, "auth_rate_limited")
-		return errAuthThrottled
+	mc, err := s.b.Credentials.Lookup(ctx, username)
+	var res *credential.Result
+	switch {
+	case err != nil:
+	case mc.Generated() || s.b.AuthFailures == nil:
+		res, err = s.b.Credentials.Check(ctx, mc, password)
+	default:
+		// Only bring-your-own-hash credentials are throttled (see
+		// FailureLimiter). The attempt counts as a failure before the
+		// password is checked, so parallel connections cannot all pass
+		// the limit while their checks wait for an argon2id slot.
+		undo, ok := s.b.AuthFailures.Attempt(username, s.remoteIP)
+		if !ok {
+			span.SetStatus(codes.Error, "throttled")
+			s.authFailed(username, "auth_rate_limited")
+			return errAuthThrottled
+		}
+		res, err = s.b.Credentials.Check(ctx, mc, password)
+		if !errors.Is(err, credential.ErrInvalid) {
+			undo()
+		}
 	}
-	res, err := s.b.Credentials.Verify(ctx, username, password)
 	if err != nil {
 		span.SetStatus(codes.Error, "credential rejected")
 		if !errors.Is(err, credential.ErrInvalid) {
 			s.b.Logger.Warn("smtp credential lookup failed", "remote_ip", s.remoteIP, "err", err)
 			s.authFailed(username, "auth_unavailable")
 			return errAuthUnavailable
-		}
-		if throttled {
-			s.b.AuthFailures.Fail(username, s.remoteIP)
 		}
 		s.b.Logger.Info("smtp auth failed", "remote_ip", s.remoteIP, "auth_method", gateway.AuthSMTPCredential,
 			"credential", auditUsername(username))
@@ -222,29 +234,45 @@ func (f *FailureLimiter) init() {
 	f.once.Do(func() { f.hits, _ = lru.New[string, []time.Time](maxFailureKeys) })
 }
 
-// Blocked reports whether username from ip has used up its failures.
-func (f *FailureLimiter) Blocked(username, ip string) bool {
+// Attempt records an attempt of username from ip as a failure, unless the
+// key has used up its failures (ok=false). undo takes the attempt back once
+// the password turned out to be right, or could not be checked.
+func (f *FailureLimiter) Attempt(username, ip string) (undo func(), ok bool) {
 	if f == nil || f.PerUserIP <= 0 {
-		return false
-	}
-	f.init()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.countLocked(userIPKey(username, ip)) >= f.PerUserIP
-}
-
-// Fail records a failed attempt.
-func (f *FailureLimiter) Fail(username, ip string) {
-	if f == nil || f.PerUserIP <= 0 {
-		return
+		return func() {}, true
 	}
 	f.init()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	k := userIPKey(username, ip)
-	f.countLocked(k)
+	if f.countLocked(k) >= f.PerUserIP {
+		return nil, false
+	}
+	t := f.clock()
 	ts, _ := f.hits.Get(k)
-	f.hits.Add(k, append(ts, f.clock()))
+	f.hits.Add(k, append(ts, t))
+	return func() { f.remove(k, t) }, true
+}
+
+// remove drops the failure recorded at t.
+func (f *FailureLimiter) remove(key string, t time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ts, ok := f.hits.Get(key)
+	if !ok {
+		return
+	}
+	for i := len(ts) - 1; i >= 0; i-- {
+		if ts[i].Equal(t) {
+			ts = append(ts[:i:i], ts[i+1:]...)
+			break
+		}
+	}
+	if len(ts) == 0 {
+		f.hits.Remove(key)
+		return
+	}
+	f.hits.Add(key, ts)
 }
 
 func userIPKey(username, ip string) string { return ip + "\x00" + username }

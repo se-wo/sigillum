@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/textproto"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 	"github.com/se-wo/sigillum/internal/credential"
@@ -44,6 +46,7 @@ func readyCredential(currentPassword string) *sigv1.MailCredential {
 		Spec:       sigv1.MailCredentialSpec{ServiceAccountName: "grafana", SecretName: "grafana-smtp"},
 		Status: sigv1.MailCredentialStatus{
 			Username:           credUser,
+			ServiceAccountName: "grafana",
 			SecretName:         "grafana-smtp",
 			Current:            &sigv1.CredentialHash{Hash: credential.HashGenerated(currentPassword), CreatedAt: metav1.Now()},
 			ObservedGeneration: 1,
@@ -186,8 +189,9 @@ func TestCredential_LoginMechanismAndInsecureOptIn(t *testing.T) {
 // byoCredential is a ready bring-your-own-hash credential for password.
 func byoCredential(password string) *sigv1.MailCredential {
 	mc := readyCredential("unused")
-	mc.Spec.SecretName, mc.Status.Current = "", nil
+	mc.Spec.SecretName, mc.Status.SecretName = "", ""
 	mc.Spec.PasswordHash = credential.HashArgon2id(password, []byte("0123456789abcdef"), 7*1024, 5, 1)
+	mc.Status.Current = &sigv1.CredentialHash{Hash: mc.Spec.PasswordHash, CreatedAt: metav1.Now()}
 	return mc
 }
 
@@ -227,6 +231,19 @@ func TestCredential_FailuresAreAuditedAndThrottled(t *testing.T) {
 	}
 }
 
+// Attempts count before the check; a successful login must take its
+// attempt back, or an app would lock itself out after a few logins.
+func TestCredential_SuccessfulLoginsAreNotThrottled(t *testing.T) {
+	addr := startProxy(t, &Backend{Sender: &stubSender{}, AllowInsecureCredentialAuth: true,
+		Credentials:  credential.NewVerifier(credentialClient(t, byoCredential(credPassword)), 1),
+		AuthFailures: &FailureLimiter{Window: time.Minute, PerUserIP: 2}})
+	for i := 0; i < 4; i++ {
+		if err := dial(t, addr).Auth(sasl.NewPlainClient("", credUser, credPassword)); err != nil {
+			t.Fatalf("login %d: %v", i, err)
+		}
+	}
+}
+
 func TestCredential_PreviousPasswordAndRevocation(t *testing.T) {
 	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
 	mc := readyCredential("new-password-0123456789abcdef0123456789")
@@ -257,13 +274,97 @@ func TestCredential_PreviousPasswordAndRevocation(t *testing.T) {
 	}
 }
 
+// Review of #20: a revoked session stays revoked; with the pod-IP fallback
+// enabled it must not continue as the pod that owns the source IP.
+func TestCredential_RevokedSessionDoesNotFallBackToPodIP(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	mc := readyCredential(credPassword)
+	cl := credentialClient(t, mc)
+	pods := stubPods{id: &PodIdentity{Namespace: "legacy", Name: "cron-1", ServiceAccount: "default"}}
+	addr := startProxy(t, &Backend{Sender: sender, AllowInsecureCredentialAuth: true, Pods: pods,
+		Credentials: credential.NewVerifier(cl, 1)})
+	c := dial(t, addr)
+	if err := c.Auth(sasl.NewPlainClient("", credUser, credPassword)); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Delete(context.Background(), mc); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := c.Mail("grafana@monitoring.example", nil); smtpCode(err) != 530 {
+			t.Fatalf("MAIL %d after revocation: want 530, got %v", i, err)
+		}
+	}
+	if len(sender.reqs) != 0 {
+		t.Fatalf("nothing may be sent: %+v", sender.reqs)
+	}
+}
+
+// Review of #20: a failed lookup is a temporary failure, not a revocation.
+func TestCredential_LookupErrorIsTemporary(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	var failing atomic.Bool
+	cl := interceptor.NewClient(credentialClient(t, readyCredential(credPassword)).(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if failing.Load() {
+				return context.DeadlineExceeded
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	addr := startProxy(t, &Backend{Sender: sender, AllowInsecureCredentialAuth: true,
+		Credentials: credential.NewVerifier(cl, 1)})
+	c := dial(t, addr)
+	if err := c.Auth(sasl.NewPlainClient("", credUser, credPassword)); err != nil {
+		t.Fatal(err)
+	}
+	failing.Store(true)
+	if err := c.Mail("grafana@monitoring.example", nil); smtpCode(err) != 454 {
+		t.Fatalf("lookup failure: want 454, got %v", err)
+	}
+	failing.Store(false)
+	msg := "From: grafana@monitoring.example\r\nTo: ops@example.com\r\nSubject: alert\r\n\r\nfiring\r\n"
+	if err := send(c, "grafana@monitoring.example", []string{"ops@example.com"}, msg); err != nil {
+		t.Fatalf("the session must go on once the lookup works again: %v", err)
+	}
+}
+
+// Review of #20: a session that logged in with the current password and
+// keeps sending after a rotation uses the previous password from then on;
+// its messages must be audited as such.
+func TestCredential_PreviousFlagFollowsRotation(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	mc := readyCredential(credPassword)
+	cl := credentialClient(t, mc)
+	addr := startProxy(t, &Backend{Sender: sender, AllowInsecureCredentialAuth: true,
+		Credentials: credential.NewVerifier(cl, 1)})
+	c := dial(t, addr)
+	if err := c.Auth(sasl.NewPlainClient("", credUser, credPassword)); err != nil {
+		t.Fatal(err)
+	}
+	msg := "From: grafana@monitoring.example\r\nTo: ops@example.com\r\nSubject: alert\r\n\r\nfiring\r\n"
+	if err := send(c, "grafana@monitoring.example", []string{"ops@example.com"}, msg); err != nil {
+		t.Fatal(err)
+	}
+	mc.Status.Previous = &sigv1.PreviousCredentialHash{Hash: mc.Status.Current.Hash,
+		ValidUntil: metav1.NewTime(time.Now().Add(time.Hour))}
+	mc.Status.Current = &sigv1.CredentialHash{Hash: credential.HashGenerated("rotated"), CreatedAt: metav1.Now()}
+	if err := cl.Status().Update(context.Background(), mc); err != nil {
+		t.Fatal(err)
+	}
+	if err := send(c, "grafana@monitoring.example", []string{"ops@example.com"}, msg); err != nil {
+		t.Fatal(err)
+	}
+	if sender.reqs[0].Identity.CredentialPrevious || !sender.reqs[1].Identity.CredentialPrevious {
+		t.Fatalf("credential_previous must follow the rotation: %v, %v",
+			sender.reqs[0].Identity.CredentialPrevious, sender.reqs[1].Identity.CredentialPrevious)
+	}
+}
+
 func TestCredential_BringYourOwnHash(t *testing.T) {
 	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
-	mc := readyCredential("unused")
-	mc.Spec.SecretName, mc.Status.Current = "", nil
-	mc.Spec.PasswordHash = credential.HashArgon2id("user-chosen", []byte("0123456789abcdef"), 7*1024, 5, 1)
 	addr := startProxy(t, &Backend{Sender: sender, AllowInsecureCredentialAuth: true,
-		Credentials: credential.NewVerifier(credentialClient(t, mc), 1)})
+		Credentials: credential.NewVerifier(credentialClient(t, byoCredential("user-chosen")), 1)})
 
 	if err := dial(t, addr).Auth(sasl.NewPlainClient("", credUser, "wrong")); smtpCode(err) != 535 {
 		t.Fatalf("want 535, got %v", err)
@@ -274,35 +375,89 @@ func TestCredential_BringYourOwnHash(t *testing.T) {
 }
 
 func TestCredential_NotReadyIsRefused(t *testing.T) {
+	notReady := readyCredential(credPassword)
+	notReady.Status.Conditions[0].Status = metav1.ConditionFalse
+	// Review of #20: a changed ServiceAccount or bring-your-own hash takes
+	// effect only once the controller accepted it; the old values stop
+	// working at once.
+	newSA := readyCredential(credPassword)
+	newSA.Generation, newSA.Spec.ServiceAccountName = 2, "admin"
+	newHash := byoCredential(credPassword)
+	newHash.Generation = 2
+	newHash.Status.Current.Hash = credential.HashArgon2id("replaced", []byte("0123456789abcdef"), 7*1024, 5, 1)
+	for name, mc := range map[string]*sigv1.MailCredential{"not ready": notReady, "new ServiceAccount": newSA, "new hash": newHash} {
+		addr := startProxy(t, &Backend{Sender: &stubSender{}, AllowInsecureCredentialAuth: true,
+			Credentials: credential.NewVerifier(credentialClient(t, mc), 1)})
+		if err := dial(t, addr).Auth(sasl.NewPlainClient("", credUser, credPassword)); smtpCode(err) != 535 {
+			t.Fatalf("%s: want 535 for a credential the controller has not accepted, got %v", name, err)
+		}
+	}
+}
+
+// Review of #20: other spec edits must not suspend a credential until the
+// controller catches up (it may be down).
+func TestCredential_SpecEditKeepsWorking(t *testing.T) {
 	mc := readyCredential(credPassword)
-	mc.Generation = 2 // spec changed, controller has not caught up
+	mc.Generation = 2
+	mc.Spec.Rotation = &sigv1.CredentialRotation{Interval: "90d"}
 	addr := startProxy(t, &Backend{Sender: &stubSender{}, AllowInsecureCredentialAuth: true,
 		Credentials: credential.NewVerifier(credentialClient(t, mc), 1)})
-	if err := dial(t, addr).Auth(sasl.NewPlainClient("", credUser, credPassword)); smtpCode(err) != 535 {
-		t.Fatalf("want 535 for a credential the controller has not accepted, got %v", err)
+	if err := dial(t, addr).Auth(sasl.NewPlainClient("", credUser, credPassword)); err != nil {
+		t.Fatalf("a rotation edit must not lock out the app: %v", err)
 	}
 }
 
 func TestFailureLimiterWindow(t *testing.T) {
 	now := time.Unix(0, 0)
 	f := &FailureLimiter{Window: time.Minute, PerUserIP: 2, now: func() time.Time { return now }}
-	f.Fail("a", "1.1.1.1")
-	f.Fail("a", "1.1.1.1")
-	if !f.Blocked("a", "1.1.1.1") {
+	for i := 0; i < 2; i++ {
+		if _, ok := f.Attempt("a", "1.1.1.1"); !ok {
+			t.Fatalf("attempt %d refused", i)
+		}
+	}
+	if _, ok := f.Attempt("a", "1.1.1.1"); ok {
 		t.Fatal("username+IP limit reached")
 	}
 	// Failing on a username from one IP must not lock out the real app,
 	// which logs in from another IP, nor other users behind the same IP
 	// (a mesh sidecar or SNAT gives every caller one source IP).
-	if f.Blocked("a", "2.2.2.2") || f.Blocked("b", "1.1.1.1") {
+	undoA, okA := f.Attempt("a", "2.2.2.2")
+	undoB, okB := f.Attempt("b", "1.1.1.1")
+	if !okA || !okB {
 		t.Fatal("only the username+IP pair is blocked")
 	}
+	undoA()
+	undoB()
 	now = now.Add(61 * time.Second)
-	if f.Blocked("a", "1.1.1.1") {
+	undo, ok := f.Attempt("a", "1.1.1.1")
+	if !ok {
 		t.Fatal("failures must expire after the window")
 	}
+	undo()
 	if f.hits.Len() != 0 {
-		t.Fatalf("expired keys must be pruned when looked at, have %d", f.hits.Len())
+		t.Fatalf("expired and taken-back attempts must be pruned, have %d keys", f.hits.Len())
+	}
+}
+
+// Review of #20: attempts count before the password is checked, so
+// parallel connections cannot all pass the limit while their checks wait
+// for an argon2id slot; a successful check takes its attempt back.
+func TestFailureLimiterCountsInFlightAttempts(t *testing.T) {
+	f := &FailureLimiter{Window: time.Minute, PerUserIP: 3}
+	var undos []func()
+	for i := 0; i < 3; i++ {
+		undo, ok := f.Attempt("a", "1.1.1.1")
+		if !ok {
+			t.Fatalf("attempt %d refused", i)
+		}
+		undos = append(undos, undo)
+	}
+	if _, ok := f.Attempt("a", "1.1.1.1"); ok {
+		t.Fatal("a fourth attempt in flight must be refused")
+	}
+	undos[1]() // this one had the right password
+	if _, ok := f.Attempt("a", "1.1.1.1"); !ok {
+		t.Fatal("a successful attempt must not count as a failure")
 	}
 }
 
@@ -310,16 +465,17 @@ func TestFailureLimiterWindow(t *testing.T) {
 // failing (review of #20: a full reset used to clear active blocks).
 func TestFailureLimiterFloodKeepsActiveBlock(t *testing.T) {
 	f := &FailureLimiter{Window: time.Hour, PerUserIP: 3}
+	blocked := func() bool { _, ok := f.Attempt("victim.ns", "10.0.0.1"); return !ok }
 	for i := 0; i < 3; i++ {
-		f.Fail("victim.ns", "10.0.0.1")
+		f.Attempt("victim.ns", "10.0.0.1")
 	}
 	for i := 0; i < maxFailureKeys+10; i++ {
-		f.Fail(fmt.Sprintf("u%d.ns", i), "10.0.0.2")
-		if i%1000 == 0 && !f.Blocked("victim.ns", "10.0.0.1") {
+		f.Attempt(fmt.Sprintf("u%d.ns", i), "10.0.0.2")
+		if i%1000 == 0 && !blocked() {
 			t.Fatalf("active block evicted after %d new keys", i)
 		}
 	}
-	if !f.Blocked("victim.ns", "10.0.0.1") {
+	if !blocked() {
 		t.Fatal("active block evicted by a flood of new keys")
 	}
 }

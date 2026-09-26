@@ -106,7 +106,13 @@ type MailCredentialStatus struct {
 	// mode).
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
-	// Current is the hash of the password in the Secret (generated mode).
+	// ServiceAccountName is the ServiceAccount the controller accepted.
+	// Until it matches spec.serviceAccountName, logins are refused.
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+	// Current is the hash of the current password: the SHA-256 of the
+	// password in the Secret (generated mode), or the accepted
+	// spec.passwordHash (bring your own hash).
 	// +optional
 	Current *CredentialHash `json:"current,omitempty"`
 	// Previous is present only during a rotation's grace period.

@@ -47,6 +47,12 @@ const (
 		" oldObject.metadata.labels['" + sigv1.CredentialLabel + "'] == variables.credential &&" +
 		" has(oldObject.metadata.annotations) && '" + sigv1.CredentialUIDAnnotation + "' in oldObject.metadata.annotations &&" +
 		" oldObject.metadata.annotations['" + sigv1.CredentialUIDAnnotation + "'] == variables.uid)"
+	// Only Opaque: with type kubernetes.io/service-account-token and a
+	// service-account.name annotation, the token controller would fill the
+	// Secret with a token of any ServiceAccount in the namespace.
+	celOpaque   = "has(object.type) && object.type == 'Opaque'"
+	celDataKeys = "!has(object.data) || object.data.all(k, k in ['" + sigv1.CredentialSecretUsernameKey + "', '" +
+		sigv1.CredentialSecretPasswordKey + "', '" + sigv1.CredentialSecretHostKey + "', '" + sigv1.CredentialSecretPortKey + "'])"
 	celNamespace = "request.namespace != variables.releaseNamespace &&" +
 		" !(request.namespace in variables.excludedNames) &&" +
 		" !variables.excludedPrefixes.exists(p, request.namespace.startsWith(p))"
@@ -100,6 +106,10 @@ func (g Guard) Policy() *admv1.ValidatingAdmissionPolicy {
 					sigv1.CredentialLabel + " label"},
 				{Expression: celSameOwner, Message: "the Sigillum controller may only update Secrets that already " +
 					"belong to the same MailCredential"},
+				{Expression: celOpaque, Message: "the Sigillum controller may only write Secrets of type Opaque"},
+				{Expression: celDataKeys, Message: "the Sigillum controller may only write the keys " +
+					sigv1.CredentialSecretUsernameKey + ", " + sigv1.CredentialSecretPasswordKey + ", " +
+					sigv1.CredentialSecretHostKey + " and " + sigv1.CredentialSecretPortKey},
 				{Expression: celNamespace, Message: "this namespace is excluded from generated mail credentials"},
 			},
 		},
