@@ -97,6 +97,13 @@ type Driver interface {
 	io.Closer
 }
 
+// RawSender is implemented by drivers that can relay an already-assembled
+// RFC 5322 message unchanged. The SMTP proxy path relies on it so a legacy
+// client's MIME structure, headers and signatures survive untouched.
+type RawSender interface {
+	SendRaw(ctx context.Context, envelopeFrom string, recipients []string, raw []byte) (*SendResult, error)
+}
+
 // Sentinel errors used for mapping upstream failures to HTTP status codes.
 var (
 	// ErrNoReadyEndpoint is returned by Send when every configured endpoint

@@ -1,0 +1,382 @@
+// Package smtpproxy implements the SMTP submission front end for legacy
+// workloads (US-1.2). Callers authenticate with their ServiceAccount token via
+// AUTH OAUTHBEARER (US-3.4) or, only where a policy explicitly opts in, by the
+// source pod's IP (US-3.5). Accepted messages run through the same
+// gateway pipeline as the REST path and are relayed byte-for-byte.
+package smtpproxy
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/mail"
+	"strings"
+	"time"
+
+	"github.com/emersion/go-sasl"
+	"github.com/emersion/go-smtp"
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/se-wo/sigillum/internal/apiserver/auth"
+	"github.com/se-wo/sigillum/internal/audit"
+	"github.com/se-wo/sigillum/internal/driver"
+	"github.com/se-wo/sigillum/internal/gateway"
+	"github.com/se-wo/sigillum/internal/policy"
+	"github.com/se-wo/sigillum/internal/telemetry"
+)
+
+// TokenAuthenticator validates a ServiceAccount token (TokenReview).
+type TokenAuthenticator interface {
+	Authenticate(ctx context.Context, token string) (*auth.Subject, error)
+}
+
+// Sender is the gateway pipeline (an interface so tests can stub it).
+type Sender interface {
+	Send(ctx context.Context, req gateway.Request) gateway.Result
+	Reject(ev audit.Event, reason string)
+}
+
+// Backend implements smtp.Backend.
+type Backend struct {
+	Logger *slog.Logger
+	Sender Sender
+	// Tokens enables AUTH OAUTHBEARER when non-nil.
+	Tokens TokenAuthenticator
+	// Pods enables the pod-IP legacy fallback when non-nil.
+	Pods PodResolver
+	// AuthTimeout bounds TokenReview and pod lookups.
+	AuthTimeout time.Duration
+	// SendTimeout bounds the pipeline for one message (rate limiter and
+	// upstream relay). Zero means no bound.
+	SendTimeout time.Duration
+	// Slots, when non-nil, caps how many messages are buffered and relayed
+	// at once; each holds up to MaxMessageBytes in memory. Its capacity is
+	// the limit.
+	Slots chan struct{}
+}
+
+// NewSession implements smtp.Backend.
+func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
+	return &session{b: b, remoteIP: remoteIP(c.Conn().RemoteAddr())}, nil
+}
+
+type session struct {
+	b        *Backend
+	remoteIP string
+
+	identity *gateway.Identity // set by AUTH or pod-IP lookup
+	from     string
+	rcpts    []string
+}
+
+var (
+	_ smtp.Session     = (*session)(nil)
+	_ smtp.AuthSession = (*session)(nil)
+)
+
+var errAuthRequired = &smtp.SMTPError{
+	Code: 530, EnhancedCode: smtp.EnhancedCode{5, 7, 0},
+	Message: "Authentication required (AUTH OAUTHBEARER with a ServiceAccount token)",
+}
+
+// AuthMechanisms implements smtp.AuthSession.
+func (s *session) AuthMechanisms() []string {
+	if s.b.Tokens == nil {
+		return nil
+	}
+	return []string{sasl.OAuthBearer}
+}
+
+// Auth implements smtp.AuthSession.
+func (s *session) Auth(mech string) (sasl.Server, error) {
+	if mech != sasl.OAuthBearer || s.b.Tokens == nil {
+		return nil, smtp.ErrAuthUnknownMechanism
+	}
+	srv := sasl.NewOAuthBearerServer(func(opts sasl.OAuthBearerOptions) *sasl.OAuthBearerError {
+		ctx, cancel := context.WithTimeout(context.Background(), s.b.AuthTimeout)
+		defer cancel()
+		ctx, span := telemetry.Tracer().Start(ctx, "auth.tokenreview")
+		defer span.End()
+		subj, err := s.b.Tokens.Authenticate(ctx, opts.Token)
+		if err != nil {
+			span.SetStatus(codes.Error, "token rejected")
+			s.b.Logger.Info("smtp auth failed", "remote_ip", s.remoteIP, "err", err)
+			s.b.Sender.Reject(audit.Event{
+				MessageID:  uuid.NewString(),
+				AuthMethod: gateway.AuthOAuthBearer,
+				Transport:  gateway.TransportSMTP,
+			}, "invalid_token")
+			return &sasl.OAuthBearerError{Status: "invalid_token", Schemes: "bearer"}
+		}
+		s.identity = &gateway.Identity{
+			Namespace:      subj.Namespace,
+			ServiceAccount: subj.ServiceAccount,
+			AuthMethod:     gateway.AuthOAuthBearer,
+		}
+		return nil
+	})
+	return authFailedAs535{srv}, nil
+}
+
+// authFailedAs535 maps any SASL failure to "535 5.7.8 Authentication
+// credentials invalid" as required by US-3.4 (go-smtp would answer 454).
+type authFailedAs535 struct{ sasl.Server }
+
+func (a authFailedAs535) Next(response []byte) ([]byte, bool, error) {
+	challenge, done, err := a.Server.Next(response)
+	if err != nil {
+		return nil, false, &smtp.SMTPError{
+			Code: 535, EnhancedCode: smtp.EnhancedCode{5, 7, 8},
+			Message: "Authentication credentials invalid",
+		}
+	}
+	return challenge, done, nil
+}
+
+// Mail implements smtp.Session. A client that did not AUTH is identified by
+// its pod IP if (and only if) the fallback is enabled for this deployment;
+// whether a policy then accepts it is decided by legacyAuth.podIPFallback.
+func (s *session) Mail(from string, _ *smtp.MailOptions) error {
+	if s.identity == nil {
+		if err := s.identifyByPodIP(); err != nil {
+			return err
+		}
+	}
+	// The null reverse-path "<>" is for bounces generated by MTAs. Workloads
+	// submitting application mail have no use for it, and it would skip
+	// the envelope-sender half of allowedSenders.
+	if from == "" {
+		s.rejectCommand("null_sender", "", nil)
+		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+			Message: "Null sender <> is not accepted for submission"}
+	}
+	if _, err := mail.ParseAddress(from); err != nil {
+		s.rejectCommand("invalid_payload", from, nil)
+		return &smtp.SMTPError{Code: 553, EnhancedCode: smtp.EnhancedCode{5, 1, 7}, Message: "Malformed sender address"}
+	}
+	s.from = from
+	return nil
+}
+
+// rejectCommand audits a refused MAIL or RCPT command for an identified caller.
+func (s *session) rejectCommand(reason, from string, to []string) {
+	s.b.Sender.Reject(s.event(uuid.NewString(), from, to), reason)
+}
+
+// event is the audit skeleton for the identified caller.
+func (s *session) event(msgID, from string, to []string) audit.Event {
+	ev := audit.Event{MessageID: msgID, Transport: gateway.TransportSMTP, From: from, To: to}
+	if s.identity != nil {
+		ev.Namespace = s.identity.Namespace
+		ev.ServiceAccount = s.identity.ServiceAccount
+		ev.AuthMethod = s.identity.AuthMethod
+	}
+	return ev
+}
+
+func (s *session) identifyByPodIP() error {
+	if s.b.Pods == nil {
+		s.rejectUnauthenticated("auth_required")
+		return errAuthRequired
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.b.AuthTimeout)
+	defer cancel()
+	pod, err := s.b.Pods.ResolveIP(ctx, s.remoteIP)
+	if err != nil {
+		s.b.Logger.Info("pod-ip identification failed", "remote_ip", s.remoteIP, "err", err)
+		s.rejectUnauthenticated("pod_ip_unresolved")
+		return errAuthRequired
+	}
+	s.identity = &gateway.Identity{
+		Namespace:      pod.Namespace,
+		ServiceAccount: pod.ServiceAccount,
+		AuthMethod:     gateway.AuthPodIPLegacy,
+		PodLabels:      pod.Labels,
+	}
+	return nil
+}
+
+func (s *session) rejectUnauthenticated(reason string) {
+	s.b.Sender.Reject(audit.Event{MessageID: uuid.NewString(), Transport: gateway.TransportSMTP}, reason)
+}
+
+// Rcpt implements smtp.Session. Policy checks happen at end of DATA, where the
+// whole message (size, header From) is known.
+func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
+	if _, err := mail.ParseAddress(to); err != nil {
+		s.rejectCommand("invalid_payload", s.from, []string{to})
+		return &smtp.SMTPError{Code: 553, EnhancedCode: smtp.EnhancedCode{5, 1, 3}, Message: "Malformed recipient address"}
+	}
+	s.rcpts = append(s.rcpts, to)
+	return nil
+}
+
+// Data implements smtp.Session.
+func (s *session) Data(r io.Reader) error {
+	msgID := uuid.NewString()
+	ctx, span := telemetry.Tracer().Start(context.Background(), "smtp.data",
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(attribute.String("sigillum.message_id", msgID)))
+	defer span.End()
+
+	if s.identity == nil { // go-smtp only allows DATA after MAIL, which sets it
+		return errAuthRequired
+	}
+	baseEvent := s.event(msgID, s.from, s.rcpts)
+
+	if s.b.SendTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.b.SendTimeout)
+		defer cancel()
+	}
+	if s.b.Slots != nil {
+		select {
+		case s.b.Slots <- struct{}{}:
+			defer func() { <-s.b.Slots }()
+		case <-ctx.Done():
+			// go-smtp drains the rest of DATA after we return.
+			s.b.Sender.Reject(baseEvent, "busy")
+			return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 2},
+				Message: "Too many concurrent messages, try again later (id " + msgID + ")"}
+		}
+	}
+
+	// Read straight into a buffer that already holds the Received trace
+	// header, so the relayed message is never copied a second time.
+	trace := receivedHeader(s.remoteIP, msgID, s.identity.AuthMethod)
+	buf := bytes.NewBuffer(make([]byte, 0, len(trace)+64*1024))
+	buf.WriteString(trace)
+	// go-smtp enforces Server.MaxMessageBytes while we read.
+	if _, err := io.Copy(buf, r); err != nil {
+		reason := "invalid_payload"
+		if errors.Is(err, smtp.ErrDataTooLarge) {
+			reason = "message_too_large"
+		}
+		s.b.Sender.Reject(baseEvent, reason)
+		return err
+	}
+	raw := stripBcc(buf.Bytes()[len(trace):])
+	msg, headerFrom, err := parseMessage(raw)
+	if err != nil {
+		s.b.Sender.Reject(baseEvent, "invalid_payload")
+		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 6, 0}, Message: err.Error()}
+	}
+
+	to := make([]driver.Address, len(s.rcpts))
+	for i, rc := range s.rcpts {
+		to[i] = driver.Address{Address: rc}
+	}
+	res := s.b.Sender.Send(ctx, gateway.Request{
+		Identity:     *s.identity,
+		Transport:    gateway.TransportSMTP,
+		MessageID:    msgID,
+		Message:      &driver.Message{From: driver.Address{Address: headerFrom}, To: to},
+		Raw:          buf.Bytes()[:len(trace)+len(raw)],
+		EnvelopeFrom: s.from,
+		SizeBytes:    contentSize(msg, len(raw)),
+	})
+	if res.Status != gateway.StatusAccepted {
+		span.SetStatus(codes.Error, "rejected")
+	}
+	return resultError(res, msgID)
+}
+
+// Reset implements smtp.Session. Authentication survives RSET.
+func (s *session) Reset() {
+	s.from = ""
+	s.rcpts = nil
+}
+
+// Logout implements smtp.Session.
+func (s *session) Logout() error { return nil }
+
+// resultError maps a gateway Result onto an SMTP reply. 4xx replies tell the
+// client to retry, 5xx replies make it bounce the message.
+func resultError(res gateway.Result, msgID string) error {
+	e := func(code int, enh smtp.EnhancedCode, msg string) error {
+		return &smtp.SMTPError{Code: code, EnhancedCode: enh, Message: msg + " (id " + msgID + ")"}
+	}
+	switch res.Status {
+	case gateway.StatusAccepted:
+		return nil
+	case gateway.StatusDenied:
+		switch res.DenyReason {
+		case policy.DenyMessageTooLarge:
+			return e(552, smtp.EnhancedCode{5, 3, 4}, "Message exceeds policy size limit")
+		case policy.DenyTooManyRecipient:
+			return e(550, smtp.EnhancedCode{5, 5, 3}, "Too many recipients for policy")
+		case policy.DenyNoPolicy:
+			return e(550, smtp.EnhancedCode{5, 7, 1}, "No matching policy")
+		default:
+			return e(550, smtp.EnhancedCode{5, 7, 1}, fmt.Sprintf("Rejected by policy %s: %s", res.Policy, res.DenyReason))
+		}
+	case gateway.StatusRateLimited:
+		// US-2.2: rate limits answer 421.
+		return e(421, smtp.EnhancedCode{4, 7, 0}, fmt.Sprintf("Rate limit exceeded, retry in %ds", int(res.RetryAfter.Seconds())))
+	case gateway.StatusUpstreamError:
+		if res.Permanent {
+			return e(554, smtp.EnhancedCode{5, 0, 0}, "Upstream relay rejected the message")
+		}
+		return e(451, smtp.EnhancedCode{4, 4, 1}, "Upstream relay unavailable")
+	default: // backend not ready, limiter unavailable
+		return e(451, smtp.EnhancedCode{4, 3, 0}, "Temporarily unavailable")
+	}
+}
+
+var errNoFrom = errors.New("message has no valid From header")
+
+// parseMessage parses raw and returns its single From address.
+//
+// RFC 5322 §3.6 allows exactly one From field. net/mail's Header.Get (and so
+// AddressList) only reads the first one, while the raw bytes, second From
+// included, are relayed unchanged and many clients display the last. So a
+// duplicate From field is rejected outright rather than half-checked. A
+// single field with several addresses is rejected too: each would have to
+// pass the sender policy, and it is virtually never legitimate for
+// submission.
+func parseMessage(raw []byte) (*mail.Message, string, error) {
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return nil, "", fmt.Errorf("malformed message header: %v", err)
+	}
+	switch n := len(msg.Header["From"]); {
+	case n == 0:
+		return nil, "", errNoFrom
+	case n > 1:
+		return nil, "", errors.New("multiple From header fields are not allowed")
+	}
+	list, err := msg.Header.AddressList("From")
+	if err != nil || len(list) == 0 {
+		return nil, "", errNoFrom
+	}
+	if len(list) > 1 {
+		return nil, "", errors.New("multiple From addresses are not allowed")
+	}
+	return msg, list[0].Address, nil
+}
+
+// receivedHeader builds the RFC 5321 trace header that is prepended to the
+// relayed message, so it can be correlated with the audit log.
+func receivedHeader(remoteIP, msgID, authMethod string) string {
+	proto := "ESMTP"
+	if authMethod == gateway.AuthOAuthBearer {
+		proto = "ESMTPA" // RFC 3848
+	}
+	return fmt.Sprintf("Received: from [%s] by sigillum with %s id %s;\r\n\t%s\r\n",
+		remoteIP, proto, msgID, time.Now().UTC().Format(time.RFC1123Z))
+}
+
+func remoteIP(a net.Addr) string {
+	host, _, err := net.SplitHostPort(a.String())
+	if err != nil {
+		return strings.Trim(a.String(), "[]")
+	}
+	return host
+}

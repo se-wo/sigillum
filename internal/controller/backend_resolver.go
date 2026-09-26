@@ -24,7 +24,7 @@ import (
 //   - for MailBackend the caller passes the backend's own namespace
 func ResolveBackendConfig(
 	ctx context.Context,
-	c client.Client,
+	c client.Reader,
 	backendKey string,
 	spec *sigv1.BackendSpec,
 	secretFallbackNs string,

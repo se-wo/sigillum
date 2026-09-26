@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -89,6 +90,14 @@ func (f *fakeSMTP) serve(c net.Conn) {
 		case strings.HasPrefix(up, "RCPT TO:"):
 			rcpt := strings.TrimSpace(line[len("RCPT TO:"):])
 			rcpt = strings.Trim(rcpt, "<>")
+			switch {
+			case strings.HasPrefix(rcpt, "reject@"):
+				w("550 5.1.1 no such user")
+				continue
+			case strings.HasPrefix(rcpt, "busy@"):
+				w("451 4.3.0 try later")
+				continue
+			}
 			env.to = append(env.to, rcpt)
 			w("250 OK")
 		case up == "DATA":
@@ -273,3 +282,167 @@ func TestSMTPDriver_AllDownReturnsTransient(t *testing.T) {
 }
 
 var _ = io.EOF
+
+func newTestDriver(t *testing.T, port int32) driver.Driver {
+	t.Helper()
+	d, err := driver.New(driver.Config{
+		Type: driver.TypeSMTP,
+		SMTP: &driver.SMTPConfig{
+			Endpoints: []driver.SMTPEndpoint{{Host: "127.0.0.1", Port: port, TLS: "none"}},
+			AuthType:  "NONE",
+			Timeout:   5,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func TestSMTPDriver_SendRawRelaysUnchanged(t *testing.T) {
+	srv := newFakeSMTP(t)
+	defer srv.close()
+	d := newTestDriver(t, srv.port())
+
+	raw := []byte("From: legacy@app.example\r\nTo: a@x.example\r\nSubject: raw\r\nX-Custom: kept\r\n\r\n.leading dot\r\nbody\r\n")
+	if _, err := d.(driver.RawSender).SendRaw(context.Background(), "bounce@app.example",
+		[]string{"a@x.example", "hidden@x.example"}, raw); err != nil {
+		t.Fatalf("SendRaw: %v", err)
+	}
+	env, _ := srv.lastEnvelope()
+	if env.from != "bounce@app.example" || len(env.to) != 2 {
+		t.Fatalf("envelope not preserved: %+v", env)
+	}
+	// The fake server does not undo dot-stuffing, so the leading dot arrives doubled.
+	if !bytes.Contains(env.data, []byte("X-Custom: kept")) || !bytes.Contains(env.data, []byte("..leading dot")) {
+		t.Fatalf("raw message altered: %q", env.data)
+	}
+}
+
+func TestSMTPDriver_UpstreamReplyClassification(t *testing.T) {
+	srv := newFakeSMTP(t)
+	defer srv.close()
+	d := newTestDriver(t, srv.port())
+	raw := []byte("Subject: x\r\n\r\nbody\r\n")
+
+	_, err := d.(driver.RawSender).SendRaw(context.Background(), "a@x.example", []string{"reject@x.example"}, raw)
+	if !errors.Is(err, driver.ErrUpstreamPermanent) {
+		t.Fatalf("5xx must be permanent, got %v", err)
+	}
+	_, err = d.(driver.RawSender).SendRaw(context.Background(), "a@x.example", []string{"busy@x.example"}, raw)
+	if !errors.Is(err, driver.ErrUpstreamTransient) {
+		t.Fatalf("4xx must be transient, got %v", err)
+	}
+}
+
+// rejectingServer greets with a 5xx, as a misconfigured or hostile relay would.
+func rejectingServer(t *testing.T, greeting string) int32 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte(greeting + "\r\n"))
+			_ = c.Close()
+		}
+	}()
+	_, p, _ := net.SplitHostPort(ln.Addr().String())
+	var n int
+	fmt.Sscanf(p, "%d", &n)
+	return int32(n)
+}
+
+func TestSMTPDriver_HandshakeRejectionIsTransient(t *testing.T) {
+	d := newTestDriver(t, rejectingServer(t, "554 5.7.1 go away"))
+	_, err := d.(driver.RawSender).SendRaw(context.Background(), "a@x.example", []string{"b@x.example"},
+		[]byte("Subject: x\r\n\r\nbody\r\n"))
+	if !errors.Is(err, driver.ErrUpstreamTransient) {
+		t.Fatalf("a 5xx before MAIL reflects backend config, not the message; want transient, got %v", err)
+	}
+}
+
+// stallingServer accepts the SMTP conversation and never answers the final dot.
+func stallingServer(t *testing.T) (port int32, dataSeen chan struct{}) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	dataSeen = make(chan struct{}, 1)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				w := func(s string) { _, _ = c.Write([]byte(s + "\r\n")) }
+				w("220 slow ESMTP")
+				for {
+					line, err := br.ReadString('\n')
+					if err != nil {
+						return
+					}
+					switch up := strings.ToUpper(strings.TrimSpace(line)); {
+					case up == "DATA":
+						w("354 go ahead")
+					case up == ".":
+						dataSeen <- struct{}{}
+						time.Sleep(10 * time.Second) // never acknowledge
+						return
+					case strings.HasPrefix(up, "EHLO"), strings.HasPrefix(up, "HELO"),
+						strings.HasPrefix(up, "MAIL"), strings.HasPrefix(up, "RCPT"):
+						w("250 ok")
+					}
+				}
+			}(c)
+		}
+	}()
+	_, p, _ := net.SplitHostPort(ln.Addr().String())
+	var n int
+	fmt.Sscanf(p, "%d", &n)
+	return int32(n), dataSeen
+}
+
+func TestSMTPDriver_StalledRelayHonoursDeadlineAndDoesNotFailOver(t *testing.T) {
+	stalled, dataSeen := stallingServer(t)
+	second := newFakeSMTP(t)
+	defer second.close()
+	d, err := driver.New(driver.Config{Type: driver.TypeSMTP, SMTP: &driver.SMTPConfig{
+		Endpoints: []driver.SMTPEndpoint{
+			{Host: "127.0.0.1", Port: stalled, TLS: "none"},
+			{Host: "127.0.0.1", Port: second.port(), TLS: "none"},
+		},
+		AuthType: "NONE", Timeout: 5,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = d.(driver.RawSender).SendRaw(ctx, "a@x.example", []string{"b@x.example"}, []byte("Subject: x\r\n\r\nbody\r\n"))
+	if err == nil {
+		t.Fatal("want an error from the stalled relay")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("send must honour the context deadline, took %v", elapsed)
+	}
+	<-dataSeen
+	if _, ok := second.lastEnvelope(); ok {
+		t.Fatal("after the first relay received the whole message, it must not be re-sent to the next endpoint")
+	}
+	if !errors.Is(err, driver.ErrUpstreamTransient) {
+		t.Fatalf("a lost final reply is transient, got %v", err)
+	}
+}

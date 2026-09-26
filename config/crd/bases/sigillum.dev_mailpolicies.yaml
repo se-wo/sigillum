@@ -98,6 +98,12 @@ spec:
                     type: integer
                   maxSizeBytes:
                     default: 10485760
+                    description: |-
+                      MaxSizeBytes caps the size of a message without transfer-encoding
+                      overhead: an 8 MiB attachment counts as 8 MiB, not as its ~11 MiB
+                      base64 form. REST counts bodies plus decoded attachments; SMTP counts
+                      the relayed message minus base64/quoted-printable overhead, so headers
+                      and MIME framing are included there.
                     format: int64
                     minimum: 1
                     type: integer
@@ -123,14 +129,20 @@ spec:
                 type: object
               recipientRestrictions:
                 description: |-
-                  RecipientRestrictions are reserved for v0.2; included so a future driver
-                  release can populate them without a CRD migration.
+                  RecipientRestrictions restrict the domains of To/Cc/Bcc recipients
+                  (US-2.4). Domains match exactly and case-insensitively; subdomains must be
+                  listed separately. BlockedDomains takes precedence over AllowedDomains.
                 properties:
                   allowedDomains:
+                    description: |-
+                      AllowedDomains, if non-empty, is the exhaustive list of recipient
+                      domains. Empty means "any domain not blocked".
                     items:
                       type: string
                     type: array
                   blockedDomains:
+                    description: BlockedDomains are always rejected, even if also
+                      allowed.
                     items:
                       type: string
                     type: array

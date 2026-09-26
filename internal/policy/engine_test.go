@@ -56,6 +56,7 @@ func TestMatch_ServiceAccountSelector(t *testing.T) {
 		Namespace:      "billing",
 		ServiceAccount: "billing-mailer",
 		SALabels:       map[string]string{"app.kubernetes.io/component": "notifier"},
+		SALabelsKnown:  true,
 	}
 	policies := []sigv1.MailPolicy{
 		{
@@ -180,5 +181,119 @@ func TestMatch_EmptyAllowedSendersStillMatchesPolicyButDeniesEvaluation(t *testi
 	}
 	if !strings.Contains(string(Evaluate(matched, MessageView{From: "x@y", Recipients: []string{"a@b"}}).DenyReason), "sender_not_allowed") {
 		t.Skip("evaluation handles via SenderRestrictions only when set; nil restrictions allow")
+	}
+}
+
+func TestMatch_ServiceAccountSelectorExpressions(t *testing.T) {
+	p := sigv1.MailPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "expr", Namespace: "billing"},
+		Spec: sigv1.MailPolicySpec{
+			Subjects: []sigv1.PolicySubject{{
+				ServiceAccountSelector: &sigv1.LabelSelectorSubject{
+					MatchExpressions: []metav1.LabelSelectorRequirement{{
+						Key: "tier", Operator: metav1.LabelSelectorOpIn, Values: []string{"batch", "notify"},
+					}},
+				},
+			}},
+		},
+	}
+	policies := []sigv1.MailPolicy{p}
+	if !NeedsSALabels(policies) {
+		t.Fatal("NeedsSALabels must report selector subjects")
+	}
+	in := Caller{Namespace: "billing", ServiceAccount: "x", SALabels: map[string]string{"tier": "notify"}, SALabelsKnown: true}
+	if got := Match(policies, in); got == nil {
+		t.Fatal("expected matchExpressions to match")
+	}
+	out := Caller{Namespace: "billing", ServiceAccount: "x", SALabels: map[string]string{"tier": "web"}, SALabelsKnown: true}
+	if got := Match(policies, out); got != nil {
+		t.Fatalf("expected no match, got %s", got.Name)
+	}
+	if NeedsSALabels([]sigv1.MailPolicy{policy("p", "billing", 1, "sa")}) {
+		t.Fatal("NeedsSALabels must be false without selector subjects")
+	}
+}
+
+func TestEvaluate_RecipientCaseAndNoAllowlist(t *testing.T) {
+	p := policy("p", "ns", 1, "sa", "*@x.com")
+	p.Spec.RecipientRestrictions = &sigv1.RecipientRestrictions{BlockedDomains: []string{"Gmail.com"}}
+	if got := Evaluate(&p, MessageView{From: "a@x.com", Recipients: []string{"ok@corp.example", "a@GMAIL.com"}}); got.Allowed {
+		t.Fatal("blocked domain must match case-insensitively")
+	}
+	if got := Evaluate(&p, MessageView{From: "a@x.com", Recipients: []string{"ok@corp.example"}}); !got.Allowed {
+		t.Fatalf("empty allowlist must allow non-blocked domains, got %+v", got)
+	}
+}
+
+func TestMatch_PodIPLegacyRequiresOptIn(t *testing.T) {
+	podPolicy := func(name string, optIn bool) sigv1.MailPolicy {
+		p := sigv1.MailPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "legacy"},
+			Spec: sigv1.MailPolicySpec{
+				Subjects: []sigv1.PolicySubject{{PodSelector: &sigv1.LabelSelectorSubject{
+					MatchLabels: map[string]string{"app": "cron"},
+				}}},
+			},
+		}
+		if optIn {
+			p.Spec.LegacyAuth = &sigv1.LegacyAuthSpec{PodIPFallback: true}
+		}
+		return p
+	}
+	legacy := Caller{Namespace: "legacy", ServiceAccount: "default", LegacyPodIP: true,
+		PodLabels: map[string]string{"app": "cron"}}
+
+	if got := Match([]sigv1.MailPolicy{podPolicy("no-opt-in", false)}, legacy); got != nil {
+		t.Fatalf("pod-IP caller must not match a policy without podIPFallback, got %s", got.Name)
+	}
+	if got := Match([]sigv1.MailPolicy{podPolicy("opt-in", true)}, legacy); got == nil {
+		t.Fatal("pod-IP caller must match an opted-in podSelector policy")
+	}
+	token := legacy
+	token.LegacyPodIP = false
+	if got := Match([]sigv1.MailPolicy{podPolicy("opt-in", true)}, token); got != nil {
+		t.Fatal("podSelector must be ignored for token-authenticated callers")
+	}
+	// An SA subject in an opted-in policy still matches a pod-IP caller.
+	sa := policy("sa-opt-in", "legacy", 1, "default")
+	sa.Spec.LegacyAuth = &sigv1.LegacyAuthSpec{PodIPFallback: true}
+	if got := Match([]sigv1.MailPolicy{sa}, legacy); got == nil {
+		t.Fatal("SA subject in opted-in policy must match pod-IP caller")
+	}
+}
+
+func TestEvaluate_EnvelopeSenderAlsoChecked(t *testing.T) {
+	p := policy("p", "ns", 1, "sa", "*@app.example")
+	ok := Evaluate(&p, MessageView{From: "a@app.example", EnvelopeFrom: "bounce@app.example", Recipients: []string{"x@y"}})
+	if !ok.Allowed {
+		t.Fatalf("both senders allowed, got %+v", ok)
+	}
+	spoof := Evaluate(&p, MessageView{From: "ceo@other.example", EnvelopeFrom: "a@app.example", Recipients: []string{"x@y"}})
+	if spoof.Allowed || spoof.DenyReason != DenySenderNotAllowed {
+		t.Fatalf("header From must be checked even if envelope passes, got %+v", spoof)
+	}
+	env := Evaluate(&p, MessageView{From: "a@app.example", EnvelopeFrom: "x@other.example", Recipients: []string{"x@y"}})
+	if env.Allowed {
+		t.Fatal("envelope sender must be checked too")
+	}
+}
+
+func TestMatch_NegativeSelectorFailsClosedWithoutLabels(t *testing.T) {
+	p := sigv1.MailPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "not-untrusted", Namespace: "ns"},
+		Spec: sigv1.MailPolicySpec{Subjects: []sigv1.PolicySubject{{
+			ServiceAccountSelector: &sigv1.LabelSelectorSubject{MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key: "tier", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"untrusted"},
+			}}},
+		}}},
+	}
+	policies := []sigv1.MailPolicy{p}
+	// Lookup failed: labels unknown. A NotIn selector must not match.
+	if got := Match(policies, Caller{Namespace: "ns", ServiceAccount: "sa"}); got != nil {
+		t.Fatal("selector subjects must not match when SA labels could not be resolved")
+	}
+	// Resolved, and genuinely without the label: matches as the selector says.
+	if got := Match(policies, Caller{Namespace: "ns", ServiceAccount: "sa", SALabelsKnown: true}); got == nil {
+		t.Fatal("resolved SA without the label should match a NotIn selector")
 	}
 }

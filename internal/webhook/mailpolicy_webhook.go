@@ -3,10 +3,13 @@ package webhook
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -67,15 +70,11 @@ func (v *MailPolicyValidator) validate(obj runtime.Object) (admission.Warnings, 
 		}
 		if s.ServiceAccountSelector != nil {
 			set++
-			if len(s.ServiceAccountSelector.MatchLabels) == 0 && len(s.ServiceAccountSelector.MatchExpressions) == 0 {
-				allErrs = append(allErrs, field.Required(sPath.Child("serviceAccountSelector"), "must specify matchLabels or matchExpressions"))
-			}
+			allErrs = append(allErrs, validateSelector(sPath.Child("serviceAccountSelector"), s.ServiceAccountSelector)...)
 		}
 		if s.PodSelector != nil {
 			set++
-			if len(s.PodSelector.MatchLabels) == 0 && len(s.PodSelector.MatchExpressions) == 0 {
-				allErrs = append(allErrs, field.Required(sPath.Child("podSelector"), "must specify matchLabels or matchExpressions"))
-			}
+			allErrs = append(allErrs, validateSelector(sPath.Child("podSelector"), s.PodSelector)...)
 		}
 		if set == 0 {
 			allErrs = append(allErrs, field.Required(sPath, "subject must specify exactly one matcher"))
@@ -104,8 +103,43 @@ func (v *MailPolicyValidator) validate(obj runtime.Object) (admission.Warnings, 
 		}
 	}
 
+	if rr := mp.Spec.RecipientRestrictions; rr != nil {
+		rPath := specPath.Child("recipientRestrictions")
+		allErrs = append(allErrs, validateDomains(rPath.Child("allowedDomains"), rr.AllowedDomains)...)
+		allErrs = append(allErrs, validateDomains(rPath.Child("blockedDomains"), rr.BlockedDomains)...)
+	}
+
 	if len(allErrs) == 0 {
 		return nil, nil
 	}
 	return nil, apierrors.NewInvalid(gk, mp.Name, allErrs)
+}
+
+func validateSelector(p *field.Path, sel *sigv1.LabelSelectorSubject) field.ErrorList {
+	if len(sel.MatchLabels) == 0 && len(sel.MatchExpressions) == 0 {
+		return field.ErrorList{field.Required(p, "must specify matchLabels or matchExpressions")}
+	}
+	if _, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
+		MatchLabels:      sel.MatchLabels,
+		MatchExpressions: sel.MatchExpressions,
+	}); err != nil {
+		return field.ErrorList{field.Invalid(p, sel, err.Error())}
+	}
+	return nil
+}
+
+// validateDomains accepts bare DNS names only. Recipient matching is an exact
+// domain comparison, so an address or a glob here would silently never match.
+func validateDomains(p *field.Path, domains []string) field.ErrorList {
+	var errs field.ErrorList
+	for i, d := range domains {
+		if strings.ContainsAny(d, "@*?[") {
+			errs = append(errs, field.Invalid(p.Index(i), d, "must be a bare domain (no '@' or wildcards)"))
+			continue
+		}
+		for _, msg := range validation.IsDNS1123Subdomain(strings.ToLower(d)) {
+			errs = append(errs, field.Invalid(p.Index(i), d, msg))
+		}
+	}
+	return errs
 }

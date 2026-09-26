@@ -1,0 +1,21 @@
+{{- if .Values.smtp.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sigillum.smtp.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "sigillum.smtp.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.smtp.service.type }}
+  selector: {{- include "sigillum.smtp.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: smtp
+      port: {{ .Values.smtp.service.port }}
+      targetPort: smtp
+      protocol: TCP
+      appProtocol: smtp
+    - name: metrics
+      port: {{ .Values.smtp.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

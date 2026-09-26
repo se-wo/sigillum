@@ -8,6 +8,9 @@ import (
 	"sort"
 	"strings"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 )
 
@@ -15,17 +18,46 @@ import (
 type Caller struct {
 	Namespace      string
 	ServiceAccount string
-	// SALabels is empty unless the engine resolves the SA labels — for v1 we
-	// only consult ServiceAccount / ServiceAccountSelector via SA name +
-	// labels supplied by the caller-side resolver.
+	// SALabels are the labels of the caller's ServiceAccount, resolved by the
+	// transport layer. Only needed when a candidate policy uses a
+	// serviceAccountSelector (see NeedsSALabels).
 	SALabels map[string]string
+	// SALabelsKnown reports that SALabels were actually resolved. Without it
+	// serviceAccountSelector subjects never match: a selector made only of
+	// negative operators (NotIn, DoesNotExist) matches an empty label set,
+	// so treating "lookup failed" as "no labels" would fail open.
+	SALabelsKnown bool
+	// LegacyPodIP is set when the caller was identified by pod-IP lookup on
+	// the SMTP path (US-3.5). Only policies with legacyAuth.podIPFallback
+	// accept such callers, and only then are podSelector subjects consulted.
+	LegacyPodIP bool
+	// PodLabels are the labels of the source pod (LegacyPodIP only).
+	PodLabels map[string]string
+}
+
+// NeedsSALabels reports whether any of the policies carries a
+// serviceAccountSelector subject, i.e. whether the transport layer has to
+// resolve the caller's ServiceAccount labels before calling Match.
+func NeedsSALabels(policies []sigv1.MailPolicy) bool {
+	for _, p := range policies {
+		for _, s := range p.Spec.Subjects {
+			if s.ServiceAccountSelector != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // MessageView is the subset of the inbound payload the engine needs to decide.
 type MessageView struct {
-	From       string
-	Recipients []string // To + Cc + Bcc
-	SizeBytes  int64
+	From string
+	// EnvelopeFrom is the SMTP MAIL FROM address, when it differs from the
+	// header From. Both must satisfy senderRestrictions, otherwise a client
+	// could pass the check with one and spoof the other.
+	EnvelopeFrom string
+	Recipients   []string // To + Cc + Bcc
+	SizeBytes    int64
 }
 
 // DenyReason is the slug used both for metrics labels and for problem types.
@@ -53,12 +85,15 @@ type Decision struct {
 //	explicit ServiceAccount > ServiceAccountSelector > PodSelector
 //
 // Tie-break across policies follows US-2.6 — higher priority wins, then
-// alphabetical name. Pod-selector subjects are skipped (they only matter for
-// the future SMTP path); the api-server path matches by SA only.
+// alphabetical name. Pod-selector subjects only apply to pod-IP legacy
+// callers, and those only match policies that opt in via legacyAuth.
 func Match(policies []sigv1.MailPolicy, caller Caller) *sigv1.MailPolicy {
 	candidates := make([]sigv1.MailPolicy, 0, len(policies))
 	for _, p := range policies {
 		if p.Namespace != caller.Namespace {
+			continue
+		}
+		if caller.LegacyPodIP && (p.Spec.LegacyAuth == nil || !p.Spec.LegacyAuth.PodIPFallback) {
 			continue
 		}
 		if !subjectMatches(p, caller) {
@@ -84,24 +119,30 @@ func subjectMatches(p sigv1.MailPolicy, caller Caller) bool {
 		if s.ServiceAccount != nil && s.ServiceAccount.Name == caller.ServiceAccount {
 			return true
 		}
-		if s.ServiceAccountSelector != nil && labelsMatch(s.ServiceAccountSelector.MatchLabels, caller.SALabels) {
+		if s.ServiceAccountSelector != nil && caller.SALabelsKnown && selectorMatches(s.ServiceAccountSelector, caller.SALabels) {
 			return true
 		}
-		// PodSelector is intentionally ignored on the REST path (SMTP-only).
+		if s.PodSelector != nil && caller.LegacyPodIP && selectorMatches(s.PodSelector, caller.PodLabels) {
+			return true
+		}
 	}
 	return false
 }
 
-func labelsMatch(want, have map[string]string) bool {
-	if len(want) == 0 {
+// selectorMatches evaluates matchLabels and matchExpressions. An empty
+// selector never matches — a policy must not accidentally bind every SA.
+func selectorMatches(sel *sigv1.LabelSelectorSubject, have map[string]string) bool {
+	if len(sel.MatchLabels) == 0 && len(sel.MatchExpressions) == 0 {
 		return false
 	}
-	for k, v := range want {
-		if have[k] != v {
-			return false
-		}
+	ls, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
+		MatchLabels:      sel.MatchLabels,
+		MatchExpressions: sel.MatchExpressions,
+	})
+	if err != nil {
+		return false
 	}
-	return true
+	return ls.Matches(labels.Set(have))
 }
 
 // Evaluate decides accept/deny for one message against one already-matched
@@ -122,9 +163,15 @@ func Evaluate(p *sigv1.MailPolicy, msg MessageView) Decision {
 		}
 	}
 	if p.Spec.SenderRestrictions != nil {
-		if !senderAllowed(msg.From, p.Spec.SenderRestrictions.AllowedSenders) {
-			return Decision{Policy: p, DenyReason: DenySenderNotAllowed,
-				DenyDetail: "sender '" + msg.From + "' not in allowedSenders"}
+		senders := []string{msg.From}
+		if msg.EnvelopeFrom != "" {
+			senders = append(senders, msg.EnvelopeFrom)
+		}
+		for _, from := range senders {
+			if !senderAllowed(from, p.Spec.SenderRestrictions.AllowedSenders) {
+				return Decision{Policy: p, DenyReason: DenySenderNotAllowed,
+					DenyDetail: "sender '" + from + "' not in allowedSenders"}
+			}
 		}
 	}
 	if p.Spec.RecipientRestrictions != nil {

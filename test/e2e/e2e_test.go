@@ -8,7 +8,9 @@
 //      MailHog and a permissive MailPolicy.
 //   4. Creates a ServiceAccount, mints a TokenRequest for it, and POSTs a
 //      message to the api-server.
-//   5. Asserts the message landed in MailHog's HTTP inbox.
+//   5. Asserts the message landed in MailHog's HTTP inbox and was audited.
+//   6. Sends a second message through the SMTP proxy with AUTH OAUTHBEARER,
+//      checks a spoofed header From is refused, and asserts delivery.
 //
 // All kubectl/helm calls shell out — this keeps the test independent of the
 // specific go kube client generation used in the rest of the code base and
@@ -18,6 +20,7 @@ package e2e
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +30,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/emersion/go-sasl"
+	"github.com/emersion/go-smtp"
 )
 
 const (
@@ -36,6 +42,7 @@ const (
 	imageRepo  = "ghcr.io/se-wo/sigillum"
 	imageTag   = "ci"
 	apiPort    = "18443" // local forward port
+	smtpPort   = "12587"
 	mailhogWeb = "18025"
 )
 
@@ -69,6 +76,8 @@ func TestE2E_Smoke(t *testing.T) {
 		"--set", "image.pullPolicy=Never",
 		"--set", "webhook.enabled=false",
 		"--set", "api.tokenAudience=sigillum",
+		"--set", "smtp.enabled=true",
+		"--set", "smtp.replicas=1",
 		"--wait", "--timeout", "180s",
 	)
 
@@ -130,7 +139,73 @@ func TestE2E_Smoke(t *testing.T) {
 	// Confirm MailHog received the mail via its HTTP v2 API.
 	stop2 := portForward(t, root, mailhogNS, "svc/mailhog", mailhogWeb+":8025")
 	defer stop2()
+	waitForMailHog(t, "e2e hello")
 
+	// The accepted request must show up in the audit stream (US-4.3).
+	if err := pollUntil(30*time.Second, func() error {
+		out, err := runOut(t, root, "kubectl", "-n", namespace, "logs", "-l", "app.kubernetes.io/component=api", "--tail=-1")
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, `"stream":"audit"`) && strings.Contains(line, `"decision":"accept"`) &&
+				strings.Contains(line, `"service_account":"billing-mailer"`) {
+				return nil
+			}
+		}
+		return fmt.Errorf("no audit record yet")
+	}); err != nil {
+		t.Fatalf("audit stream: %v", err)
+	}
+
+	// SMTP proxy with AUTH OAUTHBEARER (US-1.2, US-3.4).
+	stop3 := portForward(t, root, namespace, "svc/sigillum-smtp", smtpPort+":587")
+	defer stop3()
+	var c *smtp.Client
+	if err := pollUntil(30*time.Second, func() error {
+		var err error
+		c, err = smtp.Dial("127.0.0.1:" + smtpPort)
+		return err
+	}); err != nil {
+		t.Fatalf("dial smtp proxy: %v", err)
+	}
+	defer c.Close()
+	if err := c.Auth(sasl.NewOAuthBearerClient(&sasl.OAuthBearerOptions{Username: "billing-mailer", Token: token})); err != nil {
+		t.Fatalf("AUTH OAUTHBEARER: %v", err)
+	}
+	spoofed := "From: ceo@evil.test\r\nTo: bob@noreply.example.com\r\nSubject: spoof\r\n\r\nx\r\n"
+	err = smtpSend(c, "billing@example.com", "bob@noreply.example.com", spoofed)
+	var se *smtp.SMTPError
+	if !errors.As(err, &se) || se.Code != 550 {
+		t.Fatalf("spoofed header From must be refused with 550, got %v", err)
+	}
+	legit := "From: billing@example.com\r\nTo: bob@noreply.example.com\r\nSubject: e2e smtp hello\r\n\r\nhello via smtp\r\n"
+	if err := smtpSend(c, "billing@example.com", "bob@noreply.example.com", legit); err != nil {
+		t.Fatalf("send via smtp proxy: %v", err)
+	}
+	_ = c.Quit()
+	waitForMailHog(t, "e2e smtp hello")
+}
+
+func smtpSend(c *smtp.Client, from, to, msg string) error {
+	if err := c.Mail(from, nil); err != nil {
+		return err
+	}
+	if err := c.Rcpt(to, nil); err != nil {
+		return err
+	}
+	w, err := c.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, msg); err != nil {
+		return err
+	}
+	return w.Close()
+}
+
+func waitForMailHog(t *testing.T, subject string) {
+	t.Helper()
 	if err := pollUntil(30*time.Second, func() error {
 		r, err := http.Get("http://127.0.0.1:" + mailhogWeb + "/api/v2/messages")
 		if err != nil {
@@ -138,12 +213,12 @@ func TestE2E_Smoke(t *testing.T) {
 		}
 		defer r.Body.Close()
 		b, _ := io.ReadAll(r.Body)
-		if !bytes.Contains(b, []byte("e2e hello")) {
+		if !bytes.Contains(b, []byte(subject)) {
 			return fmt.Errorf("not delivered yet: %s", string(b))
 		}
 		return nil
 	}); err != nil {
-		t.Fatalf("MailHog never saw the message: %v", err)
+		t.Fatalf("MailHog never saw %q: %v", subject, err)
 	}
 }
 

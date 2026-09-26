@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/smtp"
+	"net/textproto"
 	"strconv"
 	"sync"
 	"time"
@@ -17,6 +18,10 @@ import (
 )
 
 const driverHelo = "sigillum"
+
+// defaultSendTimeout bounds one upstream SMTP conversation when the caller's
+// context carries no deadline.
+const defaultSendTimeout = 60 * time.Second
 
 func init() {
 	driver.Register(driver.TypeSMTP, func(cfg driver.Config) (driver.Driver, error) {
@@ -81,6 +86,7 @@ func (d *Driver) probeEndpoint(ctx context.Context, ep driver.SMTPEndpoint) driv
 		return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: false, Message: err.Error()}
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
 
 	c, err := smtp.NewClient(conn, ep.Host)
 	if err != nil {
@@ -117,15 +123,34 @@ func (d *Driver) Send(ctx context.Context, msg *driver.Message) (*driver.SendRes
 		return nil, fmt.Errorf("%w: %v", driver.ErrUpstreamPermanent, err)
 	}
 	allRecipients := append(append(append([]driver.Address{}, msg.To...), msg.Cc...), msg.Bcc...)
-	rcpts := extractAddrs(allRecipients)
+	return d.sendBody(ctx, msg.From.Address, extractAddrs(allRecipients), body, msgID)
+}
 
+// SendRaw implements driver.RawSender: raw is relayed as-is (net/smtp's
+// DATA writer handles dot-stuffing and CRLF normalisation).
+func (d *Driver) SendRaw(ctx context.Context, envelopeFrom string, recipients []string, raw []byte) (*driver.SendResult, error) {
+	if len(recipients) == 0 {
+		return nil, fmt.Errorf("%w: at least one recipient required", driver.ErrUpstreamPermanent)
+	}
+	return d.sendBody(ctx, envelopeFrom, recipients, raw, "")
+}
+
+func (d *Driver) sendBody(ctx context.Context, from string, rcpts []string, body []byte, msgID string) (*driver.SendResult, error) {
 	var lastErr error
 	transient := true
 	for _, ep := range d.cfg.SMTP.Endpoints {
-		if err := d.sendVia(ctx, ep, msg.From.Address, rcpts, body); err != nil {
+		if err := d.sendVia(ctx, ep, from, rcpts, body); err != nil {
 			lastErr = err
 			if !isTransient(err) {
 				transient = false
+			}
+			// Once an endpoint has started judging the message, trying the
+			// next one would either repeat a rejection or, if the reply to
+			// the final dot was lost, deliver the message twice. Failover
+			// is only for endpoints we could not talk to at all.
+			var de deliveryError
+			if errors.As(err, &de) {
+				break
 			}
 			continue
 		}
@@ -153,6 +178,15 @@ func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, from strin
 		return err
 	}
 	defer conn.Close()
+	// Bound the whole conversation, not just the dial: a relay that accepts
+	// the connection and then stalls must not block the caller forever.
+	deadline := time.Now().Add(defaultSendTimeout)
+	if dl, ok := ctx.Deadline(); ok {
+		deadline = dl
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return err
+	}
 
 	c, err := smtp.NewClient(conn, ep.Host)
 	if err != nil {
@@ -184,23 +218,36 @@ func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, from strin
 			}
 		}
 	}
+	// From here on the relay is judging the message itself, so a 5xx
+	// reply means retrying the same message cannot succeed.
 	if err := c.Mail(from); err != nil {
-		return err
+		return deliveryError{err}
 	}
 	for _, r := range rcpts {
 		if err := c.Rcpt(r); err != nil {
-			return err
+			return deliveryError{err}
 		}
 	}
 	w, err := c.Data()
 	if err != nil {
-		return err
+		return deliveryError{err}
 	}
 	if _, err := w.Write(body); err != nil {
-		return err
+		return deliveryError{err}
 	}
-	return w.Close()
+	if err := w.Close(); err != nil {
+		return deliveryError{err}
+	}
+	return nil
 }
+
+// deliveryError marks a failure in the MAIL/RCPT/DATA phase, as opposed to
+// connection, STARTTLS or AUTH failures, which reflect the backend's
+// configuration or health rather than the message.
+type deliveryError struct{ err error }
+
+func (e deliveryError) Error() string { return e.err.Error() }
+func (e deliveryError) Unwrap() error { return e.err }
 
 func dial(ctx context.Context, ep driver.SMTPEndpoint, timeout time.Duration) (net.Conn, error) {
 	addr := net.JoinHostPort(ep.Host, strconv.Itoa(int(ep.Port)))
@@ -260,15 +307,19 @@ func (a loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 	}
 }
 
-// isTransient classifies errors so the caller can retry only safely.
-// Any net.OpError, timeout, EOF or temporary error is transient.
+// isTransient classifies errors so the caller can retry only safely. Only a
+// 5xx reply to MAIL, RCPT or DATA is permanent. A 5xx during the handshake,
+// STARTTLS or AUTH (e.g. rotated relay credentials, "530 must issue
+// STARTTLS") is Sigillum's configuration problem: callers must queue and
+// retry rather than bounce while an operator fixes the backend.
 func isTransient(err error) bool {
-	var ne net.Error
-	if errors.As(err, &ne) {
-		return ne.Timeout() || ne.Temporary()
-	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	var de deliveryError
+	if !errors.As(err, &de) {
 		return true
+	}
+	var te *textproto.Error
+	if errors.As(err, &te) {
+		return te.Code < 500
 	}
 	return true
 }

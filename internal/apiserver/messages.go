@@ -15,11 +15,11 @@ import (
 
 	"github.com/google/uuid"
 
-	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 	"github.com/se-wo/sigillum/internal/apiserver/problem"
+	"github.com/se-wo/sigillum/internal/audit"
 	"github.com/se-wo/sigillum/internal/driver"
+	"github.com/se-wo/sigillum/internal/gateway"
 	"github.com/se-wo/sigillum/internal/policy"
-	"github.com/se-wo/sigillum/internal/telemetry"
 )
 
 // requestBody is the JSON payload accepted by POST /v1/messages.
@@ -54,23 +54,50 @@ type responseBody struct {
 	AcceptedAt    time.Time `json:"acceptedAt"`
 }
 
-// handleSendMessage is the hot path. It performs:
+// handleSendMessage parses the REST payload and hands the message to the
+// shared gateway pipeline:
 //
-//	body decode -> address parse -> policy match -> rate limit ->
-//	policy evaluate (sender/recipient/size) -> driver.Send -> 202.
+//	body decode -> address parse -> gateway.Send (policy, rate limit,
+//	backend, audit) -> map Result to 202 / RFC-7807 problem.
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	msgID := uuid.NewString()
+	subject, authenticated := SubjectFrom(ctx)
+	// ev accumulates what is known about the request so that every early
+	// exit still leaves a complete audit record (US-4.3). from/to are filled
+	// in as soon as they are parsed: a payload rejected after that point
+	// (e.g. a header-injection attempt) is exactly what a SIEM wants to see.
+	ev := audit.Event{MessageID: msgID, Transport: gateway.TransportREST}
+	if authenticated {
+		ev.Namespace = subject.Namespace
+		ev.ServiceAccount = subject.ServiceAccount
+		ev.AuthMethod = gateway.AuthOAuthBearer
+	}
+
 	if s.shutting.Load() {
+		s.gw.Reject(ev, "shutting_down")
 		problem.Write(w, problem.New(problem.TypeShuttingDown, http.StatusServiceUnavailable,
 			"Service draining", "the api-server is terminating; retry on a different replica"))
 		return
 	}
-
-	ctx := r.Context()
-	subject, ok := SubjectFrom(ctx)
-	if !ok {
+	if !authenticated { // the auth middleware normally answers first
+		s.gw.Reject(ev, "missing_token")
 		problem.Write(w, problem.New(problem.TypeInvalidToken, http.StatusUnauthorized,
 			"Authentication required", "missing or invalid Bearer token"))
 		return
+	}
+
+	// rejectPayload answers 4xx for a request that never reached the
+	// pipeline and still leaves an audit record.
+	rejectPayload := func(p problem.Problem) {
+		p.MessageID = msgID
+		// Same audit reasons as the SMTP proxy: SIEM rules key on them.
+		reason := "invalid_payload"
+		if p.Type == problem.TypeBase+problem.TypeMessageTooLarge {
+			reason = "message_too_large"
+		}
+		s.gw.Reject(ev, reason)
+		problem.Write(w, p)
 	}
 
 	const maxBody = 32 * 1024 * 1024 // 32 MiB hard ceiling — policy enforces lower limits
@@ -82,10 +109,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		req, atts, merr = parseMultipartMessage(r, maxBody)
 		if merr != nil {
 			if errors.Is(merr, errBodyTooLarge) {
-				problem.Write(w, problem.New(problem.TypeMessageTooLarge, http.StatusRequestEntityTooLarge,
+				rejectPayload(problem.New(problem.TypeMessageTooLarge, http.StatusRequestEntityTooLarge,
 					"Request body exceeds 32MiB ceiling", "use a smaller message or split attachments"))
 			} else {
-				problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+				rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 					"Failed to parse multipart body", merr.Error()))
 			}
 			return
@@ -93,23 +120,23 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	} else {
 		body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 		if err != nil {
-			problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+			rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 				"Failed to read request body", err.Error()))
 			return
 		}
 		if int64(len(body)) > maxBody {
-			problem.Write(w, problem.New(problem.TypeMessageTooLarge, http.StatusRequestEntityTooLarge,
+			rejectPayload(problem.New(problem.TypeMessageTooLarge, http.StatusRequestEntityTooLarge,
 				"Request body exceeds 32MiB ceiling", "use a smaller message or split attachments"))
 			return
 		}
 		if err := json.Unmarshal(body, &req); err != nil {
-			problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+			rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 				"Malformed JSON payload", err.Error()))
 			return
 		}
 		for i, att := range req.Attachments {
 			if err := validateAttachmentMeta(att); err != nil {
-				problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+				rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 					fmt.Sprintf("Invalid attachment[%d]", i), err.Error()))
 				return
 			}
@@ -117,115 +144,38 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		var decErr error
 		atts, decErr = decodeAttachments(req.Attachments)
 		if decErr != nil {
-			problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+			rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 				"Invalid attachment", decErr.Error()))
 			return
 		}
 	}
 
-	msgID := uuid.NewString()
-	logger := s.logger.With(
-		"message_id", msgID,
-		"namespace", subject.Namespace,
-		"service_account", subject.ServiceAccount,
-		"authMethod", "oauth_bearer",
-	)
-
+	ev.From = req.From // raw until parsed, so a malformed sender is still recorded
 	from, err := parseAddress(req.From)
 	if err != nil {
-		problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 			"Invalid 'from' address", err.Error()))
 		return
 	}
 	to, err := parseAddressList(req.To)
 	if err != nil {
-		problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 			"Invalid 'to' address", err.Error()))
 		return
 	}
 	cc, err := parseAddressList(req.Cc)
 	if err != nil {
-		problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 			"Invalid 'cc' address", err.Error()))
 		return
 	}
 	bcc, err := parseAddressList(req.Bcc)
 	if err != nil {
-		problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 			"Invalid 'bcc' address", err.Error()))
 		return
 	}
-	if len(to)+len(cc)+len(bcc) == 0 {
-		problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
-			"At least one recipient required", "provide one of to, cc or bcc"))
-		return
-	}
-
-	if err := validateRequestHeaders(req.Headers); err != nil {
-		problem.Write(w, problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
-			"Invalid header", err.Error()))
-		return
-	}
-
-	allRecipientStrs := append(append([]string{}, addressesToStrings(to)...), addressesToStrings(cc)...)
-	allRecipientStrs = append(allRecipientStrs, addressesToStrings(bcc)...)
-	view := policy.MessageView{
-		From:       from.Address,
-		Recipients: allRecipientStrs,
-		SizeBytes:  estimateSize(req, atts),
-	}
-
-	// Subject matching needs the live policy list. The store guarantees a
-	// snapshot scoped to the caller's namespace so the engine sees nothing
-	// outside it.
-	policies := s.policyStore.ListInNamespace(subject.Namespace)
-	matched := policy.Match(policies, policy.Caller{
-		Namespace:      subject.Namespace,
-		ServiceAccount: subject.ServiceAccount,
-	})
-	decision := policy.Evaluate(matched, view)
-	if !decision.Allowed {
-		emitDeny(logger, subject, view, decision)
-		writePolicyDeny(w, msgID, decision)
-		return
-	}
-
-	policyKey := decision.Policy.Namespace + "/" + decision.Policy.Name
-	if rl := decision.Policy.Spec.RateLimits; rl != nil && (rl.MessagesPerMinute > 0 || rl.MessagesPerHour > 0) {
-		ok, retry := s.limiter.Allow(ctx, policyKey, rl.MessagesPerMinute, rl.MessagesPerHour)
-		if !ok {
-			telemetry.RatelimitRejectedTotal.WithLabelValues(decision.Policy.Namespace, decision.Policy.Name).Inc()
-			w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())))
-			problem.Write(w, problem.Problem{
-				Type:      problem.TypeBase + problem.TypeRateLimited,
-				Title:     "Rate limit exceeded",
-				Status:    http.StatusTooManyRequests,
-				Detail:    "policy '" + decision.Policy.Name + "' rate limit exceeded",
-				Policy:    decision.Policy.Name,
-				MessageID: msgID,
-			})
-			logger.Info("request rejected", "result", "ratelimited", "policy", decision.Policy.Name)
-			return
-		}
-	}
-
-	d, backendKey, err := s.backendForPolicy(ctx, decision.Policy)
-	if err != nil {
-		telemetry.PolicyDeniedTotal.WithLabelValues(decision.Policy.Namespace, decision.Policy.Name, "backend_not_ready").Inc()
-		problem.Write(w, problem.Problem{
-			Type:      problem.TypeBase + problem.TypeBackendNotReady,
-			Title:     "Backend not ready",
-			Status:    http.StatusServiceUnavailable,
-			Detail:    err.Error(),
-			Policy:    decision.Policy.Name,
-			MessageID: msgID,
-		})
-		logger.Warn("backend not ready", "policy", decision.Policy.Name, "err", err)
-		return
-	}
-	defer d.Close()
-
-	driverMsg := &driver.Message{
+	msg := &driver.Message{
 		MessageID:   "<" + msgID + "@sigillum.local>",
 		From:        toDriverAddress(from),
 		To:          toDriverAddresses(to),
@@ -236,118 +186,106 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		Attachments: atts,
 		Headers:     req.Headers,
 	}
+	ev.From = from.Address
+	ev.To = gateway.Recipients(msg)
+	if len(ev.To) == 0 {
+		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+			"At least one recipient required", "provide one of to, cc or bcc"))
+		return
+	}
 
-	start := time.Now()
-	res, err := d.Send(ctx, driverMsg)
-	dur := time.Since(start).Seconds()
+	if err := validateRequestHeaders(req.Headers); err != nil {
+		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+			"Invalid header", err.Error()))
+		return
+	}
 
-	resultLabel := "ok"
-	if err != nil {
-		resultLabel = "upstream_error"
-		telemetry.BackendDurationSeconds.WithLabelValues(decision.Policy.Namespace, decision.Policy.Name, backendKey, resultLabel).Observe(dur)
-		telemetry.MessagesTotal.WithLabelValues(decision.Policy.Namespace, decision.Policy.Name, backendKey, resultLabel).Inc()
+	res := s.gw.Send(ctx, gateway.Request{
+		Identity: gateway.Identity{
+			Namespace:      subject.Namespace,
+			ServiceAccount: subject.ServiceAccount,
+			AuthMethod:     gateway.AuthOAuthBearer,
+		},
+		Transport: gateway.TransportREST,
+		MessageID: msgID,
+		Message:   msg,
+		SizeBytes: estimateSize(req, atts),
+	})
+	writeResult(w, msgID, res)
+}
+
+// writeResult maps a gateway Result onto the REST status codes of US-1.1.
+func writeResult(w http.ResponseWriter, msgID string, res gateway.Result) {
+	switch res.Status {
+	case gateway.StatusAccepted:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(responseBody{
+			MessageID:     msgID,
+			PolicyMatched: res.Policy,
+			AcceptedAt:    res.AcceptedAt,
+		})
+	case gateway.StatusDenied:
+		writePolicyDeny(w, msgID, res)
+	case gateway.StatusRateLimited:
+		w.Header().Set("Retry-After", strconv.Itoa(int(res.RetryAfter.Seconds())))
+		problem.Write(w, problem.Problem{
+			Type:      problem.TypeBase + problem.TypeRateLimited,
+			Title:     "Rate limit exceeded",
+			Status:    http.StatusTooManyRequests,
+			Detail:    res.Detail,
+			Policy:    res.Policy,
+			MessageID: msgID,
+		})
+	case gateway.StatusUnavailable:
+		w.Header().Set("Retry-After", "5")
+		problem.Write(w, problem.Problem{
+			Type:      problem.TypeBase + problem.TypeUnavailable,
+			Title:     "Service temporarily unavailable",
+			Status:    http.StatusServiceUnavailable,
+			Detail:    res.Detail,
+			Policy:    res.Policy,
+			MessageID: msgID,
+		})
+	case gateway.StatusBackendNotReady:
+		problem.Write(w, problem.Problem{
+			Type:      problem.TypeBase + problem.TypeBackendNotReady,
+			Title:     "Backend not ready",
+			Status:    http.StatusServiceUnavailable,
+			Detail:    res.Detail,
+			Policy:    res.Policy,
+			MessageID: msgID,
+		})
+	default:
 		problem.Write(w, problem.Problem{
 			Type:      problem.TypeBase + problem.TypeUpstreamError,
 			Title:     "Upstream backend error",
 			Status:    http.StatusBadGateway,
-			Detail:    err.Error(),
-			Policy:    decision.Policy.Name,
+			Detail:    res.Detail,
+			Policy:    res.Policy,
 			MessageID: msgID,
 		})
-		logger.Error("upstream send failed", "backend", backendKey, "err", err, "result", resultLabel)
-		return
 	}
-	telemetry.BackendDurationSeconds.WithLabelValues(decision.Policy.Namespace, decision.Policy.Name, backendKey, resultLabel).Observe(dur)
-	telemetry.MessagesTotal.WithLabelValues(decision.Policy.Namespace, decision.Policy.Name, backendKey, resultLabel).Inc()
-	telemetry.MessageSizeBytes.WithLabelValues(decision.Policy.Namespace, decision.Policy.Name, backendKey).Observe(float64(view.SizeBytes))
-
-	logger.Info("message accepted",
-		"policy", decision.Policy.Name,
-		"backend", backendKey,
-		"upstream_id", res.UpstreamID,
-		"result", resultLabel,
-	)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(responseBody{
-		MessageID:     msgID,
-		PolicyMatched: decision.Policy.Name,
-		AcceptedAt:    res.AcceptedAt,
-	})
 }
 
-func writePolicyDeny(w http.ResponseWriter, msgID string, d policy.Decision) {
-	switch d.DenyReason {
+func writePolicyDeny(w http.ResponseWriter, msgID string, res gateway.Result) {
+	p := problem.Problem{Status: http.StatusForbidden, Detail: res.Detail, Policy: res.Policy, MessageID: msgID}
+	switch res.DenyReason {
 	case policy.DenyNoPolicy:
-		problem.Write(w, problem.Problem{
-			Type:      problem.TypeBase + problem.TypeNoPolicyMatched,
-			Title:     "No matching policy",
-			Status:    http.StatusForbidden,
-			Detail:    d.DenyDetail,
-			MessageID: msgID,
-		})
+		p.Type, p.Title = problem.TypeBase+problem.TypeNoPolicyMatched, "No matching policy"
 	case policy.DenySenderNotAllowed:
-		problem.Write(w, problem.Problem{
-			Type:      problem.TypeBase + problem.TypeSenderNotAllowed,
-			Title:     "Sender address not allowed by policy",
-			Status:    http.StatusForbidden,
-			Detail:    d.DenyDetail,
-			Policy:    nameOf(d.Policy),
-			MessageID: msgID,
-		})
+		p.Type, p.Title = problem.TypeBase+problem.TypeSenderNotAllowed, "Sender address not allowed by policy"
 	case policy.DenyRecipientBlocked:
-		problem.Write(w, problem.Problem{
-			Type:      problem.TypeBase + problem.TypeRecipientBlocked,
-			Title:     "Recipient address not allowed by policy",
-			Status:    http.StatusForbidden,
-			Detail:    d.DenyDetail,
-			Policy:    nameOf(d.Policy),
-			MessageID: msgID,
-		})
+		p.Type, p.Title = problem.TypeBase+problem.TypeRecipientBlocked, "Recipient address not allowed by policy"
 	case policy.DenyMessageTooLarge:
-		problem.Write(w, problem.Problem{
-			Type:      problem.TypeBase + problem.TypeMessageTooLarge,
-			Title:     "Message exceeds policy size limit",
-			Status:    http.StatusRequestEntityTooLarge,
-			Detail:    d.DenyDetail,
-			Policy:    nameOf(d.Policy),
-			MessageID: msgID,
-		})
+		p.Type, p.Title = problem.TypeBase+problem.TypeMessageTooLarge, "Message exceeds policy size limit"
+		p.Status = http.StatusRequestEntityTooLarge
 	case policy.DenyTooManyRecipient:
-		problem.Write(w, problem.Problem{
-			Type:      problem.TypeBase + problem.TypeTooManyRecipients,
-			Title:     "Too many recipients for policy",
-			Status:    http.StatusForbidden,
-			Detail:    d.DenyDetail,
-			Policy:    nameOf(d.Policy),
-			MessageID: msgID,
-		})
+		p.Type, p.Title = problem.TypeBase+problem.TypeTooManyRecipients, "Too many recipients for policy"
 	default:
-		problem.Write(w, problem.New(problem.TypeNoPolicyMatched, http.StatusForbidden,
-			"Request denied", d.DenyDetail))
+		p.Type, p.Title = problem.TypeBase+problem.TypeNoPolicyMatched, "Request denied"
 	}
-}
-
-func emitDeny(logger interface {
-	Info(msg string, args ...any)
-	Warn(msg string, args ...any)
-}, subject any, view policy.MessageView, d policy.Decision) {
-	policyName := nameOf(d.Policy)
-	ns := ""
-	if d.Policy != nil {
-		ns = d.Policy.Namespace
-	}
-	telemetry.PolicyDeniedTotal.WithLabelValues(ns, policyName, string(d.DenyReason)).Inc()
-	logger.Info("request denied", "result", "denied", "reason", string(d.DenyReason),
-		"policy", policyName, "from", view.From, "recipients", strings.Join(view.Recipients, ","))
-}
-
-func nameOf(p *sigv1.MailPolicy) string {
-	if p == nil {
-		return ""
-	}
-	return p.Name
+	problem.Write(w, p)
 }
 
 func parseAddress(s string) (mail.Address, error) {
@@ -368,14 +306,6 @@ func parseAddressList(in []string) ([]mail.Address, error) {
 		out = append(out, a)
 	}
 	return out, nil
-}
-
-func addressesToStrings(in []mail.Address) []string {
-	out := make([]string, len(in))
-	for i, a := range in {
-		out[i] = a.Address
-	}
-	return out
 }
 
 func toDriverAddress(a mail.Address) driver.Address {

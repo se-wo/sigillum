@@ -23,6 +23,7 @@ const (
 	TypeBackendNotReady   = "backend-not-ready"
 	TypeNotImplemented    = "not-implemented"
 	TypeShuttingDown      = "shutting-down"
+	TypeUnavailable       = "unavailable"
 	TypeInternal          = "internal-error"
 )
 

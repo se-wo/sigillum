@@ -1,7 +1,7 @@
 # sigillum — single-image, dual-mode build
 SHELL := /usr/bin/env bash
 
-VERSION ?= 0.1.1
+VERSION ?= 0.2.0
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 

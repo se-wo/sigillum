@@ -23,6 +23,21 @@ Common helpers for the sigillum chart.
 {{ include "sigillum.fullname" . }}-api
 {{- end -}}
 
+{{- define "sigillum.smtp.fullname" -}}
+{{ include "sigillum.fullname" . }}-smtp
+{{- end -}}
+
+{{- define "sigillum.smtp.labels" -}}
+{{ include "sigillum.labels" . }}
+app.kubernetes.io/component: smtp
+{{- end -}}
+
+{{- define "sigillum.smtp.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "sigillum.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: smtp
+{{- end -}}
+
 {{- define "sigillum.controller.fullname" -}}
 {{ include "sigillum.fullname" . }}-controller
 {{- end -}}
@@ -72,3 +87,69 @@ app.kubernetes.io/component: controller
 {{- define "sigillum.webhook.secretName" -}}
 {{- default (printf "%s-webhook-tls" (include "sigillum.fullname" .)) .Values.webhook.certificate.secretName -}}
 {{- end -}}
+
+{{/*
+Rate-limit flags shared by every Deployment that sends mail.
+*/}}
+{{- define "sigillum.ratelimitArgs" -}}
+- --ratelimit-backend={{ .Values.rateLimit.backend }}
+{{- if eq .Values.rateLimit.backend "redis" }}
+{{- if not .Values.rateLimit.redis.addrs }}
+{{- fail "rateLimit.redis.addrs is required when rateLimit.backend=redis" }}
+{{- end }}
+- --redis-addrs={{ .Values.rateLimit.redis.addrs | join "," }}
+{{- with .Values.rateLimit.redis.masterName }}
+- --redis-master={{ . }}
+{{- end }}
+- --redis-db={{ .Values.rateLimit.redis.db }}
+- --redis-tls={{ .Values.rateLimit.redis.tls }}
+- --ratelimit-fail-open={{ .Values.rateLimit.failOpen }}
+{{- end }}
+{{- end }}
+
+{{/*
+Redis credentials from an existing Secret (never rendered into args).
+*/}}
+{{- define "sigillum.ratelimitEnv" -}}
+{{- if and (eq .Values.rateLimit.backend "redis") .Values.rateLimit.redis.existingSecret }}
+- name: SIGILLUM_REDIS_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.rateLimit.redis.existingSecret }}
+      key: {{ .Values.rateLimit.redis.passwordKey }}
+{{- with .Values.rateLimit.redis.usernameKey }}
+- name: SIGILLUM_REDIS_USERNAME
+  valueFrom:
+    secretKeyRef:
+      name: {{ $.Values.rateLimit.redis.existingSecret }}
+      key: {{ . }}
+      optional: true
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+OpenTelemetry env (US-4.4). Rendered only when an endpoint is configured.
+Arg: dict "root" $ "service" "<service name>".
+*/}}
+{{- define "sigillum.tracingEnv" -}}
+{{- $t := .root.Values.tracing }}
+{{- if $t.endpoint }}
+- name: OTEL_EXPORTER_OTLP_ENDPOINT
+  value: {{ $t.endpoint | quote }}
+- name: OTEL_SERVICE_NAME
+  value: {{ .service | quote }}
+{{- with $t.sampler }}
+- name: OTEL_TRACES_SAMPLER
+  value: {{ . | quote }}
+{{- end }}
+{{- with $t.samplerArg }}
+- name: OTEL_TRACES_SAMPLER_ARG
+  value: {{ . | quote }}
+{{- end }}
+{{- with $t.resourceAttributes }}
+- name: OTEL_RESOURCE_ATTRIBUTES
+  value: {{ . | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

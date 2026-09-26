@@ -27,9 +27,9 @@ func NewMemoryLimiter() *MemoryLimiter {
 
 // Allow implements Limiter.Allow with sliding-window semantics. perMinute /
 // perHour values of 0 mean "no cap on that window".
-func (l *MemoryLimiter) Allow(_ context.Context, key string, perMinute, perHour int32) (bool, time.Duration) {
+func (l *MemoryLimiter) Allow(_ context.Context, key string, perMinute, perHour int32) (bool, time.Duration, error) {
 	if perMinute <= 0 && perHour <= 0 {
-		return true, 0
+		return true, 0, nil
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -57,20 +57,20 @@ func (l *MemoryLimiter) Allow(_ context.Context, key string, perMinute, perHour 
 	if perMinute > 0 && minuteCount >= perMinute {
 		// retry-after = oldest-in-minute + 1m - now
 		oldest := hist[len(hist)-int(minuteCount)]
-		retry := time.Until(oldest.Add(time.Minute))
+		retry := oldest.Add(time.Minute).Sub(now)
 		l.hits[key] = hist
-		return false, ceilToSecond(retry)
+		return false, ceilToSecond(retry), nil
 	}
 	if perHour > 0 && hourCount >= perHour {
 		oldest := hist[0]
-		retry := time.Until(oldest.Add(time.Hour))
+		retry := oldest.Add(time.Hour).Sub(now)
 		l.hits[key] = hist
-		return false, ceilToSecond(retry)
+		return false, ceilToSecond(retry), nil
 	}
 
 	hist = append(hist, now)
 	l.hits[key] = hist
-	return true, 0
+	return true, 0, nil
 }
 
 func ceilToSecond(d time.Duration) time.Duration {
@@ -81,4 +81,14 @@ func ceilToSecond(d time.Duration) time.Duration {
 		return d.Truncate(time.Second) + time.Second
 	}
 	return d
+}
+
+// Refund implements Limiter.Refund by dropping the newest hit for key.
+func (l *MemoryLimiter) Refund(_ context.Context, key string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if hist := l.hits[key]; len(hist) > 0 {
+		l.hits[key] = hist[:len(hist)-1]
+	}
+	return nil
 }

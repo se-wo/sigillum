@@ -3,11 +3,12 @@ name: sigillum
 description: |
   Sigillum — Kubernetes-native, policy-enforced mail gateway.
 
-  Installs the api-server (REST send path) and controller (CRD reconcilers
-  + validating admission webhook) as two Deployments sharing a single image.
+  Installs the api-server (REST send path), the controller (CRD reconcilers
+  + validating admission webhook) and, optionally, the SMTP submission proxy
+  as Deployments sharing a single image.
 type: application
-version: 0.1.1
-appVersion: "0.1.1"
+version: 0.2.0
+appVersion: "0.2.0"
 icon: ""
 home: https://github.com/se-wo/sigillum
 sources:
