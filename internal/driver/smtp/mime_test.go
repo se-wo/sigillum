@@ -268,6 +268,8 @@ func TestAssemble_DisplayNamesStayInsideTheirAddress(t *testing.T) {
 		`Jörg "J" <x>`,
 		`Alerts (ops)`,
 		`Grüße`,
+		`Grüße \ "x" <y>`,
+		"tab\tand\x01control\\",
 		`plain`,
 	} {
 		raw, _, err := AssembleMessage(&driver.Message{

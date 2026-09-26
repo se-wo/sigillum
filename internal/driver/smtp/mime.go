@@ -20,12 +20,18 @@ import (
 const crlf = "\r\n"
 
 // formatAddress produces an RFC-5322 address with optional display name.
-// net/mail quotes the name, or encodes it as an RFC 2047 phrase, so quotes,
-// '<', ',' and similar in a name cannot end it early and show a different
-// address.
+// The name is quoted (printable ASCII) or B-encoded (anything else), so
+// quotes, '<', ',' and similar in a name cannot end it early and show a
+// different address. B, not Q: net/mail's Q-encoding leaves '\' in the
+// encoded-word, which RFC 2047 §5 does not allow in a phrase.
 func formatAddress(a driver.Address) string {
 	if a.Name == "" {
 		return a.Address
+	}
+	for i := 0; i < len(a.Name); i++ {
+		if c := a.Name[i]; (c < ' ' && c != '\t') || c > '~' {
+			return mime.BEncoding.Encode("utf-8", a.Name) + " <" + a.Address + ">"
+		}
 	}
 	return (&mail.Address{Name: a.Name, Address: a.Address}).String()
 }
