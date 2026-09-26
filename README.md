@@ -202,7 +202,9 @@ kubectl apply --server-side -f charts/sigillum/crds/
 helm upgrade sigillum ./charts/sigillum -n sigillum-system --reuse-values
 ```
 
-Changes in 0.3.0 that may need attention:
+All changes per release: [`CHANGELOG.md`](CHANGELOG.md) (also the notes of
+each [GitHub Release](https://github.com/se-wo/sigillum/releases)). Changes in
+0.3.0 that may need attention:
 
 - New CRD `MailCredential`, new field `recipientRestrictions.allowedRecipients`.
 - REST: permanent upstream rejections answer `422 upstream-rejected`

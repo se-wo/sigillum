@@ -1,0 +1,178 @@
+# Changelog
+
+All notable changes to Sigillum are recorded here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[Semantic Versioning](https://semver.org/) with the pre-1.0 rules in
+[`docs/SPEC.md`](docs/SPEC.md#8-roadmap) §8.0: minor releases may change CRDs
+with a documented migration, patch releases never do.
+
+The section of a version becomes the notes of its GitHub Release
+(`hack/release-notes.sh`, run by the release workflow). Add entries under
+the version being prepared in the same pull request as the change.
+
+## [0.3.0] - unreleased
+
+Works with off-the-shelf apps and cannot be bypassed (SPEC §8.2).
+
+### Upgrading
+
+- Helm installs CRDs only on first install. Apply them before upgrading:
+  `kubectl apply --server-side -f charts/sigillum/crds/`.
+- REST: a permanent upstream rejection now answers `422 upstream-rejected`
+  instead of `502 upstream-error`. Audit and metric reason
+  `upstream_rejected` on both transports (was `upstream_error`).
+- On Kubernetes 1.30 and later, with `credentials.enabled` (the default),
+  the controller gets cluster-wide `create`/`patch` on Secrets, confined by
+  the credential Secret guard. Set `credentials.enabled=false` to opt out.
+- Components read Secrets only from the release namespace and
+  `rbac.allowedSecretNamespaces`.
+- `terminationGracePeriodSeconds` is 35 (was 30) for the api-server and
+  SMTP proxy.
+
+### Added
+
+- `MailCredential`: SMTP username (`<name>.<namespace>`) and password bound
+  to one ServiceAccount, for apps that only speak `AUTH PLAIN`/`LOGIN`
+  (US-3.7).
+  - Generated mode: the controller writes a 256-bit random password into a
+    Secret (`username`, `password`, `host`, `port`) and stores only its
+    SHA-256.
+  - Rotation on `spec.rotation.interval` or on demand
+    (`sigillum.dev/rotate`), with a grace period for the previous password.
+  - Bring-your-own-hash mode with an argon2id `spec.passwordHash`.
+- SMTP proxy auth mode `credential` (`AUTH PLAIN`, `AUTH LOGIN`), offered
+  only over STARTTLS unless `smtp.allowInsecureAuth: true`. Failed logins
+  are audited and throttled per username and source IP; deleting a
+  `MailCredential` also ends open sessions.
+- Credential Secret guard: a `ValidatingAdmissionPolicy` that confines the
+  controller's Secret writes to credential Secrets outside excluded
+  namespaces. The controller verifies it and writes nothing while it is
+  missing or changed (`SecretsManaged` condition,
+  `sigillum_credential_guard_ok` metric).
+- `recipientRestrictions.allowedRecipients`: exact mailboxes and globs
+  anchored on a domain (`*@oncall.example.com`), matched like
+  `allowedSenders` (US-2.4, #6).
+- `--cluster-name` / chart `clusterName`: `cluster` field in audit records
+  and logs, `cluster` target label on the ServiceMonitor (US-4.5).
+- Audit fields `credential`, `credential_previous` and `cluster`; reasons
+  `invalid_credentials`, `auth_rate_limited`, `auth_unavailable`,
+  `upstream_rejected`.
+- Metric `sigillum_auth_failures_total`.
+- `--shutdown-delay` (chart `api.shutdownDelay`, `smtp.shutdownDelay`).
+- Recipes in `examples/`: local development with Mailpit, egress blocking
+  (NetworkPolicy, Kyverno, Cilium), admission guardrails
+  (ValidatingAdmissionPolicy, Kyverno), provider backends (Microsoft 365,
+  Google Workspace, Amazon SES, Mailgun, Postmark, Brevo), MailCredential
+  setups for Grafana, Alertmanager, Gitea, Nextcloud, Keycloak and Argo CD
+  notifications, and Stakater Reloader for rotations.
+- Release: images and charts are signed keyless with cosign and carry SLSA
+  build provenance; images carry SPDX SBOMs (README, "Supply chain").
+  GitHub Releases with notes from this file.
+
+### Changed
+
+- REST distinguishes permanent (`422 upstream-rejected`) from transient
+  (`502 upstream-error`) upstream failures (gap G-1).
+- On SIGTERM, pods fail readiness for the shutdown delay while still
+  serving, then drain (gap G-3).
+- `Received` header protocol follows RFC 3848 (`ESMTPA`, `ESMTPSA`).
+- End-to-end tests use Mailpit instead of MailHog.
+
+### Fixed
+
+- The Secret informer was cluster-wide while the chart only grants
+  namespaced Secret RBAC, so reading a backend's credentials Secret could
+  hang. It is now limited to the readable namespaces
+  (`--secret-namespaces`).
+- Webhook registration with the controller-runtime v0.25 typed builder.
+
+### Security
+
+- TokenReview cache entries no longer outlive the token's `exp` claim
+  (gap G-5).
+- gRPC updated to v1.83.2 (GHSA-2v4p-qf9q-27wj).
+
+## [0.2.1] - 2026-09-26
+
+Security patch release addressing the findings of the whitebox review.
+
+### Security
+
+- Local parts with routing semantics (`%`, `!`, quoted local parts) are
+  rejected on the REST and SMTP paths and again in policy evaluation; an
+  upstream MTA honouring them could otherwise deliver to another domain.
+- Display names, comments and encoded-words containing `@` are rejected in
+  `From`, `Sender` and `Reply-To`.
+- The `Sender` header is checked against `allowedSenders`, `Reply-To`
+  against `recipientRestrictions`. `Resent-*` fields and duplicate
+  `From`/`Sender`/`Reply-To` fields (SMTP) or header keys (REST) are
+  rejected.
+
+### Changed
+
+- REST size accounting includes the subject and custom headers; header
+  values are limited to 998 characters.
+- Helm: `smtp.allowInsecureAuth` follows `smtp.tls.secretName` by default;
+  NOTES warn about plaintext operation and `rateLimit.failOpen`.
+
+## [0.2.0] - 2026-09-26
+
+### Added
+
+- SMTP submission proxy (`--mode=smtp`) with `AUTH OAUTHBEARER` and an
+  opt-in pod-IP fallback (`legacyAuth.podIPFallback`) (US-1.2, US-3.4,
+  US-3.5).
+- Redis-backed rate limiting for multi-replica deployments (single node,
+  Sentinel, Cluster), failing closed by default.
+- Audit log stream and a transport-agnostic gateway pipeline shared by
+  REST and SMTP (US-4.3).
+- Recipient domain allow/denylists (US-2.4).
+- OpenTelemetry tracing (US-4.4).
+
+### Fixed
+
+- `serviceAccountSelector` subjects: matching fixed, and fail closed when
+  the ServiceAccount lookup fails.
+- Messages with more than one `From` field and the null sender are
+  refused; SMTP size limits cannot be bypassed with MIME padding; `Bcc`
+  header fields are stripped before relaying.
+- Only a 5xx reply to MAIL, RCPT or DATA counts as a permanent upstream
+  error; transient failures refund the rate-limit charge.
+
+### Security
+
+- TokenReview `status.audiences` is verified, so tokens for the
+  kube-apiserver are not accepted (also in 0.1.1).
+
+## [0.1.1] - 2026-09-26
+
+### Security
+
+- Verify TokenReview `status.audiences`: an audience-unaware authenticator
+  could otherwise make Sigillum accept a kube-apiserver token.
+
+### Fixed
+
+- Release workflow: no third-party actions, cross-compiled multi-arch
+  images, dry runs on pull requests.
+
+## [0.1.0] - 2026-04-21
+
+First release (MVP).
+
+### Added
+
+- `POST /v1/messages` with attachments (JSON and multipart).
+- ServiceAccount token authentication via TokenReview.
+- CRDs `MailBackend`, `ClusterMailBackend` and `MailPolicy` (`type: smtp`)
+  with a validating webhook and a controller running backend health
+  checks.
+- Sender restrictions, in-memory rate limiting, message size and
+  recipient limits.
+- Prometheus metrics, structured JSON logs, Helm chart.
+
+[0.3.0]: https://github.com/se-wo/sigillum/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/se-wo/sigillum/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/se-wo/sigillum/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/se-wo/sigillum/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/se-wo/sigillum/releases/tag/v0.1.0

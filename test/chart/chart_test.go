@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -262,5 +263,36 @@ func TestChartCredentialAuthNeedsTLS(t *testing.T) {
 		if got := args(t, objs, "t-sigillum-smtp")["allow-insecure-credential-auth"]; got != tc.want {
 			t.Errorf("%v: allow-insecure-credential-auth=%q, want %q", tc.set, got, tc.want)
 		}
+	}
+}
+
+// The release workflow publishes the CHANGELOG.md section of the tagged
+// version as release notes and fails without one; catch that before a tag.
+func TestChangelogCoversChartVersion(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not installed")
+	}
+	chart, err := os.ReadFile(filepath.Join(chartDir(t), "Chart.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta struct {
+		Version    string `json:"version"`
+		AppVersion string `json:"appVersion"`
+	}
+	if err := yaml.Unmarshal(chart, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.Version != meta.AppVersion {
+		t.Fatalf("chart version %s != appVersion %s", meta.Version, meta.AppVersion)
+	}
+	root := filepath.Join(chartDir(t), "..", "..")
+	out, err := exec.Command(bash, filepath.Join(root, "hack", "release-notes.sh"), meta.Version).CombinedOutput()
+	if err != nil {
+		t.Fatalf("CHANGELOG.md has no section for %s: %v\n%s", meta.Version, err, out)
+	}
+	if strings.Contains(string(out), "## [") {
+		t.Fatalf("release notes for %s run into the next version:\n%s", meta.Version, out)
 	}
 }

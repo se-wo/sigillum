@@ -39,6 +39,18 @@ make vulncheck          # govulncheck
 - Keep PRs focused, add or update tests for behaviour changes, and update
   the docs (README, `docs/SPEC.md`, chart values) when user-facing behaviour
   changes.
+- Record user-facing changes in [`CHANGELOG.md`](CHANGELOG.md) under the
+  version being prepared (its heading says `unreleased` until the release).
+
+## Releases
+
+1. In a PR, bump `VERSION` in the `Makefile` and `version` / `appVersion`
+   in `charts/sigillum/Chart.yaml`, and replace `unreleased` in the
+   version's `CHANGELOG.md` heading with the release date.
+2. After it is merged, push the tag `v<version>` on that commit of `main`.
+   [`release.yml`](.github/workflows/release.yml) publishes and signs the
+   image and chart, then creates the GitHub Release with that version's
+   `CHANGELOG.md` section as notes (`hack/release-notes.sh`).
 
 ## GitHub Actions
 
