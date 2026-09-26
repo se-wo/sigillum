@@ -1,5 +1,7 @@
 {{- if and .Values.rbac.create .Values.rbac.aggregateClusterRoles }}
-# view: read-only access to sigillum CRs.
+# view: read-only access to sigillum CRs. MailCredentials are left out:
+# a bring-your-own spec.passwordHash would let viewers try offline guessing
+# of a weak password. edit and admin see them.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -9,7 +11,7 @@ metadata:
     {{- include "sigillum.labels" . | nindent 4 }}
 rules:
   - apiGroups: [sigillum.dev]
-    resources: [mailbackends, clustermailbackends, mailpolicies, mailcredentials]
+    resources: [mailbackends, clustermailbackends, mailpolicies]
     verbs: [get, list, watch]
 ---
 # edit: mutate namespace-scoped resources, read cluster-scoped backends.

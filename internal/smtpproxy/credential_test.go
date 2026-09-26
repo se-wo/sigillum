@@ -186,7 +186,7 @@ func TestCredential_FailuresAreAuditedAndThrottled(t *testing.T) {
 	sender := &stubSender{}
 	b := &Backend{Sender: sender, AllowInsecureCredentialAuth: true,
 		Credentials:  credential.NewVerifier(credentialClient(t, readyCredential(credPassword)), 1),
-		AuthFailures: &FailureLimiter{Window: time.Minute, PerUser: 2, PerIP: 100}}
+		AuthFailures: &FailureLimiter{Window: time.Minute, PerUserIP: 2, PerIP: 100}}
 	addr := startProxy(t, b)
 
 	for i := 0; i < 2; i++ {
@@ -275,11 +275,16 @@ func TestCredential_NotReadyIsRefused(t *testing.T) {
 
 func TestFailureLimiterWindow(t *testing.T) {
 	now := time.Unix(0, 0)
-	f := &FailureLimiter{Window: time.Minute, PerUser: 2, PerIP: 3, now: func() time.Time { return now }}
+	f := &FailureLimiter{Window: time.Minute, PerUserIP: 2, PerIP: 3, now: func() time.Time { return now }}
 	f.Fail("a", "1.1.1.1")
 	f.Fail("a", "1.1.1.1")
-	if !f.Blocked("a", "2.2.2.2") {
-		t.Fatal("user limit reached")
+	if !f.Blocked("a", "1.1.1.1") {
+		t.Fatal("username+IP limit reached")
+	}
+	// Failing on a username from one IP must not lock out the real app,
+	// which logs in from another IP.
+	if f.Blocked("a", "2.2.2.2") {
+		t.Fatal("the same username from another IP is not blocked")
 	}
 	if f.Blocked("b", "2.2.2.2") {
 		t.Fatal("other user and IP are not blocked")

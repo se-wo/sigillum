@@ -183,13 +183,18 @@ func (l *loginServer) Next(response []byte) ([]byte, bool, error) {
 	return nil, false, sasl.ErrUnexpectedClientResponse
 }
 
-// FailureLimiter throttles repeated failed logins per username and per
-// source IP (sliding window, per process). Once a key reaches its limit,
-// further attempts are refused with 454 without checking the password.
+// FailureLimiter throttles repeated failed logins per username and source
+// IP, and per source IP (sliding window, per process). Once a key reaches
+// its limit, further attempts are refused with 454 without checking the
+// password. Failures are deliberately not counted per username alone:
+// anyone who can reach the proxy could then lock out a credential's real
+// app by failing on its username. The throttle mainly protects
+// bring-your-own (possibly weak) passwords and bounds argon2id work;
+// generated 256-bit passwords cannot be guessed anyway.
 type FailureLimiter struct {
-	Window  time.Duration
-	PerUser int
-	PerIP   int
+	Window    time.Duration
+	PerUserIP int
+	PerIP     int
 
 	mu   sync.Mutex
 	hits map[string][]time.Time
@@ -199,14 +204,15 @@ type FailureLimiter struct {
 // maxFailureKeys bounds memory; beyond it the tracker starts over.
 const maxFailureKeys = 100_000
 
-// Blocked reports whether username or ip has used up its failures.
+// Blocked reports whether username from ip, or ip, has used up its
+// failures.
 func (f *FailureLimiter) Blocked(username, ip string) bool {
 	if f == nil {
 		return false
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return (f.PerUser > 0 && f.countLocked("u:"+username) >= f.PerUser) ||
+	return (f.PerUserIP > 0 && f.countLocked(userIPKey(username, ip)) >= f.PerUserIP) ||
 		(f.PerIP > 0 && f.countLocked("ip:"+ip) >= f.PerIP)
 }
 
@@ -221,11 +227,13 @@ func (f *FailureLimiter) Fail(username, ip string) {
 		f.hits = map[string][]time.Time{}
 	}
 	now := f.clock()
-	for _, k := range []string{"u:" + username, "ip:" + ip} {
+	for _, k := range []string{userIPKey(username, ip), "ip:" + ip} {
 		f.countLocked(k)
 		f.hits[k] = append(f.hits[k], now)
 	}
 }
+
+func userIPKey(username, ip string) string { return "u:" + ip + "\x00" + username }
 
 // countLocked prunes and counts the failures of key inside the window.
 func (f *FailureLimiter) countLocked(key string) int {

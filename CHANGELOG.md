@@ -40,10 +40,12 @@ Works with off-the-shelf apps and cannot be bypassed (SPEC §8.2).
   - Rotation on `spec.rotation.interval` or on demand
     (`sigillum.dev/rotate`), with a grace period for the previous password.
   - Bring-your-own-hash mode with an argon2id `spec.passwordHash`.
+  - The aggregated `edit` and `admin` roles cover `MailCredential`; `view`
+    does not, so viewers cannot read a bring-your-own password hash.
 - SMTP proxy auth mode `credential` (`AUTH PLAIN`, `AUTH LOGIN`), offered
   only over STARTTLS unless `smtp.allowInsecureAuth: true`. Failed logins
-  are audited and throttled per username and source IP; deleting a
-  `MailCredential` also ends open sessions.
+  are audited and throttled per username and source IP, and per source
+  IP; deleting a `MailCredential` also ends open sessions.
 - Credential Secret guard: a `ValidatingAdmissionPolicy` that confines the
   controller's Secret writes to credential Secrets outside excluded
   namespaces. The controller verifies it and writes nothing while it is

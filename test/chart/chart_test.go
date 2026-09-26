@@ -207,8 +207,10 @@ func TestChartAggregatedRolesKeepCredentialStatusToController(t *testing.T) {
 				hasCreds = hasCreds || res == "mailcredentials"
 			}
 		}
-		if !hasCreds {
-			t.Fatalf("%s must cover mailcredentials", name)
+		// view must not expose spec.passwordHash (offline guessing of
+		// bring-your-own passwords); edit and admin manage credentials.
+		if wantCreds := name != "sigillum-view"; hasCreds != wantCreds {
+			t.Fatalf("%s: covers mailcredentials = %v, want %v", name, hasCreds, wantCreds)
 		}
 	}
 }
