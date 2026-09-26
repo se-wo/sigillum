@@ -92,6 +92,9 @@ Works with off-the-shelf apps and cannot be bypassed (SPEC §8.2).
 
 - TokenReview cache entries no longer outlive the token's `exp` claim
   (gap G-5).
+- A namespaced `MailBackend` can only use a credentials Secret of its own
+  namespace, now also enforced at runtime and not only by the webhook, so
+  it cannot read the relay credentials when the webhook is disabled.
 - gRPC updated to v1.83.2 (GHSA-2v4p-qf9q-27wj).
 
 ## [0.2.1] - 2026-09-26

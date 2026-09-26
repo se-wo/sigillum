@@ -32,7 +32,10 @@ const credentialSAIndex = "spec.serviceAccountName"
 // Requeue intervals for conditions the controller cannot watch: it has no
 // read access to Secrets, and the guard verdict may change between checks.
 const (
-	secretConflictRequeue = 10 * time.Minute
+	// A conflict is usually the Secret of a deleted MailCredential of the
+	// same name that the garbage collector has not removed yet, so it
+	// resolves itself within seconds when the credential is recreated.
+	secretConflictRequeue = time.Minute
 	guardMissingRequeue   = 5 * time.Minute
 )
 
@@ -354,7 +357,10 @@ func (r *MailCredentialReconciler) writeSecret(ctx context.Context, mc *sigv1.Ma
 	}
 	target := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: mc.Spec.SecretName, Namespace: mc.Namespace}}
 	err = r.Patch(ctx, target, client.RawPatch(types.JSONPatchType, patch))
-	if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) {
+	// A failed JSON-patch test and a guard denial both answer 422 Invalid:
+	// the Secret belongs to someone else. Forbidden is missing RBAC, which
+	// is a write failure, not a conflict.
+	if apierrors.IsInvalid(err) {
 		return true, err
 	}
 	return false, err

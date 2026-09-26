@@ -61,7 +61,15 @@ func ResolveBackendConfig(
 				return cfg, fmt.Errorf("spec.smtp.credentialsRef is required when authType != NONE")
 			}
 			ns := spec.SMTP.CredentialsRef.Namespace
-			if ns == "" {
+			if secretFallbackNs != "" {
+				// A namespaced MailBackend may only use Secrets of its own
+				// namespace. The webhook enforces this too, but it can be
+				// disabled; without this check a tenant could point a
+				// MailBackend at the relay credentials in the release
+				// namespace and send them to an endpoint of its choice.
+				if ns != "" && ns != secretFallbackNs {
+					return cfg, fmt.Errorf("spec.smtp.credentialsRef.namespace %q must be empty or the backend's own namespace %q", ns, secretFallbackNs)
+				}
 				ns = secretFallbackNs
 			}
 			if ns == "" {

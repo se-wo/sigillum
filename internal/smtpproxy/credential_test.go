@@ -307,3 +307,23 @@ func TestSMTPAuthModeCredentialFlag(t *testing.T) {
 }
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// Command-level rejects of a credential session carry the credential in
+// the audit record, like accepted messages do.
+func TestCredential_CommandRejectAuditsCredential(t *testing.T) {
+	sender := &stubSender{}
+	addr := startProxy(t, &Backend{Sender: sender, AllowInsecureCredentialAuth: true,
+		Credentials: credential.NewVerifier(credentialClient(t, readyCredential(credPassword)), 1)})
+	c := dial(t, addr)
+	if err := c.Auth(sasl.NewPlainClient("", credUser, credPassword)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Mail("", nil); smtpCode(err) != 550 {
+		t.Fatalf("null sender: want 550, got %v", err)
+	}
+	ev := sender.events[len(sender.events)-1]
+	if sender.rejects[len(sender.rejects)-1] != "null_sender" || ev.Credential != credUser ||
+		ev.AuthMethod != gateway.AuthSMTPCredential {
+		t.Fatalf("reject must be audited with the credential: %+v", ev)
+	}
+}
