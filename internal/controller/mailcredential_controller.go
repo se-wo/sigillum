@@ -164,7 +164,7 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		switch {
 		case !r.GeneratedEnabled:
-			fail(sigv1.ReasonGeneratedModeDisabled, "generated credentials are disabled (chart credentials.enabled=false, or Kubernetes < 1.30 without ValidatingAdmissionPolicy); use spec.passwordHash")
+			fail(sigv1.ReasonGeneratedModeDisabled, "generated credentials are disabled (chart credentials.enabled=false); use spec.passwordHash")
 		case why == "":
 		case !guardOK:
 			keepOrFail(sigv1.ReasonGuardMissing, guardMsg)

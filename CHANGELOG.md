@@ -21,9 +21,12 @@ Works with off-the-shelf apps and cannot be bypassed (SPEC §8.2).
 - REST: a permanent upstream rejection now answers `422 upstream-rejected`
   instead of `502 upstream-error`. Audit and metric reason
   `upstream_rejected` on both transports (was `upstream_error`).
-- On Kubernetes 1.30 and later, with `credentials.enabled` (the default),
-  the controller gets cluster-wide `create`/`patch` on Secrets, confined by
-  the credential Secret guard. Set `credentials.enabled=false` to opt out.
+- Kubernetes 1.32 or later is required (chart `kubeVersion`), the oldest
+  version still in (LTS) support. Older versions are out of support, and
+  the credential Secret guard needs `ValidatingAdmissionPolicy`.
+- With `credentials.enabled` (the default), the controller gets
+  cluster-wide `create`/`patch` on Secrets, confined by the credential
+  Secret guard. Set `credentials.enabled=false` to opt out.
 - Components read Secrets only from the release namespace and
   `rbac.allowedSecretNamespaces`.
 - `terminationGracePeriodSeconds` is 35 (was 30) for the api-server and

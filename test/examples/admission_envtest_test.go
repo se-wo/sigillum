@@ -82,19 +82,6 @@ func TestAdmissionRecipes(t *testing.T) {
 		return p
 	}
 
-	// Policies are loaded asynchronously; wait until the simplest one bites.
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		err := c.Create(ctx, policy("dev", func(s *sigv1.MailPolicySpec) { s.SenderRestrictions = nil }), client.DryRunAll)
-		if err != nil && strings.Contains(err.Error(), "allowedSenders") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("admission recipes not enforced after 30s (last error %v)", err)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-
 	cases := []struct {
 		name    string
 		ns      string
@@ -117,7 +104,12 @@ func TestAdmissionRecipes(t *testing.T) {
 			mutate:  func(s *sigv1.MailPolicySpec) { s.BackendRef.Name = "marketing-smtp" },
 			wantErr: "may not use ClusterMailBackend marketing-smtp"},
 		{name: "senders required everywhere", ns: "dev",
-			mutate:  func(s *sigv1.MailPolicySpec) { s.SenderRestrictions = nil },
+			mutate: func(s *sigv1.MailPolicySpec) {
+				// Only this recipe may be violated: when several policies
+				// deny, the API server reports just one of them.
+				s.SenderRestrictions = nil
+				s.BackendRef = sigv1.BackendRef{Name: "mailpit", Kind: sigv1.KindMailBackend}
+			},
 			wantErr: "allowedSenders"},
 		{name: "dev namespace may not use the corporate relay", ns: "dev",
 			wantErr: "may not use ClusterMailBackend corporate-smtp"},
@@ -131,17 +123,34 @@ func TestAdmissionRecipes(t *testing.T) {
 				s.LegacyAuth = &sigv1.LegacyAuthSpec{PodIPFallback: true}
 			}},
 	}
+	// Policies are loaded asynchronously, each on its own: poll every
+	// denial until its recipe bites (each case violates exactly one recipe).
+	// Admissions are checked after all denials, so every policy is loaded.
 	for _, tc := range cases {
+		if tc.wantErr == "" {
+			continue
+		}
 		t.Run(tc.name, func(t *testing.T) {
-			err := c.Create(ctx, policy(tc.ns, tc.mutate))
-			if tc.wantErr == "" {
-				if err != nil {
-					t.Fatalf("unexpected denial: %v", err)
+			deadline := time.Now().Add(30 * time.Second)
+			for {
+				err := c.Create(ctx, policy(tc.ns, tc.mutate), client.DryRunAll)
+				if err != nil && strings.Contains(err.Error(), tc.wantErr) {
+					return
 				}
-				return
+				if time.Now().After(deadline) {
+					t.Fatalf("want denial containing %q, got %v", tc.wantErr, err)
+				}
+				time.Sleep(200 * time.Millisecond)
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("want denial containing %q, got %v", tc.wantErr, err)
+		})
+	}
+	for _, tc := range cases {
+		if tc.wantErr != "" {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			if err := c.Create(ctx, policy(tc.ns, tc.mutate)); err != nil {
+				t.Fatalf("unexpected denial: %v", err)
 			}
 		})
 	}

@@ -144,7 +144,7 @@ func TestLocalDevValuesRender(t *testing.T) {
 		t.Skip("helm not installed")
 	}
 	chart := filepath.Join(examplesDir(), "..", "charts", "sigillum")
-	cmd := exec.Command(helm, "template", "sigillum", chart, "-n", "sigillum-system",
+	cmd := exec.Command(helm, "template", "sigillum", chart, "-n", "sigillum-system", "--kube-version", "1.32.0",
 		"-f", filepath.Join(examplesDir(), "local-dev", "values-local.yaml"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {

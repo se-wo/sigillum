@@ -157,10 +157,9 @@ controller:
 # its namespace; enable smtp.authModes "credential" to accept them.
 credentials:
   # Generated mode: the controller writes a random password into a Secret in
-  # the credential's namespace and keeps only a hash. Needs Kubernetes >= 1.30
-  # (ValidatingAdmissionPolicy): the chart grants the controller Secret
-  # create/patch cluster-wide only together with a guard policy that limits
-  # it to labelled credential Secrets. false = bring-your-own-hash only
+  # the credential's namespace and keeps only a hash. The chart grants the
+  # controller Secret create/patch cluster-wide only together with a guard
+  # ValidatingAdmissionPolicy that limits it to labelled credential Secrets. false = bring-your-own-hash only
   # (spec.passwordHash), and the controller gets no Secret write access.
   enabled: true
   # Namespaces that may not hold MailCredentials: exact names, or prefixes

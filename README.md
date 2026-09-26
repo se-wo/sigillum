@@ -155,7 +155,7 @@ ServiceAccount. Deleting the `MailCredential` revokes it immediately. Teams
 that bring their own Secret set `spec.passwordHash` (argon2id) instead of
 `secretName`.
 
-Generated passwords need Kubernetes 1.30 or later: the controller may write
+The controller may write
 Secrets in any namespace except `credentials.excludeNamespaces` (default
 `kube-*`) and the release namespace, and the chart confines that permission
 with a `ValidatingAdmissionPolicy` guard that only admits labelled Secrets
@@ -212,9 +212,11 @@ each [GitHub Release](https://github.com/se-wo/sigillum/releases)). Changes in
 - REST: permanent upstream rejections answer `422 upstream-rejected`
   instead of `502 upstream-error`; audit and metric reason
   `upstream_rejected` on both transports.
-- With Kubernetes 1.30+ and `credentials.enabled` (default), the controller
-  gets cluster-wide `create`/`patch` on Secrets, confined by the
-  credential Secret guard. Set `credentials.enabled=false` to opt out.
+- The chart requires Kubernetes 1.32 or later (`kubeVersion`), the oldest
+  version still in (LTS) support.
+- With `credentials.enabled` (default), the controller gets cluster-wide
+  `create`/`patch` on Secrets, confined by the credential Secret guard. Set
+  `credentials.enabled=false` to opt out.
 - Components now read Secrets only from the release namespace and
   `rbac.allowedSecretNamespaces` (a `MailBackend`'s credentials in another
   namespace need that namespace listed, as the RBAC already required).

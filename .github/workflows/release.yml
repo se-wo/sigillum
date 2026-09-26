@@ -212,7 +212,9 @@ jobs:
           VERSION: ${{ steps.v.outputs.version }}
         run: |
           helm version
-          helm lint charts/sigillum
+          # The chart requires Kubernetes >= 1.32; lint against that instead of
+          # the default version of whichever helm the runner has.
+          helm lint charts/sigillum --kube-version 1.32.0
           helm package charts/sigillum --version "$VERSION" --app-version "$VERSION"
 
       - name: push chart to OCI registry

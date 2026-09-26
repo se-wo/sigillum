@@ -166,13 +166,12 @@ whose Secrets may be read (release namespace + rbac.allowedSecretNamespaces).
 {{- end }}
 
 {{/*
-True (non-empty) when generated MailCredentials can be written: enabled, and
-the cluster serves ValidatingAdmissionPolicy (Kubernetes >= 1.30), which the
-credential Secret guard needs. The controller's Secret-write permission is
-only ever rendered together with the guard.
+True (non-empty) when generated MailCredentials are enabled. The
+controller's Secret-write permission is only ever rendered together with the
+credential Secret guard.
 */}}
 {{- define "sigillum.credentials.guarded" -}}
-{{- if and .Values.controller.enabled .Values.credentials.enabled (.Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy") -}}
+{{- if and .Values.controller.enabled .Values.credentials.enabled -}}
 true
 {{- end -}}
 {{- end }}

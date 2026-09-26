@@ -795,7 +795,7 @@ Controller behavior in generated mode:
 - If a due rotation cannot be written (guard missing, write error), a previously issued password stays valid and `Ready` stays `True` with a message; only a credential that never got a password reports `Ready=False`.
 - Changing `spec.secretName` issues a new password into the new Secret; the old Secret stays until the `MailCredential` is deleted.
 - A `MailCredential` in an excluded namespace is rejected by the webhook, and ignored by the controller if it exists anyway (`Ready=False`, `NamespaceExcluded`).
-- With generated mode disabled (chart `credentials.enabled: false`, or a cluster without `ValidatingAdmissionPolicy`, where the chart cannot render the guard), the webhook rejects generated-mode credentials and the controller reports existing ones `Ready=False` (`GeneratedModeDisabled`).
+- With generated mode disabled (chart `credentials.enabled: false`), the webhook rejects generated-mode credentials and the controller reports existing ones `Ready=False` (`GeneratedModeDisabled`).
 
 ### 4.4 REST API (v1)
 
@@ -1053,7 +1053,7 @@ The api-server and SMTP proxy read backend credentials themselves on the send pa
 Without `get`, `list` or `watch`, the controller cannot read any Secret outside the backend-credential namespaces it already had. Worst case, a compromised controller can overwrite or create mail-credential Secrets; it cannot read or change anything else.
 
 The guard is mandatory for generated mode:
-- The chart only renders the controller's Secret-write permission when the cluster serves `admissionregistration.k8s.io/v1` `ValidatingAdmissionPolicy` (Kubernetes ≥ 1.30), and always renders it together with the guard.
+- The chart requires Kubernetes 1.32 or later (`kubeVersion`, the oldest version still in LTS support); `admissionregistration.k8s.io/v1` `ValidatingAdmissionPolicy` is GA since 1.30. It renders the controller's Secret-write permission only together with the guard, and neither with `credentials.enabled: false`.
 - At startup, before any reconciler runs, and every `--credential-guard-check-interval` (default 5 min; every 30 s while it fails) the controller checks that the guard policy and binding exist and are unchanged: it rebuilds the expected policy from its own flags (`--credential-exclude-namespaces`, its ServiceAccount) and compares failure policy, match constraints, match conditions, variables, validation expressions and the binding's actions. If they differ, it refuses to write Secrets and reports it (`SecretsManaged=False`, reason `GuardMissing`, on every generated `MailCredential`; error log; `sigillum_credential_guard_ok 0`). Bring-your-own-hash mode keeps working. The chart renders the same policy; a CI test renders the chart and runs the controller's check against it.
 
 Chart values:
@@ -1183,6 +1183,7 @@ These targets are not yet verified by a benchmark in CI.
 
 | Area | Decision | Rationale |
 |---|---|---|
+| Kubernetes | 1.32 or later (chart `kubeVersion`); envtest and the kind E2E run on a current release (1.36) | Oldest minor still in (LTS) support; `ValidatingAdmissionPolicy` for the credential Secret guard |
 | Language | Go (module `go 1.25`, toolchain 1.26) | Ecosystem, kubebuilder, performance |
 | Framework | controller-runtime / kubebuilder markers | De-facto standard for operators |
 | REST router | chi | Small, low-dependency |

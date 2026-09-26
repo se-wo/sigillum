@@ -28,7 +28,8 @@ import (
 	"github.com/se-wo/sigillum/internal/credential"
 )
 
-const vapAPI = "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy"
+// testKubeVersion is the oldest Kubernetes version the chart supports.
+const testKubeVersion = "1.32.0"
 
 func chartDir(t *testing.T) string {
 	t.Helper()
@@ -43,7 +44,10 @@ func render(t *testing.T, args ...string) []unstructured.Unstructured {
 	if err != nil {
 		t.Skip("helm not installed")
 	}
-	cmd := exec.Command(helm, append([]string{"template", "t", chartDir(t), "-n", "mail"}, args...)...)
+	// An explicit --kube-version: helm's default depends on how it was
+	// built (v1.20 for a plain `go install`), and the chart requires 1.32.
+	base := []string{"template", "t", chartDir(t), "-n", "mail", "--kube-version", testKubeVersion}
+	cmd := exec.Command(helm, append(base, args...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -103,12 +107,11 @@ func args(t *testing.T, objs []unstructured.Unstructured, name string) map[strin
 	return out
 }
 
-// TestChartGuardMatchesController renders the guard the way a real install
-// on Kubernetes >= 1.30 does and checks it with the same code the controller
-// runs at startup, configured from the flags the chart passes it.
+// TestChartGuardMatchesController renders the guard and checks it with the
+// same code the controller runs at startup, configured from the flags the
+// chart passes it.
 func TestChartGuardMatchesController(t *testing.T) {
-	objs := render(t, "--api-versions", vapAPI,
-		"--set", "credentials.excludeNamespaces={kube-*,cert-manager,istio-*}")
+	objs := render(t, "--set", "credentials.excludeNamespaces={kube-*,cert-manager,istio-*}")
 	ctrlArgs := args(t, objs, "t-sigillum-controller")
 	guard := credential.Guard{
 		Name:               ctrlArgs["credential-guard-name"],
@@ -158,8 +161,7 @@ func TestChartGuardMatchesController(t *testing.T) {
 
 func TestChartNoSecretWritesWithoutGuard(t *testing.T) {
 	for name, extra := range map[string][]string{
-		"no ValidatingAdmissionPolicy API": nil,
-		"credentials disabled":             {"--api-versions", vapAPI, "--set", "credentials.enabled=false"},
+		"credentials disabled": {"--set", "credentials.enabled=false"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			objs := render(t, extra...)
@@ -302,5 +304,24 @@ func TestChangelogCoversChartVersion(t *testing.T) {
 	}
 	if strings.Contains(string(out), "## [") {
 		t.Fatalf("release notes for %s run into the next version:\n%s", meta.Version, out)
+	}
+}
+
+// The chart declares its minimum Kubernetes version (1.32; the guard needs
+// ValidatingAdmissionPolicy, GA in 1.30) instead of rendering the guard
+// conditionally, so `helm template` without --api-versions (GitOps) still
+// renders it.
+func TestChartRequiresKubernetes132(t *testing.T) {
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm not installed")
+	}
+	out, err := exec.Command(helm, "template", "t", chartDir(t), "--kube-version", "1.31.9").CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "kubeVersion") {
+		t.Fatalf("chart must refuse Kubernetes 1.31, got %v\n%s", err, out)
+	}
+	objs := render(t)
+	if find(objs, "ValidatingAdmissionPolicy", "t-sigillum-credential-guard") == nil {
+		t.Fatal("guard must be rendered without --api-versions")
 	}
 }

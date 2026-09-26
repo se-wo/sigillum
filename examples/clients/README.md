@@ -15,7 +15,7 @@ smtp:
   tls:
     secretName: sigillum-smtp-tls   # STARTTLS; see "TLS" below
 credentials:
-  enabled: true                      # generated passwords (Kubernetes >= 1.30)
+  enabled: true                      # generated passwords
 ```
 
 Per app (the team, in Git): the `MailCredential` and a `MailPolicy` from the
