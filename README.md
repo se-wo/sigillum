@@ -209,6 +209,11 @@ each [GitHub Release](https://github.com/se-wo/sigillum/releases)). Changes in
 0.3.0 that may need attention:
 
 - New CRD `MailCredential`, new field `recipientRestrictions.allowedRecipients`.
+  Apply the CRDs first. With the 0.2 CRDs the API server would drop
+  `allowedRecipients` without an error, and a policy restricted only by it
+  would allow every recipient that is not blocked. From 0.3.0 on, every
+  component checks the installed CRDs at startup and refuses to start
+  until they are updated, so the old pods keep serving.
 - REST: permanent upstream rejections answer `422 upstream-rejected`
   instead of `502 upstream-error`; audit and metric reason
   `upstream_rejected` on both transports.

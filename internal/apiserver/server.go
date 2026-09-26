@@ -32,6 +32,7 @@ import (
 	"github.com/se-wo/sigillum/internal/apiserver/problem"
 	"github.com/se-wo/sigillum/internal/audit"
 	"github.com/se-wo/sigillum/internal/controller"
+	"github.com/se-wo/sigillum/internal/crdcheck"
 	"github.com/se-wo/sigillum/internal/gateway"
 	"github.com/se-wo/sigillum/internal/policy/ratelimit"
 	"github.com/se-wo/sigillum/internal/telemetry"
@@ -82,6 +83,7 @@ func init() {
 			auditLog        string
 			clusterName     string
 			secretNs        string
+			skipCRDCheck    bool
 			rlCfg           ratelimit.Config
 		)
 		fs := flag.NewFlagSet("api", flag.ContinueOnError)
@@ -97,6 +99,7 @@ func init() {
 		fs.DurationVar(&shutdownDelay, "shutdown-delay", 5*time.Second, "after SIGTERM, keep serving with readiness failing for this long before draining, so the pod leaves the Service endpoints first (a preStop delay)")
 		fs.StringVar(&clusterName, "cluster-name", "", "cluster name added to audit records and log lines (US-4.5)")
 		fs.StringVar(&secretNs, "secret-namespaces", "", "comma-separated namespaces whose Secrets may be read (backend credentials); default: the pod's namespace")
+		fs.BoolVar(&skipCRDCheck, "skip-crd-check", false, crdcheck.SkipFlagUsage)
 		rlCfg.BindFlags(fs)
 		fs.StringVar(&auditLog, "audit-log", "stdout", "audit stream sink: stdout, stderr, none, or a file path")
 		if err := fs.Parse(os.Args[1:]); err != nil && err != flag.ErrHelp {
@@ -106,6 +109,11 @@ func init() {
 		cfg, err := ctrl.GetConfig()
 		if err != nil {
 			return err
+		}
+		if !skipCRDCheck {
+			if err := crdcheck.Wait(context.Background(), cfg, crdcheck.Required, crdcheck.Timeout); err != nil {
+				return err
+			}
 		}
 		clientset, err := kubernetes.NewForConfig(cfg)
 		if err != nil {

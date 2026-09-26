@@ -17,7 +17,11 @@ Works with off-the-shelf apps and cannot be bypassed (SPEC §8.2).
 ### Upgrading
 
 - Helm installs CRDs only on first install. Apply them before upgrading:
-  `kubectl apply --server-side -f charts/sigillum/crds/`.
+  `kubectl apply --server-side -f charts/sigillum/crds/`. With the 0.2
+  CRDs the API server drops `allowedRecipients` without an error (a
+  server-side apply only warns), and a policy restricted only by it would
+  allow every recipient that is not blocked. The 0.3.0 pods therefore
+  refuse to start until the CRDs are updated; the old pods keep serving.
 - REST: a permanent upstream rejection now answers `422 upstream-rejected`
   instead of `502 upstream-error`. Audit and metric reason
   `upstream_rejected` on both transports (was `upstream_error`).
@@ -65,6 +69,9 @@ Works with off-the-shelf apps and cannot be bypassed (SPEC §8.2).
   `upstream_rejected`.
 - Metric `sigillum_auth_failures_total`.
 - `--shutdown-delay` (chart `api.shutdownDelay`, `smtp.shutdownDelay`).
+- Startup check of the installed CRDs: every component exits with an
+  error naming the missing kinds and fields when the CRDs are older than
+  the binary (`--skip-crd-check` to turn it off).
 - Recipes in `examples/`: local development with Mailpit, egress blocking
   (NetworkPolicy, Kyverno, Cilium), admission guardrails
   (ValidatingAdmissionPolicy, Kyverno), provider backends (Microsoft 365

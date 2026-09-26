@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	"github.com/se-wo/sigillum/internal/crdcheck"
 	"github.com/se-wo/sigillum/internal/credential"
 	whv1 "github.com/se-wo/sigillum/internal/webhook"
 
@@ -67,6 +68,7 @@ func init() {
 			serviceAccountName   string
 			credentialSMTPHost   string
 			credentialSMTPPort   int
+			skipCRDCheck         bool
 		)
 		fs := flag.NewFlagSet("controller", flag.ContinueOnError)
 		// --mode is consumed by the entrypoint; accept it here so Parse does
@@ -88,6 +90,7 @@ func init() {
 		fs.StringVar(&serviceAccountName, "service-account-name", os.Getenv("POD_SERVICE_ACCOUNT"), "the controller's own ServiceAccount (the guard only applies to it)")
 		fs.StringVar(&credentialSMTPHost, "credential-smtp-host", "", "SMTP proxy host written into generated credential Secrets")
 		fs.IntVar(&credentialSMTPPort, "credential-smtp-port", 587, "SMTP proxy port written into generated credential Secrets")
+		fs.BoolVar(&skipCRDCheck, "skip-crd-check", false, crdcheck.SkipFlagUsage)
 
 		// Allow flags to be passed after --mode=controller.
 		if err := fs.Parse(os.Args[1:]); err != nil && err != flag.ErrHelp {
@@ -120,7 +123,16 @@ func init() {
 			})
 		}
 
-		mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), opts)
+		cfg, err := ctrl.GetConfig()
+		if err != nil {
+			return err
+		}
+		if !skipCRDCheck {
+			if err := crdcheck.Wait(context.Background(), cfg, crdcheck.Required, crdcheck.Timeout); err != nil {
+				return err
+			}
+		}
+		mgr, err := ctrl.NewManager(cfg, opts)
 		if err != nil {
 			return err
 		}

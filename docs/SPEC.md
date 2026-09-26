@@ -401,6 +401,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - Official Helm chart with sensible defaults; every setting available via `values.yaml`.
 - CRDs ship in the chart's `crds/` directory; the generated manifests also live in `config/crd/bases/` for separate installation.
 - **CRD upgrades:** Helm installs `crds/` on first install only and never upgrades or deletes them. Upgrades apply `config/crd/bases/` (or the chart's `crds/`) explicitly, for example with `kubectl apply --server-side` or an Argo CD application. The CRD-migration runbook (§5.7) documents this.
+- **CRD version check [v0.3.0]:** an outdated CRD makes the API server prune fields it does not know, which only warns a server-side apply. A MailPolicy restricted by `allowedRecipients` alone would then allow every recipient that is not blocked. Every component therefore reads the published OpenAPI v3 schemas at startup (readable by every authenticated client, no RBAC) and exits with an error naming the missing kinds and fields if a field the version relies on is absent. It retries for 30 s because the API server publishes a changed CRD a few seconds late. A failed rollout leaves the old pods serving. `--skip-crd-check` turns the check off for clusters that hide the OpenAPI endpoint.
 - No runtime configuration outside Kubernetes resources (no init scripts).
 - The admission webhook needs a serving certificate: either cert-manager (`webhook.certificate.useCertManager=true`) or an existing secret.
 
@@ -1370,7 +1371,7 @@ Every candidate that has been discussed, with its decision and the reason.
 | Overly permissive policies | Governance via RBAC and admission recipes (§4.9, US-5.7); preflight and `explain` (v0.4.0) |
 | Unclear precedence between overlapping policies | Explicit `priority`, deterministic name tie-break (US-2.6) |
 | No mail queue → loss risk during upstream outage | Caller responsibility; idempotency keys (v0.6.0) make retries safe |
-| CRDs not upgraded by Helm | Documented upgrade procedure (US-5.1), runbook in v0.4.0 |
+| CRDs not upgraded by Helm | Documented upgrade procedure (US-5.1); components refuse to start on outdated CRDs (v0.3.0); runbook in v0.4.0 |
 | Too few users to validate the design | Stay below 1.0 until the exit criteria (§8.7) are met |
 
 ### 9.2 Open questions

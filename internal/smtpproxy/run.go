@@ -30,6 +30,7 @@ import (
 	"github.com/se-wo/sigillum/internal/apiserver/auth"
 	"github.com/se-wo/sigillum/internal/audit"
 	"github.com/se-wo/sigillum/internal/controller"
+	"github.com/se-wo/sigillum/internal/crdcheck"
 	"github.com/se-wo/sigillum/internal/credential"
 	"github.com/se-wo/sigillum/internal/gateway"
 	"github.com/se-wo/sigillum/internal/policy/ratelimit"
@@ -72,6 +73,7 @@ type Options struct {
 	AuditLog                    string
 	ClusterName                 string
 	SecretNamespaces            string
+	SkipCRDCheck                bool
 	RateLimit                   ratelimit.Config
 }
 
@@ -103,6 +105,7 @@ func ParseFlags(args []string) (*Options, error) {
 	fs.DurationVar(&o.TokenCacheTTL, "token-cache-ttl", 5*time.Minute, "cache TTL for TokenReview results")
 	fs.StringVar(&o.AuditLog, "audit-log", "stdout", "audit stream sink: stdout, stderr, none, or a file path")
 	fs.StringVar(&o.ClusterName, "cluster-name", "", "cluster name added to audit records and log lines (US-4.5)")
+	fs.BoolVar(&o.SkipCRDCheck, "skip-crd-check", false, crdcheck.SkipFlagUsage)
 	fs.StringVar(&o.SecretNamespaces, "secret-namespaces", "", "comma-separated namespaces whose Secrets may be read (backend credentials); default: the pod's namespace")
 	o.RateLimit.BindFlags(fs)
 	if err := fs.Parse(args); err != nil && err != flag.ErrHelp {
@@ -165,6 +168,11 @@ func Run(logger *slog.Logger) error {
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return err
+	}
+	if !o.SkipCRDCheck {
+		if err := crdcheck.Wait(context.Background(), cfg, crdcheck.Required, crdcheck.Timeout); err != nil {
+			return err
+		}
 	}
 	cl, err := cluster.New(cfg, func(co *cluster.Options) {
 		co.Scheme = scheme
