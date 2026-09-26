@@ -19,8 +19,8 @@ before forwarding through a `MailBackend` (SMTP) relay.
 - **Observability:** structured slog (JSON), separate audit stream,
   Prometheus metrics with optional `ServiceMonitor`, OpenTelemetry tracing
 
-See [`docs/SPEC.md`](docs/SPEC.md) for the full specification and
-[`docs/PLAN.md`](docs/PLAN.md) for the v0.1.0 implementation plan.
+See [`docs/SPEC.md`](docs/SPEC.md) for the full specification, roadmap and
+known gaps.
 
 ## Install
 
@@ -180,7 +180,7 @@ make build              # compile bin/sigillum
 make manifests generate # regenerate CRDs + deepcopy
 make test               # unit + envtest suite
 make vulncheck          # govulncheck against the Go vulnerability database
-make e2e                # kind + MailHog smoke (needs docker)
+make e2e                # kind + Mailpit smoke (needs docker)
 ```
 
 ## Layout
@@ -204,10 +204,13 @@ charts/sigillum/               # Helm chart (CRDs in crds/, api + controller + o
 
 ## Not yet implemented
 
-Istio mTLS auth, `MailQuota`, `/v1/policies/preflight`, Grafana dashboards
-and runbooks (planned for v0.3.0); Microsoft Graph / SendGrid / Gmail
-drivers, read-path, IMAP-proxy, webhook-receiver. The CRD shape and `Driver` interface stay
-wide enough to add each of these without breaking changes.
+Next up: Sigillum-issued SMTP credentials for apps that only speak
+`AUTH PLAIN`/`LOGIN`, per-address recipient allowlists, and tested egress and
+admission-policy recipes (v0.3.0); install without cert-manager, preflight and
+a `kubectl` plugin, dashboards and alerts (v0.4.0); OAuth (XOAUTH2) upstream
+auth for Microsoft 365 and Google Workspace (v0.5.0). Sigillum stays below 1.0
+until it has production users. See the roadmap and feature decisions in
+[`docs/SPEC.md`](docs/SPEC.md#8-roadmap).
 
 ## License
 

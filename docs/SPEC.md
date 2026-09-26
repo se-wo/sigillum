@@ -1,436 +1,606 @@
-# Sigillum — High-Level Spezifikation
+# Sigillum — Specification
 
 *Policy-enforced mail gateway for Kubernetes*
 
-| Feld | Wert |
+| Field | Value |
 |---|---|
 | **Name** | Sigillum |
-| **Version** | 0.1 — Draft for Engineering Review |
-| **Status** | Zur Implementierungsplanung freigegeben |
-| **Autor** | Sebastian (privates OSS-Projekt) |
-| **Zielgruppe** | Platform Engineering (fiktiv) — privates OSS-Projekt, inspiriert von realen Anforderungen |
-| **Zweck** | Fachliche und technische Grundlage für den Implementierungsplan (Ultraplan) |
+| **Spec version** | 0.2.1 (matches release v0.2.1) |
+| **Status** | Living document. Each requirement carries its implementation status; the roadmap (§8) is prioritized for small and medium organizations. |
+| **Author** | Sebastian (private OSS project) |
+| **Audience** | Platform engineering (fictional). Private OSS project, inspired by real requirements. |
+| **Purpose** | Functional and technical basis for implementation and review |
+
+**Status markers.** Every user story and major section is tagged:
+
+- **[v0.1.0]**, **[v0.2.0]**, **[v0.2.1]**: implemented in that release.
+- **[planned vX]**: scheduled on the roadmap (§8).
+- **[backlog]**: candidate feature, not scheduled. Picked up when users ask for it (§8.8).
+- **[future]**: architecturally anticipated for after 1.0, not scheduled.
+- **[gap]**: specified behavior that the current release does not meet yet. All gaps are collected in §9.3.
 
 ---
 
-## 1. Produktvision
+## 1. Product vision
 
-### 1.1 Problemstellung
+### 1.1 Problem statement
 
-In unserem Kubernetes-Ökosystem versenden zahlreiche Workloads (Applikationen, CronJobs, Operators, Monitoring-Stack) E-Mails — typischerweise Transaktionsmails, Notifications, Reports. Der heutige Zustand hat drei strukturelle Schwächen:
+Many workloads in a Kubernetes cluster send mail: applications, CronJobs, operators, the monitoring stack. Typical content is transactional mail, notifications and reports. The status quo has three structural weaknesses:
 
-1. **Credential-Sprawl:** Jeder Workload führt eigene SMTP-Credentials als Secret. Rotation, Audit und Revokation sind operativ teuer und fehleranfällig.
-2. **Fehlende Policy-Durchsetzung:** Der zentrale Mailserver akzeptiert jede Absenderadresse innerhalb unserer Domain. Ein kompromittierter Workload kann Phishing-Mails unter beliebigen internen Identitäten versenden.
-3. **Keine Observability / Rate-Control:** Es existiert keine zentrale Sicht auf E-Mail-Volumina pro Workload und keine Schutzschicht gegen Runaway-Loops (z. B. fehlerhafte Retry-Logik, die Tausende Mails erzeugt).
+1. **Credential sprawl.** Every workload carries its own SMTP credentials as a Secret. Rotation, audit and revocation are expensive and error-prone.
+2. **No policy enforcement.** The central mail server accepts any sender address within the organization's domain. A compromised workload can send phishing mail under any internal identity.
+3. **No observability or rate control.** There is no central view of mail volume per workload and no protection against runaway loops (for example, broken retry logic generating thousands of messages).
 
-### 1.2 Produktvision
+### 1.2 Vision
 
-> **Sigillum ist ein Kubernetes-natives Mail-Gateway, das sichere, policy-kontrollierte E-Mail-Zustellung für Cluster-Workloads bereitstellt — ohne dass Entwickler SMTP-Credentials verwalten müssen.**
+> **Sigillum is a Kubernetes-native mail gateway that provides secure, policy-controlled mail delivery for cluster workloads, without developers having to manage SMTP credentials.**
 
-Das Gateway bietet eine REST-API als primäres Interface sowie einen SMTP-Proxy für Legacy-Integration. Policies werden deklarativ als Custom Resources verwaltet und folgen den etablierten Kubernetes-Konventionen (GitOps, RBAC, Namespaces). Authentifizierung erfolgt K8s-nativ über ServiceAccount-Tokens oder Istio-mTLS — nicht über separate API-Keys.
+The gateway offers a REST API as its primary interface and an SMTP submission proxy for legacy integration. Policies are managed declaratively as custom resources and follow established Kubernetes conventions (GitOps, RBAC, namespaces). Authentication is Kubernetes-native, via ServiceAccount tokens (and, in future, Istio mTLS), not via separate API keys.
 
-### 1.3 Geschäftsziele
+### 1.3 Business goals
 
-| Ziel | Messbar als |
+| Goal | Measured as |
 |---|---|
-| Reduktion verwalteter Mail-Credentials | 1 zentrale Credential-Konfiguration statt N pro Workload |
-| Compliance-Konformität (BSI/NIS2) | Auditierbarer Absender-Nachweis pro Mail, vollständiges Audit-Log |
-| Betriebssicherheit | Rate-Limit-Durchsetzung verhindert Runaway-Versand |
-| Entwicklerfreundlichkeit | Kein Credential-Management im Workload-Code |
+| Fewer managed mail credentials | One central credential configuration instead of N per workload |
+| Compliance (BSI / NIS2) | Auditable sender attribution per message, complete audit log |
+| Operational safety | Rate-limit enforcement prevents runaway sending |
+| Developer experience | No credential management in workload code |
 
-### 1.4 Nicht-Ziele
+### 1.4 Non-goals
 
-Folgende Funktionen sind explizit **kein** Bestandteil dieses Produkts — weder jetzt noch in späteren Versionen:
+The following are explicitly **not** part of this product, now or later:
 
-- **Mail-Speicherung / Postfächer auf Sigillum-Seite:** Sigillum hostet selbst keine Mailboxen. Read-Funktionalität (siehe 1.5) erfolgt immer via Backend, nicht via lokaler Storage.
-- **Template-Engine:** Rendering bleibt Aufgabe des Workloads.
-- **Address-Resolution / Distribution Lists:** Empfängerlisten verantwortet der Aufrufer.
-- **DKIM/DMARC-Signierung:** Wird durch das Backend erledigt, nicht durch Sigillum.
-- **Mailrelay-Funktionalität für externe Sender:** Nur Cluster-interne Workloads sind Nutzer.
-- **Anti-Spam / Content-Filtering:** Nicht im Scope.
+- **Mail storage or mailboxes on the Sigillum side.** Sigillum hosts no mailboxes. Read functionality (see §1.5) always goes through the backend, never through local storage.
+- **Template engine.** Rendering is the workload's job.
+- **Address resolution / distribution lists.** Recipient lists are the caller's responsibility.
+- **DKIM / DMARC signing.** Done by the backend, not by Sigillum.
+- **Relay for external senders.** Only in-cluster workloads are users.
+- **Anti-spam / content filtering.** Out of scope.
+- **Judging policy content.** Sigillum enforces `MailPolicy` objects; it does not decide whether a policy is appropriate. That is governance, owned by the platform team (see §4.9).
 
-### 1.5 Nicht im MVP, aber architektonisch vorgesehen
+### 1.5 Not before 1.0, but architecturally anticipated **[future]**
 
-Diese Fähigkeiten sind nicht Teil von v1.0, aber die Architektur muss sie ermöglichen, ohne dass Breaking Changes an CRDs oder API entstehen:
+These capabilities are not planned before 1.0, but the architecture must allow them without breaking changes to CRDs or the API:
 
-- **Mail-Empfang (Read-Path):** Zugriff auf ein Postfach via Backend-nativer API (IMAP, Microsoft Graph Mail.Read, Gmail API). Read-Funktionalität bleibt pro Backend optional.
-- **Backend-Diversität:** Neben klassischem SMTP sollen API-basierte Backends anbindbar sein — konkret im Blick: Microsoft Graph (Mail.Send / Mail.Read), SendGrid, Gmail API. Jedes Backend deklariert seine Capabilities; Policies und API-Oberfläche respektieren diese.
-- **IMAP-Proxy für Legacy-Reader:** Analog zum SMTP-Proxy auf dem Send-Pfad könnte ein IMAP-Proxy Legacy-Workloads erlauben, Postfächer zu lesen, deren Backend eigentlich Graph oder Gmail ist.
+- **Read path.** Mailbox access via backend-native APIs (IMAP, Microsoft Graph `Mail.Read`, Gmail API). Read support stays optional per backend.
+- **Backend diversity.** Besides SMTP, API-based backends: Microsoft Graph (`Mail.Send` / `Mail.Read`), SendGrid, Gmail API. Each backend declares its capabilities; policies and the API surface respect them.
+- **IMAP proxy for legacy readers.** Analogous to the SMTP proxy on the send path, an IMAP proxy could let legacy workloads read mailboxes whose backend is actually Graph or Gmail.
 
-Konsequenz für die v1-Architektur: Die CRDs, das Driver-Interface und das Capability-Modell sind so geschnitten, dass diese Erweiterungen *additiv* sind — kein Migration-Pfad, keine neuen API-Gruppen nötig.
+Consequence for the architecture today: CRDs, the driver interface and the capability model are shaped so these extensions are *additive*. No migration path and no new API groups are needed.
 
 ---
 
 ## 2. Personas
 
-| Persona | Verantwortlichkeit | Primäre Interaktion |
+| Persona | Responsibility | Primary interaction |
 |---|---|---|
-| **Application Developer (Dev)** | Entwickelt Workloads, die E-Mails senden | REST-API / SMTP-Clientbibliothek |
-| **Platform Engineer (PE)** | Betreibt Sigillum, pflegt Upstream-Konfiguration | CRDs, Helm-Chart, Metriken |
-| **Security / Compliance Officer (SCO)** | Definiert Policies, auditiert Nutzung | CRDs (MailPolicy), Audit-Logs |
-| **Namespace-Owner / Tenant-Admin** | Verantwortlich für eigene Team-Namespaces | MailPolicy-CRs im eigenen Namespace |
+| **Application developer (Dev)** | Builds workloads that send mail | REST API / SMTP client library |
+| **Platform engineer (PE)** | Operates Sigillum, maintains backends, decides who may author policies | CRDs, Helm chart, RBAC / admission policy, metrics |
+| **Security / compliance officer (SCO)** | Defines policy guardrails, audits usage | `MailPolicy`, admission rules, audit log |
+| **Namespace owner / tenant admin** | Owns team namespaces | `MailPolicy` in their own namespace, **if** the platform team delegates that right (§4.9) |
 
 ---
 
-## 3. User Stories
+## 3. User stories
 
-User Stories sind nach Epics gruppiert. Jede Story folgt dem Schema **Als \<Rolle\> möchte ich \<Fähigkeit\>, damit \<Nutzen\>** und enthält Akzeptanzkriterien.
+User stories are grouped by epic. Each follows **As a \<role\> I want \<capability\>, so that \<benefit\>** and lists acceptance criteria.
 
-### Epic 1 — E-Mail-Versand aus Workloads
+### Epic 1 — Sending mail from workloads
 
-#### US-1.1 — REST-API-Versand
-**Als** Developer **möchte ich** E-Mails per HTTP-POST an Sigillum senden, **damit** ich ohne SMTP-Library und ohne Credential-Handling Mails verschicken kann.
+#### US-1.1 — Send via REST **[v0.1.0]**
+**As a** developer **I want** to send mail with an HTTP POST to Sigillum, **so that** I need neither an SMTP library nor credential handling.
 
-*Akzeptanzkriterien:*
-- Endpoint `POST /v1/messages` akzeptiert JSON-Payload mit `from`, `to`, `cc`, `bcc`, `subject`, `body` (text/html), `attachments`, `headers`.
-- Response enthält `message_id` für nachgelagerte Korrelation.
-- Synchrone Annahme der Mail (Upstream-Delivery kann asynchron erfolgen).
-- HTTP-Statuscodes folgen Semantik: `202 Accepted`, `400` (Payload-Fehler), `401` (Auth), `403` (Policy-Verletzung), `429` (Rate-Limit), `502` (Upstream-Fehler).
+*Acceptance criteria:*
+- `POST /v1/messages` accepts a JSON payload with `from`, `to`, `cc`, `bcc`, `subject`, `body` (`text` / `html`), `attachments` and `headers` (§4.4.1).
+- The response carries a `messageId` for correlation.
+- The call is **synchronous**: `202 Accepted` means the upstream backend accepted the message (for SMTP: the relay answered `250` to `DATA`). Final delivery to the recipient happens asynchronously in the backend. Sigillum has no queue of its own (§4.7).
+- Status codes follow the table in §4.4.3.
 
-#### US-1.2 — SMTP-Proxy für Legacy-Workloads
-**Als** Developer **möchte ich** den bestehenden SMTP-Client meiner Legacy-Anwendung nutzen können, **damit** ich keinen Code refactoren muss — aber mit moderner, K8s-nativer Authentifizierung statt Pod-IP-Vertrauen.
+#### US-1.2 — SMTP proxy for legacy workloads **[v0.2.0]**
+**As a** developer **I want** to keep using my legacy application's SMTP client, **so that** I don't have to refactor code, but with Kubernetes-native authentication instead of trusting pod IPs.
 
-*Akzeptanzkriterien:*
-- SMTP-Server akzeptiert Verbindungen auf Port 587 cluster-intern.
-- Unterstützt SMTP-Submission-Flow (MAIL FROM, RCPT TO, DATA).
-- Authentifizierung über drei Modi (per Deployment konfigurierbar, Präzedenz in angegebener Reihenfolge):
-  1. **Istio-mTLS** — Ableitung der Identität aus SPIFFE-ID (siehe US-3.3).
-  2. **SASL OAUTHBEARER** (RFC 7628) — ServiceAccount-Token via SASL (siehe US-3.4).
-  3. **Pod-IP-Lookup** — Fallback, nur aktiv wenn per Policy explizit erlaubt (siehe US-3.5).
-- STARTTLS optional, intern via Service-Mesh bevorzugt.
-- Ist als eigenständige Komponente deaktivierbar für Deployments, die rein auf REST setzen.
+*Acceptance criteria:*
+- The proxy accepts SMTP submission cluster-internally on Service port 587 (container port 2587, since the container runs unprivileged).
+- It supports the submission flow (`MAIL FROM`, `RCPT TO`, `DATA`).
+- Caller identification modes, configured per deployment (`--auth-modes`), in order of strength:
+  1. **Istio mTLS**: identity from the SPIFFE ID (US-3.3). **[backlog]**
+  2. **SASL OAUTHBEARER** (RFC 7628): ServiceAccount token over SASL (US-3.4). Default.
+  3. **SASL PLAIN / LOGIN with a Sigillum-issued credential** (US-3.7), for clients that only support username and password. **[planned v0.3.0]**
+  4. **Pod-IP lookup**: fallback, only effective for policies that opt in (US-3.5).
+- STARTTLS is offered when a TLS secret is configured. Inside a service mesh, plain SMTP with mesh mTLS is the recommended setup.
+- The proxy is a separate, optional deployment (`--mode=smtp`, chart value `smtp.enabled`) and can be left out of REST-only installations.
+- Behavior details: §4.6.
 
-#### US-1.3 — Anhänge
-**Als** Developer **möchte ich** Dateianhänge verschicken können, **damit** ich Reports als PDF versenden kann.
+#### US-1.3 — Attachments **[v0.1.0]**
+**As a** developer **I want** to send attachments, **so that** I can mail reports as PDF.
 
-*Akzeptanzkriterien:*
-- REST: Anhänge als Base64 im JSON oder als `multipart/form-data`.
-- Größenlimit konfigurierbar pro Policy (Default: 10 MiB pro Mail).
-- Content-Type und Dateiname werden übernommen.
+*Acceptance criteria:*
+- REST: attachments as Base64 in JSON, or as `multipart/form-data`.
+- Size limit configurable per policy (`messageLimits.maxSizeBytes`, default 10 MiB). Counting rules: §4.4.4.
+- Content type, file name and disposition (`attachment` or `inline`) are preserved.
 
-#### US-1.4 — Fehlertransparenz
-**Als** Developer **möchte ich** verständliche Fehlermeldungen erhalten, **damit** ich weiß, ob ich retryen soll oder ob mein Payload fehlerhaft ist.
+#### US-1.4 — Transparent errors **[v0.1.0]**
+**As a** developer **I want** clear error messages, **so that** I know whether to retry or whether my payload is wrong.
 
-*Akzeptanzkriterien:*
-- RFC-7807 Problem-Details-Format für Fehler.
-- Unterscheidung zwischen retry-fähig (`5xx`) und nicht-retry-fähig (`4xx`).
-- Policy-Verletzungen enthalten Verweis auf den verletzten Regel-Namen.
+*Acceptance criteria:*
+- Errors use RFC 7807 Problem Details (`application/problem+json`).
+- Whether a request may be retried is defined per status code in §4.4.3. It is **not** "4xx = never retry, 5xx = always retry": `429` is retryable, and `502` covers both transient and permanent upstream failures **[gap G-1]**.
+- Policy denials name the policy that denied the request (`policy` field).
 
----
+#### US-1.5 — SMTPS (implicit TLS) on the proxy **[planned v0.4.0]**
+**As a** developer **I want** the SMTP proxy to accept implicit TLS on port 465, **so that** applications that only offer "SSL/TLS" (not STARTTLS) can use it.
 
-### Epic 2 — Policy-Management via CRDs
+*Acceptance criteria:*
+- Optional second listener with implicit TLS, using the same certificate as STARTTLS (`smtp.tls.secretName`); Service port 465.
+- Same authentication, policy and reply behavior as port 587.
 
-#### US-2.1 — Mail-Backend als CRD
-**Als** Platform Engineer **möchte ich** Mail-Backends als CRD definieren (`MailBackend` / `ClusterMailBackend`), **damit** ich sie per GitOps verwalten und verschiedene Backend-Typen ohne API-Migration einbinden kann.
+#### US-1.6 — Idempotent submission **[planned v0.6.0]**
+**As a** developer **I want** to retry a send safely after a timeout or `502`, **so that** recipients don't get the same message twice.
 
-*Akzeptanzkriterien:*
-- Namespace-scoped CRD `MailBackend` und cluster-scoped CRD `ClusterMailBackend`.
-- Spec enthält einen `type`-Diskriminator (`smtp` in v1; `microsoftGraph`, `sendgrid`, `gmail` als future, nicht implementiert).
-- Bei `type: smtp`: `endpoints`-Liste (mindestens ein Eintrag), `authType`, `credentialsRef`.
-- `endpoints` ist eine geordnete Failover-Liste; der erste Ready-Endpoint wird für Sends verwendet.
-- Validation-Webhook prüft Erreichbarkeit beim Create/Update für jeden Endpoint (nur für implementierte Typen).
-- Status-Subresource reflektiert: `Ready`-Condition (True, wenn mind. 1 Endpoint Ready), `capabilities` (vom Driver deklariert), `endpointStatus` pro Endpoint, `lastProbeTime`.
-- Unbekannte/nicht-implementierte `type`-Werte werden abgelehnt mit klarer Fehlermeldung.
-
-#### US-2.2 — Mail-Policies mit Rate-Limiting
-**Als** Platform Engineer **möchte ich** pro Namespace Rate-Limits definieren können, **damit** ein fehlerhafter Workload nicht den gesamten Mailversand stört.
-
-*Akzeptanzkriterien:*
-- Namespace-scoped CRD `MailPolicy`.
-- Rate-Limits konfigurierbar als `messagesPerMinute` und `messagesPerHour`.
-- Sliding-Window-Zählung.
-- Bei Überschreitung: HTTP 429 mit `Retry-After`-Header; SMTP: `421` Response.
-
-#### US-2.3 — Absender-Adressvalidierung
-**Als** Security Officer **möchte ich** erlaubte Absenderadressen pro Policy whitelisten können, **damit** Workloads nur unter autorisierten Identitäten senden.
-
-*Akzeptanzkriterien:*
-- `allowedSenders` als Liste von Exact-Match und Glob-Patterns (z. B. `*@noreply.example.com`).
-- Bei Verletzung: HTTP 403 mit eindeutigem Error-Code `sender_not_allowed`.
-- Policy-Match per `subjectSelector` (siehe US-3.x).
-- Geprüft werden Header-`From`, SMTP-Envelope-Sender und, falls vorhanden, der `Sender`-Header.
-- Anzeigenamen, Kommentare und Encoded-Words in `From`, `Sender` und `Reply-To` dürfen kein `@` enthalten (sonst `invalid_payload`). Sonst ließe sich eine beliebige Adresse als Absender *darstellen*, obwohl nur die addr-spec geprüft wird.
-
-#### US-2.4 — Empfänger-Allow/Denylist
-**Als** Security Officer **möchte ich** Empfänger-Domains einschränken können, **damit** Entwicklungs-Workloads keine Mails an externe Adressen senden.
-
-*Akzeptanzkriterien:*
-- `allowedRecipientDomains` (Allowlist) und `blockedRecipientDomains` (Denylist) optional konfigurierbar.
-- Denylist hat Vorrang vor Allowlist.
-- Die Restriktion wirkt **domänenweit**: `allowedDomains: [example.com]` erlaubt jede Mailbox `@example.com`. Einzeladressen lassen sich (noch) nicht erlauben, eine adressgenaue Allowlist ist für v0.3.0 geplant.
-- Auch `Reply-To`-Adressen müssen die Empfänger-Restriktionen erfüllen, denn Antworten gehen dorthin.
-- Local-Parts mit Routing-Semantik (`%`, `!`, gequotete Local-Parts wie `"user@other"@example.com`) werden abgelehnt (`invalid_payload`). Die Domain-Prüfung betrachtet nur den Teil nach dem letzten `@`. Ein Upstream-MTA mit Percent-Hack oder Bang-Path-Auflösung könnte solche Adressen sonst an eine fremde Domain zustellen.
-
-#### US-2.5 — Multi-Backend-Routing
-**Als** Platform Engineer **möchte ich** pro Policy ein anderes Backend wählen können, **damit** z. B. Test-Workloads in einen MailHog senden und Prod-Workloads in den echten Corporate-SMTP oder (künftig) in Microsoft Graph.
-
-*Akzeptanzkriterien:*
-- `backendRef` in `MailPolicy` zeigt auf eine `MailBackend` oder `ClusterMailBackend` (`kind`-Feld unterscheidet).
-- Referenziertes Backend muss `status.capabilities` enthalten, die die Operation abdecken (z. B. `send` für POST /v1/messages).
-- Fehlt die Policy oder existiert der Backend nicht / ist nicht Ready, wird die Mail abgelehnt (kein Default-Backend).
-
-#### US-2.6 — Policy-Priorität bei mehrfachem Match
-**Als** Platform Engineer **möchte ich** deterministisches Verhalten bei überlappenden Policies, **damit** Konfigurationen vorhersagbar sind.
-
-*Akzeptanzkriterien:*
-- Bei mehreren Matches: spezifischster Match gewinnt (nach definierten Regeln, dokumentiert in CRD-Schema).
-- Tie-Break: alphabetisch nach Policy-Name.
-- Nicht-gematchte Requests werden mit `403 no_policy_matched` abgelehnt (Default-Deny).
+*Acceptance criteria:*
+- `POST /v1/messages` accepts an `Idempotency-Key` header (at most 255 characters).
+- For a configurable window (default 24 h), a repeated key from the same caller returns the original result (`202` with the same `messageId`) without sending again. A request with the same key but a different payload is rejected with `422`.
+- Keys are stored in the rate-limit store (Redis for multi-replica installs; in memory otherwise).
+- SMTP is out of scope: SMTP clients have no equivalent, and the upstream relay deduplicates by `Message-ID` where it supports that.
 
 ---
 
-### Epic 3 — Kubernetes-native AuthN/AuthZ
+### Epic 2 — Policy management via CRDs
 
-#### US-3.1 — ServiceAccount-Token-Authentifizierung
-**Als** Developer **möchte ich** mich mit meinem Pod-ServiceAccount-Token authentifizieren, **damit** ich keine separaten Credentials verwalten muss.
+#### US-2.1 — Mail backend as CRD **[v0.1.0]**
+**As a** platform engineer **I want** to define mail backends as CRDs (`MailBackend` / `ClusterMailBackend`), **so that** I can manage them via GitOps and add backend types without an API migration.
 
-*Akzeptanzkriterien:*
-- REST-API akzeptiert `Authorization: Bearer <token>`.
-- Token wird via Kubernetes `TokenReview` API validiert (projected ServiceAccount-Token mit Audience `sigillum`).
-- `TokenReview`-Response liefert Namespace und SA-Name; diese werden für Policy-Matching verwendet.
-- Ungültige/abgelaufene Tokens werden mit `401 invalid_token` abgelehnt.
+*Acceptance criteria:*
+- Namespace-scoped CRD `MailBackend` and cluster-scoped CRD `ClusterMailBackend`.
+- The spec has a `type` discriminator (`smtp` implemented; `microsoftGraph`, `sendgrid`, `gmail` reserved in the schema enum).
+- For `type: smtp`: an `endpoints` list (at least one entry), `authType`, and `credentialsRef` (required unless `authType: NONE`).
+- `endpoints` is an ordered failover list; sends use the first Ready endpoint.
+- The validating webhook checks the spec **statically**: it rejects types without a registered driver, missing `smtp` block, empty endpoints, `insecureSkipVerify: true`, a missing `credentialsRef` when auth is required, a missing `credentialsRef.namespace` on `ClusterMailBackend`, and a cross-namespace `credentialsRef` on `MailBackend`.
+- The webhook does **not** probe reachability. Network calls during admission are slow, flaky, and break GitOps apply ordering (a backend could not be applied before its relay exists). Reachability is the controller's job and shows up in status.
+- The status subresource reflects: `Ready` condition (True if at least one endpoint is Ready), `capabilities` (declared by the driver), `endpointStatus` per endpoint, `lastProbeTime`, `observedGeneration`.
 
-#### US-3.2 — Policy-Subject-Matching
-**Als** Security Officer **möchte ich** Policies an konkrete ServiceAccounts oder Labels binden können, **damit** Policies feingranular greifen.
+#### US-2.2 — Rate limiting **[v0.1.0 memory, v0.2.0 Redis]**
+**As a** platform engineer **I want** to cap how much mail a workload can send, **so that** one broken workload cannot disrupt mail for everyone.
 
-*Akzeptanzkriterien:*
-- `MailPolicy.spec.subjects` kann drei Matcher-Typen enthalten:
-  - `serviceAccount: {name, namespace}` — exakter SA-Match
-  - `serviceAccountSelector: {matchLabels}` — Label-Selector auf SA
-  - `podSelector: {matchLabels}` — für SMTP-Pfad via Pod-IP-Lookup
-- Match-Auswertung erfolgt in Reihenfolge: explicit SA > SA-Selector > Pod-Selector.
+*Acceptance criteria:*
+- Configured in `MailPolicy.spec.rateLimits` as `messagesPerMinute` and `messagesPerHour` (0 or unset = no cap on that window).
+- **Counting unit is the policy** (`<namespace>/<policy-name>`), not the namespace or the ServiceAccount. All subjects matched by one policy share one budget.
+- True sliding-window counting (timestamp log per key; Redis uses a sorted set, trimmed and counted atomically in a Lua script with Redis server time).
+- A request is charged only after it passed policy evaluation and its backend resolved. A transient upstream failure refunds the charge, so callers retrying through an outage don't exhaust their budget. A permanent upstream rejection stays charged.
+- When exceeded: HTTP `429` with a `Retry-After` header (seconds until the oldest entry leaves the window). SMTP: `421 4.7.0`.
+- State store: see §4.7. With the in-memory store every replica counts on its own.
 
-#### US-3.3 — Istio-mTLS-Authentifizierung (optional, stärkster Modus)
-**Als** Platform Engineer **möchte ich** bei aktivem Istio-Service-Mesh die SPIFFE-Identität für Auth nutzen können, **damit** Token-Handling entfällt und Auth kryptographisch an die Workload-Identität gebunden ist.
+#### US-2.3 — Sender address validation **[v0.1.0, hardened v0.2.1]**
+**As a** security officer **I want** to allowlist sender addresses per policy, **so that** workloads send only under authorized identities.
 
-*Akzeptanzkriterien:*
-- Optional aktivierbarer Auth-Modus `istio`.
-- Auswertung des `X-Forwarded-Client-Cert`-Headers (Istio-sidecar-injiziert).
-- SPIFFE-ID wird geparst und auf SA/Namespace gemappt.
-- Gilt für REST-Pfad; für SMTP-Pfad analog über Peer-Identität der mTLS-Verbindung.
+*Acceptance criteria:*
+- `senderRestrictions.allowedSenders` holds exact addresses and glob patterns (for example `*@noreply.example.com`).
+- Semantics of the block:
 
-#### US-3.4 — SASL OAUTHBEARER für SMTP (und future IMAP)
-**Als** Developer **möchte ich** mein SMTP-Client-Programm mit meinem ServiceAccount-Token authentifizieren, **damit** die SMTP-Auth dieselbe Vertrauensbasis hat wie REST — statt schwacher Pod-IP-Vertrauensannahme.
+  | Policy content | Effect |
+  |---|---|
+  | `senderRestrictions` omitted | **No sender restriction.** Any sender is accepted, like a mail relay without sender checks. |
+  | `senderRestrictions: {}` or `allowedSenders: []` | **Every sender is denied.** Almost always an authoring mistake. |
+  | `allowedSenders` with entries | Only matching senders are accepted. |
 
-*Akzeptanzkriterien:*
-- SMTP-Server kann `AUTH OAUTHBEARER` (RFC 7628) aushandeln.
-- Token-Extraktion aus dem SASL-Payload (Format: `n,a=<user>,^Aauth=Bearer <token>^A^A`).
-- Token-Validierung erfolgt wie im REST-Pfad via Kubernetes `TokenReview` API mit Audience `sigillum`.
-- SA-Name und Namespace aus `TokenReview`-Response werden für Policy-Matching verwendet — identisch zum REST-Pfad.
-- Ungültige oder abgelaufene Tokens werden mit SMTP-Response `535 5.7.8 Authentication credentials invalid` abgelehnt.
-- Projected ServiceAccount-Token (typischerweise unter `/var/run/secrets/tokens/sigillum`) ist der Standard-Lieferweg; Beispiel-Pod-Spec in der Dokumentation.
-- Modus ist pro SMTP-Proxy-Deployment aktivierbar; kann parallel zu `istio` konfiguriert sein.
+- Matching is case-insensitive. Entries without `*`, `?` or `[` match exactly. Entries with them use Go `filepath.Match` glob syntax against the whole address, so `*` also matches `@`: `*example.com` matches `x@evilexample.com`. Always anchor on the domain: `*@example.com`.
+- Checked addresses: header `From`, SMTP envelope sender (`MAIL FROM`), and the `Sender` header if present. All must match.
+- On violation: `403` with problem type `sender-not-allowed` (audit and metric reason `sender_not_allowed`).
+- Display names, comments and encoded-words in `From`, `Sender` and `Reply-To` must not contain `@` (otherwise `invalid_payload`). Without this rule an arbitrary address could be *displayed* as sender while only the addr-spec is checked.
 
-#### US-3.5 — Pod-IP-Auth als expliziter Legacy-Fallback
-**Als** Platform Engineer **möchte ich** Pod-IP-basierte Identifikation nur für Workloads erlauben, die SASL-Auth nicht können, **damit** der schwache Auth-Modus nicht implizit für alle Workloads gilt.
+#### US-2.4 — Recipient allow/denylist **[v0.2.0, hardened v0.2.1]**
+**As a** security officer **I want** to restrict recipient domains, **so that** development workloads cannot mail external addresses.
 
-*Akzeptanzkriterien:*
-- Pod-IP-Auth ist nicht Default, sondern muss pro `MailPolicy` aktiviert werden (`spec.legacyAuth.podIPFallback: true`).
-- Ist SASL-Auth am SMTP-Handshake erfolgt, wird Pod-IP-Auth ignoriert (stärkerer Modus gewinnt).
-- Policies mit Pod-IP-Fallback werden im Status sichtbar als `UsingLegacyAuth` Condition markiert, damit Security-Scans sie finden.
-- Grund: Pod-IPs sind in NAT-/Mesh-/CNI-Szenarien unzuverlässig und nicht kryptographisch an Identitäten gebunden.
+*Acceptance criteria:*
+- `recipientRestrictions.allowedDomains` (allowlist) and `blockedDomains` (denylist), both optional. Omitted block = no recipient restriction.
+- The denylist wins over the allowlist. An empty allowlist means "any domain that is not blocked".
+- Domains match exactly and case-insensitively; subdomains must be listed separately. The webhook requires bare domains (no `@`, no wildcards).
+- The restriction is **domain-wide**: `allowedDomains: [example.com]` allows every mailbox `@example.com`. A per-address allowlist (`recipientRestrictions.allowedRecipients`) is planned for v0.3.0, mainly for staging clusters that may only mail a QA inbox.
+- Checked addresses: all recipients (`to`, `cc`, `bcc` on REST; `RCPT TO` on SMTP) and all `Reply-To` addresses, since replies go there.
+- Local parts with routing semantics (`%`, `!`, quoted local parts such as `"user@other"@example.com`) are rejected as `invalid_payload`. The domain check only looks at the part after the last `@`; an upstream MTA that honors the percent hack or bang paths could otherwise deliver to a foreign domain.
+- On violation: `403` with problem type `recipient-not-allowed`.
 
-#### US-3.6 — API-Server-RBAC für CRDs
-**Als** Platform Engineer **möchte ich** dass CRD-Zugriff über Standard-K8s-RBAC gesteuert wird, **damit** keine separaten Berechtigungsmodelle entstehen.
+#### US-2.5 — Multi-backend routing **[v0.1.0]**
+**As a** platform engineer **I want** to pick a different backend per policy, **so that** for example test workloads send into Mailpit and production workloads into the corporate relay or (later) Microsoft Graph.
 
-*Akzeptanzkriterien:*
-- CRDs sind reguläre K8s-Resources und respektieren RBAC.
-- Controller verwendet minimalen RBAC-Scope (least privilege).
-- Dokumentierte `ClusterRole`-Templates für `view`, `edit`, `admin`.
+*Acceptance criteria:*
+- `MailPolicy.spec.backendRef` points at a `MailBackend` (same namespace) or a `ClusterMailBackend`; `kind` distinguishes them and defaults to `ClusterMailBackend`.
+- If no policy matches, or the backend does not exist or is not Ready, the message is rejected. There is no default backend.
+- The referenced backend's `status.capabilities` must cover the operation (for example `send` for `POST /v1/messages`). **[gap G-2]**: not enforced; only `Ready` is checked.
 
----
+#### US-2.6 — Policy precedence **[v0.1.0]**
+**As a** platform engineer **I want** deterministic behavior when policies overlap, **so that** configurations are predictable.
 
-### Epic 4 — Operations & Observability
+*Acceptance criteria:*
+- A caller only ever matches policies in **its own namespace**.
+- Among matching policies the highest `spec.priority` wins (default 0); ties go to the alphabetically first `metadata.name`.
+- The subject type (explicit ServiceAccount vs. selector) does **not** influence precedence today. Whether it should become a secondary key is open question Q-6 (§9.2).
+- A request no policy matches is rejected with `403 no-policy-matched` (default deny).
 
-#### US-4.1 — Prometheus-Metriken
-**Als** Platform Engineer **möchte ich** Metriken über Mail-Durchsatz, Latenz und Fehler, **damit** ich SLOs definieren kann.
+#### US-2.7 — Daily limit **[planned v0.5.0]**
+**As a** platform engineer **I want** a per-day cap in addition to per-minute and per-hour limits, **so that** one workload cannot exhaust the upstream provider's daily sending quota for the whole organization.
 
-*Akzeptanzkriterien:*
-- `/metrics`-Endpoint im Prometheus-Format.
-- Mindestens folgende Metriken (Label: `namespace`, `policy`, `backend`, `result`):
-  - `sigillum_messages_total` (Counter)
-  - `sigillum_message_size_bytes` (Histogram)
-  - `sigillum_backend_duration_seconds` (Histogram)
-  - `sigillum_ratelimit_rejected_total` (Counter)
-  - `sigillum_policy_denied_total` (Counter, Label: `reason`)
-- ServiceMonitor-Manifest als Teil des Helm-Charts.
-
-#### US-4.2 — Strukturierte Logs
-**Als** Platform Engineer **möchte ich** strukturierte JSON-Logs, **damit** ich Mails durchsuchen und korrelieren kann.
-
-*Akzeptanzkriterien:*
-- JSON-Logformat (`slog` oder `zap`).
-- Log-Level via ENV steuerbar.
-- Pflichtfelder pro Log-Eintrag: `timestamp`, `level`, `message_id`, `namespace`, `service_account`, `authMethod` (`istio` | `oauth_bearer` | `pod_ip_legacy`), `policy`, `backend`, `result`.
-- Keine Mail-Inhalte in Logs (nur Metadaten).
-
-#### US-4.3 — Audit-Log-Stream
-**Als** Security Officer **möchte ich** einen separaten Audit-Log-Stream, **damit** Compliance-Anforderungen (BSI, NIS2) erfüllt werden.
-
-*Akzeptanzkriterien:*
-- Separater Logger mit fixer Struktur, auf stdout (Sidecar-Aggregation möglich).
-- Log-Eintrag pro Mail-Request, auch bei Ablehnung.
-- Enthält: Zeitstempel, Caller-Identity (SA/Namespace), `from`, `to[]`, Policy-Name, Decision (`accept`/`reject`), Reason, `message_id`.
-- Keine Mail-Body-Inhalte im Audit-Log.
-
-#### US-4.4 — OpenTelemetry-Tracing
-**Als** Platform Engineer **möchte ich** Traces vom REST-Aufruf bis zum Upstream-SMTP-Send, **damit** ich Latenzprobleme debuggen kann.
-
-*Akzeptanzkriterien:*
-- OTLP-Export konfigurierbar via Standard-ENV-Vars.
-- Span-Hierarchie: `http.request` → `auth.tokenreview` → `policy.evaluate` → `backend.send`.
-- W3C Trace-Context-Propagation (eingehender `traceparent`-Header wird übernommen).
+*Acceptance criteria:*
+- `rateLimits.messagesPerDay`, counted like the other windows (per policy, sliding window, US-2.2).
+- Motivation: hosted mailboxes enforce daily quotas (for example Microsoft 365 and Google Workspace cap recipients per day and mailbox); exceeding them blocks the sending account for everyone, not just the runaway workload.
+- A namespace-wide quota across policies (`MailQuota`, §4.3.3) stays in the backlog until users ask for it.
 
 ---
 
-### Epic 5 — Platform Operations
+### Epic 3 — Kubernetes-native authentication
 
-#### US-5.1 — GitOps-kompatibles Deployment
-**Als** Platform Engineer **möchte ich** Sigillum via Helm-Chart oder Kustomize deployen, **damit** es in unseren ArgoCD-Flow passt.
+#### US-3.1 — ServiceAccount token authentication **[v0.1.0]**
+**As a** developer **I want** to authenticate with my pod's ServiceAccount token, **so that** I have no separate credentials to manage.
 
-*Akzeptanzkriterien:*
-- Offizielles Helm-Chart mit sinnvollen Defaults.
-- Alle Konfigurationsparameter via `values.yaml`.
-- CRDs separat installierbar (Helm-Hook oder eigenes Chart).
-- Keine Runtime-Konfiguration außerhalb von K8s-Resources (kein init-Script).
+*Acceptance criteria:*
+- The REST API accepts `Authorization: Bearer <token>`.
+- The token is validated via the Kubernetes `TokenReview` API with `spec.audiences: [sigillum]` (configurable via `--token-audience`). Sigillum also verifies that `status.audiences` contains the expected audience; an audience-unaware authenticator would otherwise accept a kube-apiserver token.
+- Only ServiceAccount identities are accepted (`system:serviceaccount:<ns>:<name>`); namespace and SA name drive policy matching.
+- Missing, invalid or expired tokens are rejected with `401` and problem type `invalid-token`.
+- Results (positive and negative) are cached by token hash. See §5.3 for cache TTL and revocation latency.
 
-#### US-5.2 — Hochverfügbarkeit
-**Als** Platform Engineer **möchte ich** Sigillum HA betreiben, **damit** ein Pod-Ausfall keinen Mail-Versand unterbricht.
+#### US-3.2 — Policy subject matching **[v0.1.0; selectors fixed v0.2.0]**
+**As a** security officer **I want** to bind policies to specific ServiceAccounts or labels, **so that** policies apply at fine granularity.
 
-*Akzeptanzkriterien:*
-- Stateless-Design (Rate-Limit-State extern).
-- Horizontale Skalierung via Replicas möglich.
-- PodDisruptionBudget im Chart.
-- Leader-Election für Controller (nicht für API-Server).
+*Acceptance criteria:*
+- `MailPolicy.spec.subjects` is a list; each entry has **exactly one** matcher:
+  - `serviceAccount: {name}`: exact SA name in the policy's namespace. The optional `namespace` field is informational and ignored, because policies never match across namespaces.
+  - `serviceAccountSelector: {matchLabels, matchExpressions}`: label selector on the caller's ServiceAccount object.
+  - `podSelector: {matchLabels, matchExpressions}`: label selector on the source pod. Only consulted for pod-IP legacy callers (US-3.5).
+- A policy matches if **any** subject matches.
+- Empty selectors never match (the webhook rejects them), so a policy cannot accidentally bind every SA.
+- If the ServiceAccount lookup fails, selector subjects do not match (fail closed). A selector built only from `NotIn` / `DoesNotExist` would otherwise match an empty label set.
 
-#### US-5.3 — Graceful Shutdown
-**Als** Platform Engineer **möchte ich** dass laufende Mail-Requests bei Pod-Termination abgeschlossen werden, **damit** keine Mails verloren gehen.
+#### US-3.3 — Istio mTLS authentication **[backlog]**
+**As a** platform engineer **I want** to use the SPIFFE identity when Istio is active, **so that** token handling disappears and authentication is cryptographically bound to the workload identity.
 
-*Akzeptanzkriterien:*
-- SIGTERM löst Draining aus; Readiness-Probe wird `false`.
-- Laufende Requests dürfen `terminationGracePeriodSeconds` (Default: 30 s) nutzen.
-- Neue Requests werden in Draining-Phase abgelehnt (`503`).
+*Priority note:* token authentication already works inside a mesh, so this is a convenience, not a blocker. It moves up if users ask for it.
 
-#### US-5.4 — Health- und Readiness-Probes
-**Als** Platform Engineer **möchte ich** K8s-Standard-Probes, **damit** Self-Healing funktioniert.
+*Acceptance criteria:*
+- Optional auth mode `istio`.
+- REST: evaluate the `X-Forwarded-Client-Cert` header injected by the sidecar. SMTP: the peer identity of the mTLS connection.
+- Parse the SPIFFE ID (`spiffe://<trust-domain>/ns/<ns>/sa/<sa>`) and map it to namespace and SA.
+- **Header trust:** the mode may only be enabled when a client-supplied `X-Forwarded-Client-Cert` header cannot reach Sigillum, i.e. the Sigillum pod's sidecar sanitizes it (`forwardClientCertDetails: SANITIZE_SET`, and a `PeerAuthentication` in `STRICT` mode for the Sigillum workload). Otherwise a pod without a sidecar could claim any identity. The installation docs must state this, and Sigillum should refuse the header on connections that did not arrive through the sidecar.
+- The configured trust domain must match; foreign trust domains are rejected.
 
-*Akzeptanzkriterien:*
-- `/healthz`: Liveness — prüft Prozess.
-- `/readyz`: Readiness — prüft Upstream-Erreichbarkeit und Controller-Sync.
+#### US-3.4 — SASL OAUTHBEARER for SMTP **[v0.2.0]**
+**As a** developer **I want** to authenticate my SMTP client with my ServiceAccount token, **so that** SMTP auth has the same trust basis as REST instead of weak pod-IP trust.
 
-#### US-5.5 — Resource-Limits und Security-Context
-**Als** Platform Engineer **möchte ich** definierte Resource-Requests/Limits und gehärteten SecurityContext, **damit** das Deployment unseren Baseline-Policies entspricht.
+*Acceptance criteria:*
+- The SMTP proxy offers `AUTH OAUTHBEARER` (RFC 7628).
+- Token extraction from the SASL payload (`n,a=<user>,^Aauth=Bearer <token>^A^A`). The `a=` authzid is ignored; identity comes from the token only.
+- Token validation as on the REST path: `TokenReview` with audience `sigillum`, sharing the same cache rules.
+- SA name and namespace from the `TokenReview` drive policy matching exactly as on REST.
+- Invalid or expired tokens are rejected with `535 5.7.8 Authentication credentials invalid`.
+- The projected ServiceAccount token (typically at `/var/run/secrets/tokens/sigillum`) is the standard delivery path; the README shows an example.
+- AUTH without STARTTLS is allowed by default only when no TLS secret is configured (chart `smtp.allowInsecureAuth: null` follows `smtp.tls.secretName`). It is meant for meshes that encrypt pod-to-pod traffic.
 
-*Akzeptanzkriterien:*
-- Non-root, read-only-Rootfs, dropped Capabilities.
-- Default-Resources im Chart, überschreibbar.
-- Kompatibel mit Pod Security Standards `restricted`.
+#### US-3.5 — Pod-IP authentication as explicit legacy fallback **[v0.2.0]**
+**As a** platform engineer **I want** pod-IP identification only for workloads that cannot do SASL, **so that** the weak mode does not implicitly apply to every workload.
+
+*Acceptance criteria:*
+- Two opt-ins are required: the SMTP deployment enables mode `podip` (`--auth-modes=oauthbearer,podip`), **and** the policy sets `spec.legacyAuth.podIPFallback: true`. A pod-IP caller never matches any other policy.
+- Clients that authenticated via SASL are never identified by pod IP (the stronger mode wins).
+- Lookup: source IP → Running, non-terminating pod → its ServiceAccount and labels. An IP shared by more than one such pod (for example host-network pods) is ambiguous and rejected.
+- The proxy must see the caller's real pod IP (no SNAT or masquerading between caller and proxy). With `podip` enabled the proxy needs cluster-wide `list`/`watch` on pods.
+- Policies with the fallback enabled carry a `UsingLegacyAuth=True` condition so security scans can find them.
+- Rationale: pod IPs are unreliable under NAT, meshes and some CNIs, and not cryptographically bound to an identity.
+
+#### US-3.6 — API server RBAC for CRDs **[v0.1.0]**
+**As a** platform engineer **I want** CRD access governed by standard Kubernetes RBAC, **so that** no separate permission model appears.
+
+*Acceptance criteria:*
+- The CRDs are regular Kubernetes resources and respect RBAC.
+- Sigillum components run with least privilege (§4.10).
+- The chart ships aggregated ClusterRoles (`rbac.aggregateClusterRoles`, default `true`):
+  - `sigillum-view` → aggregated into `view`: read all Sigillum CRs.
+  - `sigillum-edit` → aggregated into `edit`: write `MailBackend` and `MailPolicy`, read `ClusterMailBackend`.
+  - `sigillum-admin` → aggregated into `admin`: write all three.
+- With the default, **everyone holding `edit` in a namespace can author `MailPolicy` there.** Platforms that reserve policy authoring for the platform or security team set `rbac.aggregateClusterRoles: false` and bind their own roles (§4.9).
+
+#### US-3.7 — Sigillum-issued SMTP credentials **[planned v0.3.0]**
+**As a** developer running off-the-shelf software (Grafana, Alertmanager, Gitea, Nextcloud, Keycloak, Argo CD notifications, …) **I want** to authenticate to the SMTP proxy with a username and password, **so that** apps that support nothing but `AUTH PLAIN` / `LOGIN` can send through Sigillum without falling back to pod-IP trust.
+
+*Acceptance criteria:*
+- A namespace-scoped `MailCredential` (§4.3.4) binds a username to one ServiceAccount in its namespace. Authenticating with it gives exactly the identity of that ServiceAccount; policy matching, rate limits and audit are unchanged. Policies need no opt-in for credential callers.
+- Two mutually exclusive modes:
+  - **Generated (default).** The controller generates a 256-bit random password, writes it to a Secret in the credential's namespace (`spec.secretName`), and records only a SHA-256 hash in `status`. Nothing secret is committed to Git; the team only commits the `MailCredential`.
+  - **Bring your own hash.** The user sets `spec.passwordHash` (argon2id) and delivers the Secret themselves (Vault, External Secrets, `kubectl sigillum credential create`). The controller touches no Secret. For teams that do not want Sigillum to write Secrets in their namespace.
+- Generated credentials are available in **all namespaces except excluded ones** (chart `credentials.excludeNamespaces`, default `kube-*`; the Sigillum release namespace is always excluded). Details and the guard that keeps this safe: §4.10.
+- The SMTP proxy offers `AUTH PLAIN` and `AUTH LOGIN` when mode `credential` is enabled (`--auth-modes`, chart `smtp.authModes`). Credential authentication **requires TLS** (STARTTLS, or implicit TLS from v0.4.0); plaintext is only possible with an explicit `smtp.allowInsecureAuth: true` (for example with mesh mTLS). Unlike tokens, a static password can be replayed for months.
+- The proxy verifies credentials from its informer cache of `MailCredential` objects and needs no Secret access.
+- **Rotation (generated mode):** on `spec.rotation.interval` or on demand (annotation `sigillum.dev/rotate`, or `kubectl sigillum credential rotate`), the controller writes a new password to the Secret and keeps the old hash valid for `spec.rotation.gracePeriod` (default 24 h). Apps that read the password only at startup are restarted by [Stakater Reloader](https://github.com/stakater/Reloader) (recipe, v0.3.0). The audit record notes when the previous password was used, so stragglers can be found before the grace period ends.
+- **Revocation:** delete the `MailCredential` (the owned Secret is garbage-collected). Takes effect as soon as the proxy's informer sees the deletion; there is no additional cache.
+- Log and audit `auth_method`: `smtp_credential`. Failed attempts answer `535 5.7.8` and are audited; repeated failures per username and per source IP are rate-limited.
+- No privilege escalation: whoever can create a `MailCredential` for a ServiceAccount could already run a pod as that ServiceAccount (`edit` role).
+- Priority rationale: without this, the most common SMTP clients in a cluster can only use the weakest mode (US-3.5). There is no workaround outside Sigillum.
+
+*Workflow (generated mode):*
+1. Platform team, once: enable mode `credential` and STARTTLS in the chart. All namespaces except the excluded ones can use credentials immediately.
+2. Team commits a `MailCredential` (and its `MailPolicy`) to Git.
+3. The controller creates the Secret (`username`, `password`, `host`, `port`) in the team's namespace and records the hash.
+4. The app references the Secret the same way as any SMTP Secret, for example Grafana's `smtp.existingSecret`.
+5. On `AUTH PLAIN`, the proxy maps the username to the `MailCredential`, checks the hash, and continues as that ServiceAccount.
 
 ---
 
-### Epic 6 — Erweiterbarkeit (Future, nicht v1-Scope)
+### Epic 4 — Operations and observability
 
-Dieser Epic beschreibt *architektonische Vorgaben*, nicht zu bauende Features. Die v1-Architektur muss diese Erweiterungen ohne Breaking Changes ermöglichen.
+#### US-4.1 — Prometheus metrics **[v0.1.0]**
+**As a** platform engineer **I want** metrics on mail throughput, latency and errors, **so that** I can define SLOs.
 
-#### US-6.1 — Microsoft Graph als Send-Backend (future)
-**Als** Platform Engineer **möchte ich** künftig Microsoft Graph (`Mail.Send`) als Backend-Typ konfigurieren können, **damit** Workloads über Microsoft 365 senden können ohne separaten SMTP-Server.
+*Acceptance criteria:*
+- `/metrics` in Prometheus format on a dedicated port (default `:9090`) in every component.
+- Metrics and labels:
 
-*Architektonische Vorgabe für v1:*
-- `MailBackend.spec.type` akzeptiert den Wert `microsoftGraph` semantisch (Schema-Platzhalter vorhanden, Validation lehnt ihn in v1 ab).
-- Kein Redesign der CRDs nötig, wenn `microsoftGraph`-Driver hinzukommt.
+  | Metric | Type | Labels | Counts |
+  |---|---|---|---|
+  | `sigillum_messages_total` | Counter | `namespace`, `policy`, `backend`, `result` (`ok`, `upstream_error`) | Messages that reached a backend |
+  | `sigillum_message_size_bytes` | Histogram | `namespace`, `policy`, `backend` | Accepted messages only, size as in §4.4.4 |
+  | `sigillum_backend_duration_seconds` | Histogram | `namespace`, `policy`, `backend`, `result` | Duration of the upstream send |
+  | `sigillum_ratelimit_rejected_total` | Counter | `namespace`, `policy` | `429` / `421` rejections |
+  | `sigillum_policy_denied_total` | Counter | `namespace`, `policy`, `reason` | Policy denials, plus `reason="backend_not_ready"` |
 
-#### US-6.2 — SendGrid / Gmail als Send-Backend (future)
-**Als** Platform Engineer **möchte ich** SendGrid (API-Key) und Gmail API (Service-Account) als Backends einbinden können.
+- Payload and authentication errors (before policy evaluation) are not counted in metrics; they appear in the audit stream.
+- `ServiceMonitor` in the Helm chart (`serviceMonitor.enabled`).
 
-*Architektonische Vorgabe für v1:*
-- Verschiedene Auth-Mechanismen pro Backend-Typ (API-Key, Service-Account-JSON, OAuth2-Client-Credentials) müssen über typ-spezifische Secret-Strukturen abbildbar sein, ohne die zentrale Secret-Handling-Logik zu ändern.
+#### US-4.2 — Structured logs **[v0.1.0]**
+**As a** platform engineer **I want** structured JSON logs, **so that** I can search and correlate mail activity.
 
-#### US-6.3 — Mail-Lesen via REST (future)
-**Als** Developer **möchte ich** künftig Postfächer per REST-API lesen können (List, Fetch, Search), **damit** Workloads eingehende Mails verarbeiten können ohne IMAP-Library.
+*Acceptance criteria:*
+- JSON via Go `log/slog` on stdout.
+- Log level via env `SIGILLUM_LOG_LEVEL` (`debug`, `info`, `warn`, `error`; chart value `logLevel`).
+- Fields per mail log line: `time`, `level`, `msg`, `message_id`, `namespace`, `service_account`, `authMethod` (`oauth_bearer` | `pod_ip_legacy`; `istio` once US-3.3 lands), `transport`, `policy`, `backend`, `result`, plus `reason`, `upstream_id` and `trace_id` where applicable.
+- No mail content in logs (metadata only), no tokens, no passwords.
 
-*Architektonische Vorgabe für v1:*
-- Driver-Interface enthält vorreservierte Methoden `Read()` und `Subscribe()`.
-- API-Oberfläche ist versionierbar; `/v1/messages` bleibt für Send, Read-Endpoints können additiv unter `/v1/mailboxes/...` eingeführt werden.
+#### US-4.3 — Audit log stream **[v0.2.0]**
+**As a** security officer **I want** a separate audit log stream, **so that** compliance requirements (BSI, NIS2) are met.
 
-#### US-6.4 — IMAP-Proxy für Legacy-Reader (future)
-**Als** Developer einer Legacy-Anwendung **möchte ich** künftig Postfächer per IMAP lesen können, auch wenn das Backend Microsoft Graph ist.
+*Acceptance criteria:*
+- A separate writer with a fixed record shape (§4.8), one JSON object per line. Sink: `stdout` (default), `stderr`, `none`, or a file path (`--audit-log`, chart `audit.output`).
+- Exactly one record per mail request, including rejections at any stage (authentication, payload, policy, rate limit, backend, upstream). SMTP `MAIL` / `RCPT` rejections produce a record per refused command.
+- Records are tagged `"stream":"audit"` so aggregators can split them from the operational log on the same stdout.
+- No subject, body or attachment content.
 
-*Architektonische Vorgabe für v1:*
-- Der api-server ist so modularisiert, dass zusätzliche Protokoll-Adapter (SMTP-Proxy, IMAP-Proxy) additiv aktivierbar sind.
+#### US-4.4 — OpenTelemetry tracing **[v0.2.0]**
+**As a** platform engineer **I want** traces from the REST call to the upstream send, **so that** I can debug latency.
 
-#### US-6.5 — Webhook-Push für Backend-Events (future)
-**Als** Developer **möchte ich** Events wie Bounces, Delivery-Bestätigungen oder eingehende Mails per Webhook an meinen Workload geliefert bekommen.
+*Acceptance criteria:*
+- OTLP export (HTTP/protobuf by default), configured through the standard `OTEL_*` environment variables (chart: `tracing.endpoint`, `tracing.sampler`, …). Tracing is a no-op while no endpoint is set.
+- Span structure (children are siblings, in execution order):
+  - REST: `http.request` → `auth.tokenreview`, `policy.evaluate`, `ratelimit.allow`, `backend.send`
+  - SMTP: `auth.tokenreview` during `AUTH`; `smtp.data` → `policy.evaluate`, `ratelimit.allow`, `backend.send`
+- W3C Trace Context: an incoming `traceparent` header is continued. Only `/v1/*` is traced, not probes or scrapes.
 
-*Architektonische Vorgabe für v1:*
-- Der Controller ist so ausgelegt, dass er später eine Webhook-Receiver-Komponente betreiben kann; keine Architekturänderung nötig.
+#### US-4.5 — Cluster identity in telemetry **[planned v0.3.0]**
+**As a** platform engineer running staging and production clusters **I want** every audit record, log line and metric to say which cluster it came from, **so that** one log backend and one Prometheus can serve all clusters.
+
+*Acceptance criteria:*
+- `--cluster-name` flag (chart value `clusterName`, empty by default).
+- When set: audit field `cluster`, log field `cluster`, and a `cluster` target label on the ServiceMonitor (not an extra label on every series, so single-cluster setups are unchanged).
+
+#### US-4.6 — Dashboards and alerts **[planned v0.4.0]**
+**As a** platform engineer **I want** a ready-made dashboard and alert rules, **so that** I notice problems without writing PromQL first.
+
+*Acceptance criteria:*
+- Grafana dashboard JSON (chart `ConfigMap` with the Grafana sidecar label, opt-in).
+- `PrometheusRule` (opt-in) with at least: backend not Ready, upstream error ratio, rate-limit rejections rising, policy denials rising, Redis unavailable, controller not reconciling.
+- Works with kube-prometheus-stack defaults.
 
 ---
 
-## 4. Architektur
+### Epic 5 — Platform operations
 
-### 4.1 Komponentenübersicht
+#### US-5.1 — GitOps-compatible deployment **[v0.1.0]**
+**As a** platform engineer **I want** to deploy Sigillum with Helm or Kustomize, **so that** it fits our Argo CD flow.
+
+*Acceptance criteria:*
+- Official Helm chart with sensible defaults; every setting available via `values.yaml`.
+- CRDs ship in the chart's `crds/` directory; the generated manifests also live in `config/crd/bases/` for separate installation.
+- **CRD upgrades:** Helm installs `crds/` on first install only and never upgrades or deletes them. Upgrades apply `config/crd/bases/` (or the chart's `crds/`) explicitly, for example with `kubectl apply --server-side` or an Argo CD application. The CRD-migration runbook (§5.7) documents this.
+- No runtime configuration outside Kubernetes resources (no init scripts).
+- The admission webhook needs a serving certificate: either cert-manager (`webhook.certificate.useCertManager=true`) or an existing secret.
+
+#### US-5.2 — High availability **[v0.2.0]**
+**As a** platform engineer **I want** to run Sigillum highly available, **so that** a pod failure does not interrupt mail.
+
+*Acceptance criteria:*
+- Stateless api-server and SMTP proxy; horizontal scaling via replicas.
+- Rate-limit state is shared only with the Redis store (§4.7). The chart defaults to 2 api-server replicas **and** the in-memory store, so each replica enforces the full limit and the effective limit doubles. Production installs with more than one replica set `rateLimit.backend=redis`.
+- PodDisruptionBudgets in the chart (api and SMTP enabled by default with `minAvailable: 1`; controller disabled by default because it runs one replica).
+- Leader election for the controller (default on), not for the api-server or SMTP proxy.
+
+#### US-5.3 — Graceful shutdown **[v0.1.0]**
+**As a** platform engineer **I want** in-flight mail requests to finish on pod termination, **so that** no mail is lost.
+
+*Acceptance criteria:*
+- SIGTERM starts draining: `/readyz` returns `503` and in-flight requests may finish within `--shutdown-timeout` (default 25 s, below the chart's `terminationGracePeriodSeconds: 30`).
+- Requests arriving during draining are refused with `503 shutting-down`.
+- Endpoint removal lags behind SIGTERM. Until a `preStop` delay exists, the listener closes immediately, so late clients may see a connection error instead of a `503` **[gap G-3]**.
+
+#### US-5.4 — Health and readiness probes **[v0.1.0]**
+**As a** platform engineer **I want** standard Kubernetes probes, **so that** self-healing works.
+
+*Acceptance criteria:*
+- `/healthz` (liveness): the process is up.
+- `/readyz` (readiness): the informer cache is synced and the pod is not draining.
+- Readiness deliberately does **not** check upstream reachability. An upstream outage would otherwise take every replica out of the Service, and callers would get connection errors instead of meaningful `503 backend-not-ready` / `502` responses. Upstream health is visible in backend status and metrics.
+
+#### US-5.5 — Resource limits and security context **[v0.1.0]**
+**As a** platform engineer **I want** defined resource requests/limits and a hardened security context, **so that** the deployment meets our baseline policies.
+
+*Acceptance criteria:*
+- Non-root (UID 65532), read-only root filesystem, all capabilities dropped, `seccompProfile: RuntimeDefault`, no privilege escalation.
+- Default resources in the chart, overridable.
+- Compatible with the Pod Security Standard `restricted`.
+
+#### US-5.6 — Install without cert-manager **[planned v0.4.0]**
+**As a** platform engineer of a small cluster **I want** to install Sigillum without cert-manager, **so that** a single `helm install` is enough.
+
+*Acceptance criteria:*
+- New default-off chart option in which the controller creates a self-signed CA and serving certificate for its webhook, rotates it before expiry, and patches the `caBundle` of its `ValidatingWebhookConfiguration`.
+- cert-manager and an existing secret remain supported.
+- Workaround until then: cert-manager or a manually created secret (US-5.1).
+
+#### US-5.7 — Enforcement recipes **[planned v0.3.0, documentation]**
+**As a** platform engineer **I want** tested recipes that make Sigillum the only way out for mail, and guardrails for policy authors, **so that** policies cannot be bypassed or loosened by accident.
+
+*Acceptance criteria:*
+- Egress: `NetworkPolicy` examples (plus `CiliumNetworkPolicy` with FQDN rules) that deny ports 25 / 465 / 587 cluster-wide and allow them only for Sigillum pods. Without this, a workload can talk to the relay directly and Sigillum enforces nothing.
+- Admission: Kyverno and `ValidatingAdmissionPolicy` examples, for example: only listed namespaces may reference a given `ClusterMailBackend`; `allowedSenders` must stay within a namespace's domain (from a namespace label); `legacyAuth.podIPFallback` is forbidden in production namespaces; `senderRestrictions` is required; no workload Secrets named like SMTP credentials.
+- The recipes live in the repository (`examples/`) and are exercised in E2E where practical.
+- These are deliberately recipes, not features (§8.0): standard tools already do this well.
+
+---
+
+### Epic 6 — Extensibility and more backends
+
+This epic describes *architectural constraints*, not features to build now. The current architecture must allow these extensions without breaking changes.
+
+#### US-6.1 — Microsoft 365 as upstream **[planned v0.5.0 / backlog]**
+**As a** platform engineer **I want** to send through Microsoft 365 without a password-based SMTP login, **so that** Sigillum keeps working once Microsoft retires Basic authentication for SMTP AUTH.
+
+*Stage 1 — OAuth for the SMTP driver* **[planned v0.5.0]**:
+- New `authType: XOAUTH2` for SMTP backends. The driver obtains tokens with the OAuth2 client-credentials flow (tenant ID, client ID and client secret from the credentials Secret) and refreshes them itself.
+- Works for Microsoft 365 (`smtp.office365.com`) and Google Workspace (`smtp.gmail.com`) alike.
+- Workaround until then: a Microsoft 365 connector for SMTP relay (requires a static egress IP), or a mailbox with SMTP AUTH still enabled.
+
+*Stage 2 — Graph driver* **[backlog]**:
+- `type: microsoftGraph` (`Mail.Send`), for tenants that disable SMTP AUTH entirely or need Graph's higher limits.
+- `MailBackend.spec.type` already accepts `microsoftGraph` in the schema enum; the webhook rejects it until a driver is registered. No CRD redesign when the driver lands.
+
+#### US-6.2 — API-based send backends **[backlog]**
+**As a** platform engineer **I want** to use SendGrid, Amazon SES, Mailgun or the Gmail API through their HTTP APIs.
+
+*Priority note:* every one of these providers also offers SMTP with an API key as password, which works with the SMTP driver today. API drivers become worth their cost mainly together with cloud workload identity (no static secret at all, for example SES with IRSA / EKS Pod Identity), which is a larger-organization concern.
+
+*Architectural constraint:*
+- Different auth mechanisms per backend type (API key, service-account JSON, OAuth2 client credentials) must be expressible as type-specific Secret layouts without changing the central secret handling (§4.3.1).
+
+#### US-6.3 — Reading mail via REST **[future]**
+**As a** developer **I want** to read mailboxes via REST (list, fetch, search), **so that** workloads can process incoming mail without an IMAP library.
+
+*Architectural constraint:*
+- `Read()` and `Subscribe()` are added to the driver interface (or as optional interfaces, like `RawSender`) when the first read-capable driver lands.
+- The API is versioned; `/v1/messages` stays the send path and read endpoints are added under `/v1/mailboxes/...`.
+
+#### US-6.4 — IMAP proxy for legacy readers **[future]**
+**As a** developer of a legacy application **I want** to read mailboxes over IMAP, even when the backend is Microsoft Graph.
+
+*Architectural constraint:*
+- Protocol adapters are separate, optionally enabled components (the SMTP proxy already runs as its own `--mode=smtp` deployment on the shared gateway pipeline).
+
+#### US-6.5 — Webhook push for backend events **[future]**
+**As a** developer **I want** events such as bounces, delivery confirmations or incoming mail pushed to my workload.
+
+*Architectural constraint:*
+- The controller can later host a webhook-receiver component without architectural changes.
+
+*Priority note:* bounces, delivery status and suppression lists are handled by the upstream provider (§7). This story only matters if users need these events inside the cluster.
+
+---
+
+### Epic 7 — Developer experience
+
+#### US-7.1 — Local development recipe **[planned v0.3.0, documentation]**
+**As a** developer with a local cluster (kind, k3d, minikube, Docker Desktop) **I want** a copy-paste setup that captures mail instead of sending it, **so that** I can test mail flows in minutes.
+
+*Acceptance criteria:*
+- A documented profile: one replica, in-memory rate limits, Mailpit deployed next to Sigillum as a `MailBackend` (`authType: NONE`, `tls: none`), and a permissive example policy.
+- A recipe to call the API from the laptop as a given ServiceAccount: `kubectl create token <sa> --audience sigillum` plus `kubectl port-forward`.
+- A built-in capture driver is **not** planned: Mailpit already does this well (§8.0).
+
+#### US-7.2 — Preflight and kubectl plugin **[planned v0.4.0]**
+**As a** developer or policy author **I want** to test and explain policy decisions from the command line, **so that** I understand a `403` without reading controller logs.
+
+*Acceptance criteria:*
+- Preflight endpoint (§4.4.2).
+- `kubectl sigillum` plugin (single static binary, also usable standalone):
+  - `send`: send a test message as the current user or `--as-sa <sa>` (requests a token via the TokenRequest API with the user's own permissions).
+  - `whoami`: show the resolved identity and the policy that would match.
+  - `explain`: run preflight and print every candidate policy with the rule that accepted or rejected the message.
+  - `credential create`: bring-your-own-hash mode; generate a password, then create the Secret and the `MailCredential` (US-3.7) with the user's own permissions.
+  - `credential rotate`: trigger a rotation of a generated credential.
+
+#### US-7.3 — OpenAPI description **[planned v0.4.0]**
+**As a** developer **I want** a machine-readable API description, **so that** I can generate a client in my language.
+
+*Acceptance criteria:*
+- OpenAPI 3.1 document for `/v1`, including the problem types of §4.4.3, published with each release.
+- Official client SDKs are **not** planned: the API is one call, and clients can be generated from the document.
+
+---
+
+## 4. Architecture
+
+### 4.1 Component overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Kubernetes Cluster                       │
-│                                                              │
-│  Caller Workload                  Sigillum System        │
-│  ┌──────────────┐                 ┌────────────────────────┐ │
-│  │  App-Pod     │  HTTPS + Bearer │  api-server (N Repl.)  │ │
-│  │              │ ───────────────▶│  ┌──────────────────┐  │ │
-│  │              │  SMTP (587)     │  │ REST Handler     │  │ │
-│  │              │ ───────────────▶│  │ SMTP Handler     │  │ │
-│  └──────────────┘                 │  │ Auth (TokenRev.) │  │ │
-│                                   │  │ Policy Engine    │  │ │
-│                                   │  │ Upstream Client  │  │ │
-│                                   │  └──────────────────┘  │ │
-│                                   └────────┬───────────────┘ │
-│                                            │                 │
-│  ┌─────────────────────┐                   │                 │
-│  │  controller         │                   │                 │
-│  │  (Leader-elected)   │                   │                 │
-│  │  ┌────────────────┐ │                   │                 │
-│  │  │ CRD Reconciler │ │                   │                 │
-│  │  │ Validation WH  │ │                   │                 │
-│  │  │ Upstream Probe │ │                   │                 │
-│  │  └────────────────┘ │                   │                 │
-│  └─────────────────────┘                   │                 │
-│             │                              │                 │
-│             ▼                              ▼                 │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │                K8s API (CRDs, Secrets, TokenReview)    │  │
-│  └────────────────────────────────────────────────────────┘  │
-│                                            │                 │
-│  ┌────────────────────────────┐            │                 │
-│  │ Rate-Limit Backend         │◀───────────┘                 │
-│  │ (Redis oder In-Memory)     │                              │
-│  └────────────────────────────┘                              │
-└──────────────────────────────────────────┼───────────────────┘
-                                           ▼
-                                  Backend (SMTP / Graph / SendGrid / Gmail)
+┌──────────────────────────────────────────────────────────────────┐
+│                        Kubernetes cluster                        │
+│                                                                  │
+│  Caller workload          Sigillum (one image, three modes)      │
+│  ┌─────────────┐          ┌──────────────────────────────────┐   │
+│  │  App pod    │  HTTP(S) │ api-server   (--mode=api, N)     │   │
+│  │             │ ────────▶│  REST handler ─┐                 │   │
+│  │             │  Bearer  └────────────────┼─────────────────┘   │
+│  │             │          ┌────────────────┼─────────────────┐   │
+│  │             │  SMTP    │ smtp-proxy   (--mode=smtp, N,    │   │
+│  │             │ ────────▶│  optional)     │                 │   │
+│  └─────────────┘  587     │  SMTP handler ─┤                 │   │
+│                           └────────────────┼─────────────────┘   │
+│                                            ▼                     │
+│                      shared gateway pipeline (in each process):  │
+│                      auth ▸ policy ▸ backend ▸ rate limit ▸ send │
+│                                            │                     │
+│  ┌──────────────────────────────┐          │                     │
+│  │ controller (--mode=controller│          │                     │
+│  │  leader-elected)             │          │                     │
+│  │  CRD reconcilers             │          │                     │
+│  │  validating webhook          │          │                     │
+│  │  backend probes              │          │                     │
+│  └──────────────┬───────────────┘          │                     │
+│                 ▼                          ▼                     │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │ Kubernetes API (CRDs, Secrets, ServiceAccounts, Pods,      │  │
+│  │                 TokenReview)                               │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                            │                     │
+│  ┌────────────────────────────┐            │                     │
+│  │ Rate-limit store           │◀───────────┤                     │
+│  │ (in-process or Redis)      │            │                     │
+│  └────────────────────────────┘            │                     │
+└────────────────────────────────────────────┼─────────────────────┘
+                                             ▼
+                               Backend (SMTP relay; future: Graph,
+                                        SendGrid, Gmail)
 ```
 
-### 4.2 Logische Komponenten
+### 4.2 Logical components
 
-| Komponente | Verantwortung | Deployment |
+| Component | Responsibility | Deployment |
 |---|---|---|
-| **api-server** | REST- und SMTP-Endpoints, Auth, Policy-Evaluation, Upstream-Send | Deployment, horizontal skalierbar |
-| **controller** | Reconciliation von `MailBackend`/`ClusterMailBackend` und `MailPolicy`, Status-Updates, ValidatingWebhook, periodische Backend-Probes | Deployment mit Leader-Election, 1–3 Replicas |
-| **rate-limit-backend** | State für Sliding-Window-Counter | Deployment (Redis) **oder** In-Memory (Single-Replica-Modus) |
+| **api-server** (`--mode=api`) | REST endpoint, token auth, gateway pipeline, upstream send | Deployment, horizontally scalable (chart default 2) |
+| **smtp-proxy** (`--mode=smtp`) | SMTP submission endpoint, OAUTHBEARER / pod-IP auth, gateway pipeline, raw relay | Optional Deployment, horizontally scalable (chart default 2 when enabled) |
+| **controller** (`--mode=controller`) | Reconciles `MailBackend` / `ClusterMailBackend` / `MailPolicy`, status updates, validating webhook, periodic backend probes | Deployment with leader election (chart default 1) |
+| **rate-limit store** | State for sliding-window counters | In-process memory (per replica) **or** external Redis (single node, Sentinel or Cluster) |
 
-**Hinweis:** `api-server` und `controller` können als ein Binary ausgeliefert werden mit unterschiedlichen Startmodi (`--mode=api`, `--mode=controller`). Reduziert Artifact-Management.
+All three modes ship as one binary and one container image. The **gateway pipeline** (`internal/gateway`) is transport-agnostic: REST and SMTP only parse their wire format and map the pipeline result to their status codes, so policy, rate limiting, audit, metrics and tracing behave identically on both paths.
 
-### 4.3 Custom Resource Definitionen
+### 4.3 Custom resource definitions
+
+API group and version: `sigillum.dev/v1alpha1`. Short names: `mb`, `cmb`, `mp`; category `sigillum`.
 
 #### 4.3.1 MailBackend / ClusterMailBackend
 
-`MailBackend` (namespace-scoped) und `ClusterMailBackend` (cluster-scoped) repräsentieren ein konkretes Mail-System, an das Sigillum Nachrichten weiterleitet (Send) und aus dem es perspektivisch Nachrichten liest (Read, future). Das Pattern folgt cert-manager mit `Issuer`/`ClusterIssuer`.
+`MailBackend` (namespace-scoped) and `ClusterMailBackend` (cluster-scoped) represent a concrete mail system that Sigillum forwards messages to (send) and, in future, reads from. The pattern follows cert-manager's `Issuer` / `ClusterIssuer`:
 
-Die Trennung:
-- **`ClusterMailBackend`:** Zentraler, von der Plattform bereitgestellter Backend (z. B. Corporate-SMTP). Referenzierbar aus allen Namespaces.
-- **`MailBackend`:** Team-eigener Backend im Namespace des Teams (z. B. eigener SendGrid-Account). Referenziert Secrets im gleichen Namespace.
+- **`ClusterMailBackend`:** central backend provided by the platform (for example the corporate relay), referenceable from every namespace. `credentialsRef.namespace` is required.
+- **`MailBackend`:** team-owned backend in the team's namespace, referenceable only from policies in that namespace. `credentialsRef` must stay in the backend's own namespace.
 
-Die Spec ist eine **diskriminierte Union**: `spec.type` bestimmt, welches Backend-spezifische Feld ausgewertet wird. In v1 wird nur `type: smtp` implementiert; die restlichen Typen sind architektonisch vorgesehen, werden aber in späteren Phasen geliefert.
+In both cases Sigillum components can only read the Secret if its namespace is the release namespace or listed in `rbac.allowedSecretNamespaces` (§4.10).
+
+The spec is a **discriminated union**: `spec.type` selects which backend-specific block is read. Only `type: smtp` is implemented.
 
 ```yaml
 apiVersion: sigillum.dev/v1alpha1
@@ -440,39 +610,52 @@ metadata:
 spec:
   type: smtp                     # enum: smtp | microsoftGraph | sendgrid | gmail
   smtp:
-    endpoints:                   # geordnete Failover-Liste; erste Ready wird verwendet
+    endpoints:                   # ordered failover list; first Ready one is used
       - host: smtp-primary.internal.example.com
         port: 587
-        tls: starttls
+        tls: starttls            # none | starttls (default) | tls
       - host: smtp-fallback.internal.example.com
         port: 587
         tls: starttls
-    authType: PLAIN              # gilt für alle endpoints
-    credentialsRef:              # gilt für alle endpoints
+    authType: PLAIN              # NONE (default) | PLAIN | LOGIN | CRAM-MD5; applies to all endpoints
+    credentialsRef:              # required unless authType is NONE; applies to all endpoints
       name: corporate-smtp-credentials
       namespace: sigillum-system
-    connectionTimeoutSeconds: 10
+    connectionTimeoutSeconds: 10 # 1–120, default 10
+    heloDomain: sigillum         # optional, default "sigillum"
   healthCheck:
-    enabled: true
-    intervalSeconds: 60
+    enabled: true                # default true; false = assume Ready without probing
+    intervalSeconds: 60          # minimum 10, default 60
 status:
-  capabilities:                  # vom Driver zur Laufzeit deklariert
+  capabilities:                  # declared by the driver at probe time
     - send
-  endpointStatus:                # pro Endpoint Ready/NotReady
+  endpointStatus:                # per endpoint, in spec order
     - host: smtp-primary.internal.example.com
+      port: 587
       ready: true
     - host: smtp-fallback.internal.example.com
+      port: 587
       ready: true
   conditions:
-    - type: Ready                # True wenn mind. 1 Endpoint Ready
+    - type: Ready                # True if at least one endpoint is Ready
       status: "True"
-      reason: AtLeastOneEndpointReady
+      reason: AtLeastOneEndpointReady   # or AllEndpointsDown, ProbeError, InvalidConfiguration, Ready
   lastProbeTime: "2026-04-18T09:05:00Z"
+  observedGeneration: 1
 ```
 
-Auch wenn v1 zunächst nur einen Endpoint pro Backend praktisch nutzen muss, ist die Listen-Struktur von Anfang an vorgesehen, damit Failover-Szenarien (z. B. Corporate-SMTP + externes Relay als Fallback) und gemischte Read/Write-Endpoints (IMAP auf einem Host, SMTP auf einem anderen) später ohne Schema-Bruch unterstützt werden können.
+`endpoints[].insecureSkipVerify` exists in the schema but the webhook rejects `true`.
 
-Secret-Struktur pro Backend-Typ wird in der Implementierungs-Dokumentation standardisiert (z. B. SMTP: Keys `username` / `password`; Graph: Key `client_secret`; SendGrid: Key `api_key`; Gmail: Key `service_account.json`).
+With `healthCheck.enabled: false` the backend is reported Ready without probing, and `status.capabilities` stays empty.
+
+**Secret layout per backend type** (keys in the referenced Secret):
+
+| Type | Keys |
+|---|---|
+| `smtp` | `username`, `password` |
+| `microsoftGraph` [future] | `client_secret` (plus tenant / client ID in the spec) |
+| `sendgrid` [future] | `api_key` |
+| `gmail` [future] | `service_account.json` |
 
 #### 4.3.2 MailPolicy (namespace-scoped)
 
@@ -483,8 +666,8 @@ metadata:
   name: billing-service-policy
   namespace: billing
 spec:
-  priority: 100              # höher = spezifischer; Tie-Break: Name alphabetisch
-  subjects:
+  priority: 100              # higher wins; tie-break: name, alphabetically (default 0)
+  subjects:                  # at least one; each entry has exactly one matcher
     - serviceAccount:
         name: billing-mailer
     - serviceAccountSelector:
@@ -492,34 +675,42 @@ spec:
           app.kubernetes.io/component: notifier
   backendRef:
     name: corporate-smtp
-    kind: ClusterMailBackend   # oder MailBackend (namespace-scoped)
-  senderRestrictions:
+    kind: ClusterMailBackend # or MailBackend (same namespace); default ClusterMailBackend
+  senderRestrictions:        # omitted = any sender; present with empty list = no sender
     allowedSenders:
       - billing@example.com
       - "*@billing.noreply.example.com"
-  recipientRestrictions:
+  recipientRestrictions:     # omitted = any recipient; domain-wide
     allowedDomains:
       - example.com
       - customer.example.com
-    blockedDomains: []
-  rateLimits:
+    blockedDomains: []       # wins over allowedDomains
+  rateLimits:                # counted per policy, sliding window
     messagesPerMinute: 60
     messagesPerHour: 1000
   messageLimits:
-    maxSizeBytes: 10485760   # 10 MiB
-    maxRecipients: 50
+    maxSizeBytes: 10485760   # 10 MiB (default)
+    maxRecipients: 50        # default 50; counts to + cc + bcc (REST) or RCPT TO (SMTP)
   legacyAuth:
-    podIPFallback: false     # optional; wenn true, ist Pod-IP-Auth als Fallback zulässig
+    podIPFallback: false     # true = SMTP pod-IP callers may match this policy
 status:
   conditions:
-    - type: Ready
+    - type: Ready            # False if the backend is missing / not Ready / misconfigured
       status: "True"
-  matchedSubjects: 2
+      reason: Ready
+    - type: UsingLegacyAuth  # True when legacyAuth.podIPFallback is set
+      status: "False"
+      reason: Disabled
+  observedGeneration: 1
 ```
 
-#### 4.3.3 (Optional, v1) MailQuota (namespace-scoped)
+Webhook validation (in addition to the schema): at least one subject; exactly one matcher per subject; `serviceAccount.name` set; selectors non-empty and valid; `backendRef.name` set and `kind` known; no empty `allowedSenders` entries; recipient domains are bare domains.
 
-Namespace-weites Kontingent, unabhängig von einzelnen Policies:
+`status.matchedSubjects` exists in the schema but is never populated **[gap G-4]**. Its intended meaning (number of ServiceAccounts in the namespace the policy currently matches) needs a decision before it is implemented or removed.
+
+#### 4.3.3 MailQuota (namespace-scoped) **[backlog]**
+
+Namespace-wide quota, independent of individual policies. The per-policy daily limit (US-2.7) covers most needs; this resource is added only if users need one cap across all policies of a namespace:
 
 ```yaml
 apiVersion: sigillum.dev/v1alpha1
@@ -531,18 +722,75 @@ spec:
   messagesPerDay: 10000
 ```
 
-### 4.4 REST-API-Spezifikation (v1)
+#### 4.3.4 MailCredential (namespace-scoped) **[planned v0.3.0]**
 
-**Base-Path:** `/v1`
-**Content-Type:** `application/json`
-**Auth:** `Authorization: Bearer <ServiceAccount-Token>` mit Audience `sigillum`
+A Sigillum-issued SMTP credential for clients that only support `AUTH PLAIN` / `LOGIN` (US-3.7).
 
-#### 4.4.1 POST /v1/messages
+Generated mode (default):
+
+```yaml
+apiVersion: sigillum.dev/v1alpha1
+kind: MailCredential
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  serviceAccountName: grafana     # identity the credential authenticates as (same namespace)
+  secretName: grafana-smtp        # created and owned by the controller
+  rotation:
+    interval: 90d                 # optional; unset = rotate only on demand
+    gracePeriod: 24h              # previous password stays valid this long (default 24h)
+status:
+  username: grafana.monitoring    # <name>.<namespace>, unique cluster-wide
+  current:
+    hash: "sha256:…"              # of a 256-bit random password; never the plaintext
+    createdAt: "2026-10-01T08:00:00Z"
+  previous:                       # present only during a rotation's grace period
+    hash: "sha256:…"
+    validUntil: "2026-10-02T08:00:00Z"
+  conditions:
+    - type: Ready                 # False: ServiceAccount missing, namespace excluded,
+      status: "True"              #        SecretConflict, guard missing, …
+```
+
+The generated Secret:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-smtp
+  namespace: monitoring
+  labels: { sigillum.dev/credential: grafana }
+  ownerReferences: [{ kind: MailCredential, name: grafana, controller: true, … }]
+type: Opaque
+stringData:
+  username: grafana.monitoring
+  password: <256-bit random, base64url>
+  host: sigillum-smtp.sigillum-system.svc
+  port: "587"
+```
+
+Bring-your-own-hash mode: set `spec.passwordHash` (argon2id, PHC string format) instead of `spec.secretName` and `spec.rotation`. The webhook rejects specs that set both, plaintext-looking values, and unknown hash formats. User-chosen passwords may be weak, so this mode uses a deliberately slow hash; generated passwords are high-entropy, so a fast hash is safe and keeps authentication cheap.
+
+Controller behavior in generated mode:
+- The Secret is written with server-side apply. If a Secret of that name exists and is not owned by this `MailCredential`, the controller does not touch it (`Ready=False`, reason `SecretConflict`).
+- The controller cannot read Secrets (§4.10), so it neither notices nor restores a deleted Secret. A rotation (`sigillum.dev/rotate`) recreates it with a new password. The app's failing logins show up in the audit stream and the auth-failure metric.
+- A `MailCredential` in an excluded namespace is rejected by the webhook, and ignored by the controller if it exists anyway.
+
+### 4.4 REST API### 4.4 REST API (v1)
+
+**Base path:** `/v1`
+**Content type:** `application/json`, or `multipart/form-data` for attachments (US-1.3)
+**Auth:** `Authorization: Bearer <ServiceAccount token>` with audience `sigillum`
+**Transport:** plain HTTP on port 8443 by default, expecting TLS from the mesh or a gateway. Native TLS when `SIGILLUM_TLS_CERT` / `SIGILLUM_TLS_KEY` are set (chart `api.tls.secretName`).
+
+#### 4.4.1 POST /v1/messages **[v0.1.0]**
 
 Request:
 ```json
 {
-  "from": "billing@example.com",
+  "from": "Billing <billing@example.com>",
   "to": ["customer@example.com"],
   "cc": [],
   "bcc": [],
@@ -555,339 +803,608 @@ Request:
     {
       "filename": "invoice.pdf",
       "contentType": "application/pdf",
+      "disposition": "attachment",
       "contentBase64": "JVBERi0xLjQK..."
     }
   ],
   "headers": {
-    "X-Correlation-ID": "abc-123"
+    "X-Correlation-ID": "abc-123",
+    "Reply-To": "support@example.com"
   }
 }
 ```
 
+Rules:
+- At least one recipient across `to`, `cc`, `bcc`.
+- Addresses are RFC 5322 (display names allowed, subject to US-2.3); local parts follow US-2.4.
+- `disposition` is `attachment` (default) or `inline`.
+- `headers`:
+  - Keys and values must not contain CR, LF or NUL; values are at most 998 characters; each header at most once (case-insensitive).
+  - `Resent-*` headers are rejected.
+  - `From`, `To`, `Cc`, `Bcc`, `Subject`, `Date`, `Message-ID`, `MIME-Version`, `Content-Type` and `Content-Transfer-Encoding` are managed by Sigillum; values supplied here are **silently dropped**.
+  - `Sender` and `Reply-To` are allowed and checked against the policy (US-2.3, US-2.4).
+- Hard request ceiling: 32 MiB, independent of policy (`413`).
+
 Response `202 Accepted`:
 ```json
 {
-  "messageId": "8f2e...",
+  "messageId": "8f2e0c1a-…",
   "policyMatched": "billing-service-policy",
   "acceptedAt": "2026-04-18T09:10:00Z"
 }
 ```
 
-Error-Responses folgen RFC 7807:
+`messageId` also appears in the audit record and as the local part of the RFC 5322 `Message-ID` (`<messageId@sigillum.local>`).
+
+Error responses follow RFC 7807, with the Sigillum extension members `policy` and `messageId`:
 ```json
 {
   "type": "https://sigillum.dev/errors/sender-not-allowed",
   "title": "Sender address not allowed by policy",
   "status": 403,
-  "detail": "Sender 'evil@example.com' not in allowedSenders of policy 'billing-service-policy'",
+  "detail": "sender 'evil@example.com' not in allowedSenders",
   "policy": "billing-service-policy",
-  "messageId": "8f2e..."
+  "messageId": "8f2e0c1a-…"
 }
 ```
 
-#### 4.4.2 GET /v1/policies/preflight
+#### 4.4.2 POST /v1/policies/preflight **[planned v0.4.0]**
 
-Ermöglicht Dry-Run-Validierung, bevor eine Mail tatsächlich gesendet wird:
-- Request: identisch zu `/v1/messages`
-- Response: würde-akzeptiert/würde-abgelehnt mit Begründung, ohne Upstream-Aufruf
-- Nutzen: Debug-Tool für Entwickler
+Dry run before sending:
+- Request: identical to `POST /v1/messages`. (`POST`, not `GET`: the request carries a body.)
+- Response: would-accept / would-reject with the matched policy and reason. No upstream call and no rate-limit charge.
+- Purpose: debugging tool for developers and policy authors.
 
-### 4.5 Backend-Driver und Capability-Modell
+#### 4.4.3 Status codes
 
-**Driver-Interface.** Intern implementiert Sigillum jedes Backend als Driver, der ein gemeinsames Go-Interface erfüllt. Das Interface ist von Anfang an für Send *und* Read ausgelegt, auch wenn v1 nur Send nutzt:
+The problem `type` is `https://sigillum.dev/errors/<slug>`. The audit / metric `reason` uses the same word in snake_case.
+
+| Status | Problem slug | Meaning | Retry? |
+|---|---|---|---|
+| `202` | — | Accepted by the backend | — |
+| `400` | `invalid-payload` | Malformed JSON / multipart, invalid address or header, no recipient | No, fix the request |
+| `401` | `invalid-token` | Missing, invalid, expired or wrong-audience token | No, fix the token |
+| `403` | `no-policy-matched` | No policy matches the caller | No |
+| `403` | `sender-not-allowed` | US-2.3 | No |
+| `403` | `recipient-not-allowed` | US-2.4 (recipients or `Reply-To`) | No |
+| `403` | `too-many-recipients` | Over `maxRecipients` | No |
+| `413` | `message-too-large` | Over `maxSizeBytes` or the 32 MiB ceiling | No |
+| `429` | `rate-limited` | US-2.2; `Retry-After` header | Yes, after `Retry-After` |
+| `502` | `upstream-error` | Upstream relay failed | Transient: yes. Permanent rejection: no. Not distinguishable in the response yet **[gap G-1]** |
+| `503` | `backend-not-ready` | Backend missing, not Ready, or its config could not be resolved | Yes, with backoff |
+| `503` | `unavailable` | Redis rate-limit store unreachable (fail closed); `Retry-After: 5` | Yes |
+| `503` | `shutting-down` | Replica is draining | Yes, immediately |
+| `501` | `not-implemented` | Reserved for operations the backend's capabilities do not cover [future] | No |
+
+#### 4.4.4 Size accounting
+
+`maxSizeBytes` measures content **without transfer-encoding overhead**: an 8 MiB attachment counts as 8 MiB, not as its ~11 MiB Base64 form.
+
+- **REST:** subject + custom header keys and values + `body.text` + `body.html` + decoded attachments.
+- **SMTP:** the relayed message with Base64 / quoted-printable parts counted at their decoded size. Headers and MIME framing are included.
+
+#### 4.4.5 GET /v1/capabilities **[future]**
+
+Returns the capabilities available to the authenticated caller, computed from the matching policies and their backends. Not scheduled; see §4.5.
+
+### 4.5 Backend drivers and capability model
+
+**Driver interface.** Each backend is a driver implementing a common Go interface (`internal/driver`). It stays send-only until the first read-capable driver exists; read operations will be added then, without changing existing methods.
 
 ```go
 type Driver interface {
-    // Metadaten
-    Type() BackendType               // smtp | microsoftGraph | ...
-    Capabilities() []Capability      // send, read, subscribeEvents, folders, ...
-    HealthCheck(ctx context.Context) error
+    Type() Type                      // smtp | microsoftGraph | ...
+    Capabilities() []Capability      // send, read, subscribeEvents, folders
 
-    // Send-Pfad (v1)
+    // HealthCheck probes every configured endpoint; results are written
+    // to status.endpointStatus.
+    HealthCheck(ctx context.Context) []EndpointHealth
+
+    // Send delivers msg via the first Ready endpoint. Errors wrap
+    // ErrNoReadyEndpoint, ErrUpstreamTransient or ErrUpstreamPermanent.
     Send(ctx context.Context, msg *Message) (*SendResult, error)
 
-    // Read-Pfad (future, optional je nach Capability)
-    // Read(ctx context.Context, req *ReadRequest) (*ReadResult, error)
-    // Subscribe(ctx context.Context, req *SubscribeRequest) (<-chan *Event, error)
+    io.Closer
 }
+
+// Optional: drivers that can relay an assembled RFC 5322 message unchanged.
+// The SMTP proxy requires it so legacy clients' MIME structure, headers and
+// signatures survive untouched.
+type RawSender interface {
+    SendRaw(ctx context.Context, envelopeFrom string, recipients []string, raw []byte) (*SendResult, error)
+}
+
+// future, when a read-capable driver lands (as methods or optional interfaces):
+// Read(ctx, *ReadRequest) (*ReadResult, error)
+// Subscribe(ctx, *SubscribeRequest) (<-chan *Event, error)
 ```
 
-Neue Backend-Typen werden durch neue Driver-Implementierungen hinzugefügt. v1 liefert ausschließlich einen SMTP-Driver, aber das Interface und die Registry sind so geschnitten, dass Graph-/SendGrid-/Gmail-Driver ohne API-Group-Migration eingehängt werden können.
+Drivers register a factory per type in a process-wide registry. The webhook rejects backend types without a registered factory. The SMTP driver supports STARTTLS and implicit TLS, `PLAIN` / `LOGIN` / `CRAM-MD5`, and MIME multipart assembly.
 
-**Capability-Matrix** (Zielbild, v1 nur erste Zeile umgesetzt):
+**Capability matrix** (target picture; only the `smtp` row is implemented):
 
-| Backend-Typ       | send | read | subscribeEvents  | folders |
-|-------------------|------|------|------------------|---------|
-| `smtp`            |  ✓   |  ✗   |  ✗               |  ✗      |
-| `microsoftGraph`  |  ✓   |  ✓   |  ✓               |  ✓      |
-| `gmail`           |  ✓   |  ✓   |  ✓ (via Pub/Sub) |  ✓      |
-| `sendgrid`        |  ✓   |  ✗   |  ✓ (Bounce-Webhook) |  ✗   |
-| `imap` (future)   |  ✗   |  ✓   |  ✓ (IDLE)        |  ✓      |
+| Backend type | send | read | subscribeEvents | folders |
+|---|---|---|---|---|
+| `smtp` | ✓ | ✗ | ✗ | ✗ |
+| `microsoftGraph` | ✓ | ✓ | ✓ | ✓ |
+| `gmail` | ✓ | ✓ | ✓ (via Pub/Sub) | ✓ |
+| `sendgrid` | ✓ | ✗ | ✓ (bounce webhook) | ✗ |
+| `imap` (future) | ✗ | ✓ | ✓ (IDLE) | ✓ |
 
-**Capability-Propagation:**
-- Der Driver meldet seine Capabilities an den Controller, der sie in `Backend.status.capabilities` schreibt.
-- Die REST-API exponiert unter `GET /v1/capabilities` die für den authentifizierten Caller verfügbaren Capabilities (berechnet aus den matchenden Policies und deren referenzierten Backends).
-- Requests gegen nicht-unterstützte Capabilities werden mit `501 Not Implemented` und klarer Fehlerreferenz abgelehnt.
+**Capability propagation:**
+- The controller writes the driver's capabilities into `status.capabilities` on each probe.
+- The gateway must refuse an operation the backend does not advertise **[gap G-2]**; once non-send operations exist, those requests return `501 not-implemented`.
+- `GET /v1/capabilities` (§4.4.5) will expose capabilities up front **[future]**.
 
-### 4.6 SMTP-Proxy-Verhalten
+### 4.6 SMTP proxy behavior **[v0.2.0]**
 
-- Listener auf TCP 587 (Submission).
-- Keine SMTP-AUTH-Mechanismen ausgehandelt (analog kube-mail); Identifikation per Pod-IP → Pod → ServiceAccount.
-- Pod-Lookup via Kubernetes API (mit Cache).
-- Sonst identische Policy-Logik wie REST-Pfad.
-- STARTTLS optional; empfohlener Modus bei Mesh-Nutzung: ohne TLS (Mesh übernimmt).
+- Listens on container port 2587; the Service exposes 587 (submission).
+- **Authentication:** `AUTH OAUTHBEARER` (US-3.4) is offered whenever mode `oauthbearer` is enabled (default). `AUTH PLAIN` / `LOGIN` with a `MailCredential` (US-3.7) follows in v0.3.0 as mode `credential`, offered only after STARTTLS unless `allowInsecureAuth` is set. A client that sends `MAIL FROM` without authenticating is identified by pod IP only if mode `podip` is enabled (US-3.5); otherwise it gets `530 5.7.0 Authentication required`.
+- STARTTLS is offered when `smtp.tls.secretName` is set. AUTH on plaintext connections follows `smtp.allowInsecureAuth` (US-3.4).
+- **Envelope rules:** the null sender `<>` is refused (`550 5.7.1`). `MAIL FROM` and `RCPT TO` must be plain mailbox addresses (US-2.4 local-part rules); otherwise `553`.
+- **Message rules** (checked at the end of `DATA`): exactly one `From` field holding exactly one address; at most one `Sender` field (holding exactly one address) and at most one `Reply-To` field; no `Resent-*` fields; display names per US-2.3. Violations answer `550 5.6.0`.
+- **Policy input:** header `From`, envelope sender and `Sender` against `allowedSenders`; the envelope recipients (`RCPT TO`, not the `To`/`Cc` headers) and `Reply-To` against `recipientRestrictions`.
+- **Relay:** the message is relayed byte-for-byte via the driver's `RawSender`, with a prepended `Received` header carrying the Sigillum message ID and auth method. `Bcc:` header fields are removed before relaying.
+- **Limits:** `--max-message-bytes` (default 32 MiB) and `--max-recipients` (default 100) are hard ceilings; policies enforce lower limits. `--max-concurrent-messages` (default 4) bounds memory use per pod; excess messages wait up to `--send-timeout` and then get `451 4.3.2`.
+- Pod lookup for `podip` uses an informer cache of pods.
+- Otherwise the same gateway pipeline as REST (§4.2).
 
-### 4.7 State-Management
+**SMTP reply codes:**
 
-- **Stateless Core:** api-server hält keinen persistenten Zustand.
-- **Rate-Limit-State:** Pluggable Backend — Redis für HA, In-Memory nur für Single-Replica-Dev.
-- **Cache:** K8s-Informer-Caches (controller-runtime Standard) für CRDs, Secrets, Pods.
-- **Kein Mail-Queue:** Bei Upstream-Fehler wird `502` zurückgegeben; Retry-Verantwortung liegt beim Caller. (Retry-Queue ist optional für v2.)
+| Situation | Reply |
+|---|---|
+| Accepted | `250` |
+| AUTH failed | `535 5.7.8` |
+| Not authenticated, no pod-IP identity | `530 5.7.0` |
+| Malformed sender / recipient path | `553 5.1.7` / `553 5.1.3` |
+| Null sender, policy denial (no policy, sender, recipient) | `550 5.7.1` |
+| Too many recipients for policy | `550 5.5.3` |
+| Over policy size | `552 5.3.4` |
+| Malformed message | `550 5.6.0` |
+| Rate limited | `421 4.7.0` (see Q-7) |
+| Upstream transient / backend not ready / limiter down / busy | `451` |
+| Upstream permanent rejection | `554 5.0.0` |
 
-### 4.8 Auth-Flow (REST)
+Each reply after `DATA` carries the Sigillum message ID for correlation with the audit log.
+
+### 4.7 State management
+
+- **Stateless core:** api-server and SMTP proxy keep no persistent state.
+- **Rate-limit state:** pluggable (`--ratelimit-backend`, chart `rateLimit.backend`):
+  - `memory` (chart default): per-process sliding window. Correct only with one replica per mode; with N replicas the effective limit is up to N times the configured one.
+  - `redis`: one shared sliding window. Single node, Sentinel (`masterName`) or Cluster (several addresses), optional TLS and password Secret. When Redis is unreachable, requests fail closed with `503 unavailable` unless `rateLimit.failOpen=true`.
+- **Caches:** controller-runtime informer caches for Sigillum CRs, ServiceAccounts, Secrets (allowed namespaces only) and, with `podip`, Pods. TokenReview results are cached in an LRU (§5.3).
+- **No mail queue:** on upstream failure the caller gets `502` / `451` and owns the retry. A retry queue is open question Q-3.
+
+### 4.8 Audit record format **[v0.2.0]**
+
+One JSON object per line. Field names are a public contract; SIEM pipelines key on them, so they change only with a version bump.
+
+| Field | Type | Content |
+|---|---|---|
+| `stream` | string | Always `"audit"` |
+| `timestamp` | string | RFC 3339, UTC |
+| `message_id` | string | Sigillum message ID (also for rejected requests) |
+| `namespace` | string | Caller namespace (omitted if unauthenticated) |
+| `service_account` | string | Caller ServiceAccount (omitted if unauthenticated) |
+| `auth_method` | string | `oauth_bearer` or `pod_ip_legacy`; `smtp_credential` from v0.3.0 (omitted if unknown) |
+| `cluster` | string | Cluster name from `--cluster-name` (from v0.3.0; omitted if unset) |
+| `transport` | string | `rest` or `smtp` |
+| `from` | string | Header `From` address (raw value if it failed to parse) |
+| `to` | string[] | All recipients, including Bcc / envelope recipients; `[]` if none known |
+| `policy` | string | Matched policy (omitted if none) |
+| `backend` | string | `<ns>/<name>` for `MailBackend`, `/<name>` for `ClusterMailBackend` |
+| `decision` | string | `accept` or `reject` |
+| `reason` | string | Rejection reason (omitted on accept), see below |
+
+Rejection reasons: `missing_token`, `invalid_token`, `auth_required`, `pod_ip_unresolved`, `shutting_down`, `busy`, `null_sender`, `invalid_payload`, `message_too_large`, `no_policy_matched`, `sender_not_allowed`, `recipient_not_allowed`, `too_many_recipients`, `backend_not_ready`, `rate_limited`, `ratelimit_unavailable`, `upstream_error`.
+
+The record never contains subject, body, attachment content, header values other than addresses, or tokens.
+
+### 4.9 Trust model and policy governance
+
+- **Sigillum enforces, the platform governs.** A `MailPolicy` is the authorization grant: whoever can write one in a namespace can let that namespace's ServiceAccounts send through any backend they may reference, under any sender they list. Sigillum does not second-guess policy content.
+- **Who may author policies is the platform team's decision**, expressed with standard tools:
+  - **RBAC.** The chart's aggregated roles (US-3.6) delegate `MailPolicy` authoring to every `edit` holder by default. Platforms that keep authoring central set `rbac.aggregateClusterRoles: false` and bind a dedicated role to the platform or security team, or to selected namespace owners.
+  - **Admission policy** (Kyverno, OPA Gatekeeper, `ValidatingAdmissionPolicy`) for content guardrails (tested recipes: US-5.7), for example: only certain namespaces may reference a given `ClusterMailBackend`; `allowedSenders` must stay within a team's domain; `legacyAuth.podIPFallback` is forbidden; `senderRestrictions` is mandatory in production namespaces.
+- **Backends.** `ClusterMailBackend` is platform-owned (`admin` only by default). Any namespace whose policy authors can write a `MailPolicy` may reference it. A native restriction on the backend (namespace selector, similar to Gateway API `allowedRoutes`) is not planned; the admission recipe in US-5.7 covers it (Q-8).
+- **Credentials** never leave the Sigillum components. Callers authenticate with their own identity and never see relay credentials.
+
+### 4.10 Component permissions
+
+| Component | Kubernetes permissions |
+|---|---|
+| api-server | read Sigillum CRs and ServiceAccounts (cluster-wide); read Secrets in the release namespace and `rbac.allowedSecretNamespaces`; create `TokenReview` |
+| smtp-proxy | as api-server; plus `list`/`watch` Pods cluster-wide when `podip` is enabled. Reads `MailCredential` objects for mode `credential`, never the credential Secrets. |
+| controller | read/watch Sigillum CRs, update their status; read Secrets as above; leader-election leases; create events; serves the webhook. With generated credentials (v0.3.0): `create` and `patch` on Secrets cluster-wide, **without** `get`, `list` or `watch`, restricted by the credential guard below. |
+
+The api-server and SMTP proxy read backend credentials themselves on the send path, so a `MailBackend` in a team namespace works only if that namespace is listed in `rbac.allowedSecretNamespaces`.
+
+**Credential Secret guard [planned v0.3.0].** Generated credentials (US-3.7) are available in all namespaces by default, so the controller needs to write Secrets anywhere. RBAC cannot narrow `create` by name or label, so the chart ships a `ValidatingAdmissionPolicy` and binding that apply to requests from the controller's ServiceAccount only:
+
+- The Secret must carry the label `sigillum.dev/credential` and an owner reference to a `MailCredential`, both in the new object and (on update) in the existing one. The controller therefore cannot modify or take over any other Secret, such as TLS certificates or database passwords.
+- The namespace must not match `credentials.excludeNamespaces`, and must not be the release namespace (which holds the relay credentials).
+- `DELETE` is not needed: owned Secrets are garbage-collected with their `MailCredential`.
+
+Without `get`, `list` or `watch`, the controller cannot read any Secret outside the backend-credential namespaces it already had. Worst case, a compromised controller can overwrite or create mail-credential Secrets; it cannot read or change anything else.
+
+The guard is mandatory for generated mode:
+- The chart only renders the controller's Secret-write permission when the cluster serves `admissionregistration.k8s.io/v1` `ValidatingAdmissionPolicy` (Kubernetes ≥ 1.30), and always renders it together with the guard.
+- At startup the controller checks that the guard policy and binding exist and are unchanged. If not, it refuses to manage Secrets and reports it (condition on every generated `MailCredential`, log, metric). Bring-your-own-hash mode keeps working.
+
+Chart values (sketch):
+
+```yaml
+credentials:
+  enabled: true              # generated mode; false = bring-your-own-hash only
+  excludeNamespaces:         # exact names, or prefixes ending in "*"
+    - "kube-*"               # kube-system, kube-public, kube-node-lease, …
+  # The release namespace is always excluded. Add platform namespaces you
+  # never want to hold mail credentials, for example cert-manager or
+  # istio-system.
+```
+
+### 4.11 Request flow (REST)
 
 ```
-App-Pod → HTTPS POST /v1/messages, Bearer <token>
-         │
-         ▼
-api-server extrahiert Token
-         │
-         ▼
-TokenReview-Call an kube-apiserver (audience: Sigillum)
-         │
-         ▼
-Response: authenticated=true, username=system:serviceaccount:billing:billing-mailer
-         │
-         ▼
-Policy-Engine sucht MailPolicy im Namespace 'billing', die SA 'billing-mailer' matcht
-         │
-         ▼
-Rate-Limit-Check (Redis INCR + EXPIRE)
-         │
-         ▼
-Sender-/Recipient-/Size-Check
-         │
-         ▼
-Backend-Send (MailBackend/ClusterMailBackend + credentialsRef-Secret)
-         │
-         ▼
-202 Accepted
+App pod → POST /v1/messages, Authorization: Bearer <token>
+        │
+        ▼
+auth middleware ── TokenReview (audience sigillum, LRU cache) ── 401 on failure
+        │
+        ▼
+payload parsing ── JSON / multipart, addresses, headers, size ceiling ── 400 / 413
+        │
+        ▼
+policy.evaluate ── list MailPolicies in caller namespace, match subjects,
+        │          pick priority / name winner, check size, recipients count,
+        │          senders, recipients, Reply-To ── 403 / 413
+        ▼
+backend resolve ── backendRef → Ready backend → credentials Secret ── 503
+        │
+        ▼
+ratelimit.allow ── sliding window per policy (memory or Redis) ── 429 / 503
+        │
+        ▼
+backend.send ── driver.Send via first Ready endpoint ── 502 (refund if transient)
+        │
+        ▼
+202 Accepted  (+ one audit record, log line and metrics for every outcome)
 ```
+
+The SMTP path is identical from `policy.evaluate` on; authentication happens at `AUTH` (or `MAIL FROM` for pod-IP) and payload parsing at the end of `DATA`.
 
 ---
 
-## 5. Nicht-funktionale Anforderungen
+## 5. Non-functional requirements
 
 ### 5.1 Performance
 
-| Metrik | Zielwert |
+| Metric | Target |
 |---|---|
-| REST-Latenz p50 (ohne Upstream-Send) | < 30 ms |
-| REST-Latenz p99 (ohne Upstream-Send) | < 150 ms |
-| Durchsatz pro Pod (CPU-Request 500m) | ≥ 200 Mails/s |
-| TokenReview-Cache-Hit-Rate | ≥ 95 % (TTL: 5 min) |
+| REST latency p50 (excluding upstream send) | < 30 ms |
+| REST latency p99 (excluding upstream send) | < 150 ms |
+| Throughput per pod (CPU request 500m) | ≥ 200 messages/s |
+| TokenReview cache hit rate | ≥ 95 % |
 
-### 5.2 Verfügbarkeit
+These targets are not yet verified by a benchmark in CI.
 
-- **SLO:** 99.9 % Verfügbarkeit der REST-API.
-- **Redundanz:** Mindestens 2 api-server-Replicas in Produktion; PDB `minAvailable: 1`.
-- **Topologie:** TopologySpreadConstraints über Zonen, falls Cluster multi-zone.
+### 5.2 Availability
 
-### 5.3 Sicherheit
+- **SLO:** 99.9 % availability of the REST API.
+- **Redundancy:** at least 2 api-server replicas in production (chart default), PDB `minAvailable: 1`, Redis rate-limit store (§4.7).
+- **Topology:** `topologySpreadConstraints` across zones for multi-zone clusters (chart value, empty by default).
 
-| Anforderung | Umsetzung |
+### 5.3 Security
+
+| Requirement | Implementation |
 |---|---|
-| TLS-Terminierung | Via Istio-mTLS oder Gateway-TLS vorgelagert; interne Kommunikation mTLS |
-| Secret-Handling | Upstream-Credentials ausschließlich als K8s-Secrets; niemals in CRs inline |
-| Secret-Namespace-Isolation | `credentialsRef` referenziert Secrets im Sigillum-System-Namespace |
-| Log-Hygiene | Keine Tokens, keine Passwörter, keine Mail-Bodies in Logs |
-| Token-Audience-Binding | `TokenReview` mit `audiences: [sigillum]` für REST, SMTP-SASL und (future) IMAP-SASL — einheitlich, um Token-Missbrauch zu verhindern |
-| Pod Security Standard | Kompatibel mit `restricted` |
-| SBOM / Signierung | SBOM (SPDX) im Release; Cosign-Signatur für Container-Images |
-| Dependency Scanning | Trivy/Grype in CI |
+| TLS | api-server: native TLS optional, otherwise mesh / gateway. SMTP: STARTTLS optional, otherwise mesh. Upstream: STARTTLS by default, certificate verification cannot be disabled. |
+| Secret handling | Upstream credentials only in Kubernetes Secrets, never inline in CRs |
+| Secret namespace isolation | `MailBackend`: own namespace only. `ClusterMailBackend`: explicit namespace. Readable only in the release namespace and `rbac.allowedSecretNamespaces`. |
+| Log hygiene | No tokens, passwords or mail content in logs or audit records |
+| Token audience binding | `TokenReview` with `audiences: [sigillum]` and verification of `status.audiences`, for REST, SMTP SASL and (future) IMAP SASL |
+| Token cache | Positive and negative results cached for `tokenCacheTTL` (default 5 min), keyed by SHA-256 of the token. **Revocation latency:** a token that expires or is invalidated (pod or ServiceAccount deleted) stays accepted until its cache entry expires, up to the TTL. The cache entry is not yet bounded by the token's own `exp` **[gap G-5]**. |
+| Header spoofing | `@` banned in display names; `Sender` / `Reply-To` checked; `Resent-*` and duplicate headers rejected; managed headers cannot be overridden (§4.4.1, §4.6) |
+| Address routing | `%`, `!` and quoted local parts rejected (US-2.4) |
+| Pod Security Standard | Compatible with `restricted` |
+| SBOM / signing | Releases after v0.2.1: image and chart signed keyless with cosign, SLSA build provenance via GitHub artifact attestations, SPDX SBOM and BuildKit provenance per platform; base images pinned by digest, Actions by commit SHA (README, "Supply chain") |
+| Dependency scanning | CI: `govulncheck` (reachable vulnerabilities), dependency review on PRs (moderate and above), CodeQL for Go and workflows; Dependabot weekly updates with cooldown, security updates immediately |
 
-### 5.4 Skalierbarkeit
+### 5.4 Scalability
 
-- **Horizontal Scaling:** Stateless api-server skaliert via HPA (CPU- oder Request-Rate-basiert).
-- **Rate-Limit-Backend:** Redis-Cluster-Support oder einzelner Redis-Sentinel-Modus.
-- **Cluster-Größe:** Designziel bis 10.000 MailPolicies und 100 Backends (MailBackend + ClusterMailBackend) pro Cluster.
+- **Horizontal scaling:** stateless api-server and SMTP proxy scale via HPA (CPU or request rate).
+- **Rate-limit store:** Redis Cluster or Sentinel.
+- **Cluster size:** design target of 10,000 `MailPolicy` objects and 100 backends (`MailBackend` + `ClusterMailBackend`) per cluster. Policies are listed per request from the informer cache, filtered by namespace.
 
 ### 5.5 Observability
 
-- Metriken gemäß US-4.1.
-- Logs gemäß US-4.2 und US-4.3.
-- Traces gemäß US-4.4.
-- Dashboard-Templates (Grafana-JSON) im Helm-Chart beigelegt.
+- Metrics per US-4.1, logs per US-4.2 and US-4.3, traces per US-4.4.
+- Grafana dashboard and alert rules in the Helm chart (US-4.6) **[planned v0.4.0]**.
 
 ### 5.6 Compliance
 
-- **Audit-Log-Retention:** Sicherzustellen durch Log-Aggregation außerhalb Sigillum; eigenes Format ist fix dokumentiert.
-- **BSI-Relevanz:** Einsatz als Wirksamkeitsnachweis-Komponente für Zugriffssteuerung auf Mailversand (§31 BSIG) möglich.
-- **DSGVO:** Keine Persistierung personenbezogener Daten außerhalb transienter Audit-Logs.
+- **Audit retention:** ensured by log aggregation outside Sigillum; the record format is fixed (§4.8).
+- **BSI:** usable as evidence component for access control on mail sending (§31 BSIG).
+- **GDPR:** no persistence of personal data beyond the transient audit and operational logs, which contain addresses.
 
-### 5.7 Betreibbarkeit
+### 5.7 Operability
 
-- Installation per Helm unter 5 Minuten.
-- Konfiguration vollständig GitOps-fähig.
-- Rolling-Upgrade ohne Mail-Verlust durch Graceful Shutdown (US-5.3).
-- Dokumentierte Runbooks für: Upstream-Ausfall, Rate-Limit-Backend-Ausfall, CRD-Migration.
+- Installation via Helm in under 5 minutes.
+- Configuration fully GitOps-capable.
+- Rolling upgrades without mail loss via graceful shutdown (US-5.3; see gap G-3).
+- Runbooks for: upstream outage, rate-limit store outage, CRD upgrade / migration **[planned v0.4.0]**.
 
-### 5.8 Wartbarkeit
+### 5.8 Maintainability
 
-- Go-Codebase gemäß Kubernetes Code Conventions.
-- Unit-Test-Coverage ≥ 70 %.
-- E2E-Tests gegen Kind-Cluster (GitHub Actions).
-- Semver-Versionierung; API-Gruppe `sigillum.dev/v1alpha1` → `v1beta1` → `v1`.
+- Go codebase following Kubernetes code conventions.
+- Unit test coverage ≥ 70 %.
+- Envtest suite for reconcilers and webhooks; E2E smoke test against kind + Mailpit (`make e2e`).
+- Semantic versioning; API group `sigillum.dev` graduates `v1alpha1` → `v1beta1` → `v1`.
 
-### 5.9 Erweiterbarkeit
+### 5.9 Extensibility
 
-- **Backend-Driver-Interface** ist öffentliches, stabiles Go-Interface; neue Backends sind additiv ohne CRD-Schema-Bruch.
-- **API-Versionierung** erlaubt additive Endpoints (z. B. `/v1/mailboxes`) ohne Breaking Changes an bestehenden `/v1/messages`.
-- **Kein leakender Backend-Typ in der REST-API:** Das REST-Interface (`POST /v1/messages`) ist protokoll-agnostisch — Entwickler merken nicht, ob SMTP, Graph oder SendGrid hinten dran hängt, abgesehen von Backend-spezifischen Fehlersituationen.
-- **Protokoll-Adapter** (SMTP-Proxy, später IMAP-Proxy) sind separate, optional aktivierbare Komponenten.
-- **Capability-Advertising** vermeidet schweigende Funktionsverluste: Nicht unterstützte Operationen werden mit `501 Not Implemented` beantwortet und in `GET /v1/capabilities` vorab sichtbar gemacht.
+- **Driver interface** is an internal, stable Go interface; new backends are additive, without CRD schema breaks.
+- **API versioning** allows additive endpoints (for example `/v1/mailboxes`) without breaking `/v1/messages`.
+- **No backend type leaks into the REST API:** `POST /v1/messages` is protocol-agnostic. Developers cannot tell whether SMTP, Graph or SendGrid sits behind it, apart from backend-specific error details.
+- **Protocol adapters** (SMTP proxy, later IMAP proxy) are separate, optionally enabled deployments on the shared gateway pipeline.
+- **Capability advertising** avoids silent loss of function: unsupported operations answer `501` and will be visible up front via `GET /v1/capabilities` [future].
 
 ---
 
-## 6. Technologie-Entscheidungen
+## 6. Technology decisions
 
-| Bereich | Entscheidung | Begründung |
+| Area | Decision | Rationale |
 |---|---|---|
-| Sprache | Go 1.22+ | Ökosystem, kubebuilder, Performance |
-| Framework | controller-runtime / kubebuilder | De-facto-Standard für Operators |
-| REST-Framework | chi oder net/http mit Std-Lib | Schlank, low-dependency |
-| SMTP-Library | emersion/go-smtp + emersion/go-sasl | RFC-konform inkl. OAUTHBEARER (RFC 7628) |
-| Rate-Limit-Backend | Redis mit Sliding-Window-Algorithmus | Horizontale Skalierung, geringer Footprint |
-| Secret-Validation | Kubernetes ValidatingAdmissionWebhook | CRD-Konsistenz bereits bei Apply |
-| Logging | log/slog (Go-Stdlib) | Strukturiert, Stdlib |
-| Metriken | prometheus/client_golang | Standard |
-| Tracing | OpenTelemetry-Go | Vendor-neutral |
-| Container-Base | distroless/static | Minimal, keine Shell |
-| Build | ko oder buildah | Reproduzierbar |
-| Release | GoReleaser | Multi-Arch, SBOM, Signierung |
-| Chart-Repository | OCI-Registry (intern) | GitOps-kompatibel |
-| Backend-Driver | In-Process Go-Interface (v1); gRPC-Plugin als Option (v2+) | Einfach in v1, Crossplane-Pattern als Evolutionspfad |
+| Language | Go (module `go 1.25`, toolchain 1.26) | Ecosystem, kubebuilder, performance |
+| Framework | controller-runtime / kubebuilder markers | De-facto standard for operators |
+| REST router | chi | Small, low-dependency |
+| SMTP | `emersion/go-smtp` + `emersion/go-sasl` | RFC-compliant, including OAUTHBEARER (RFC 7628) |
+| Rate limiting | Sliding window: in-process, or Redis sorted set + Lua (`go-redis`) | Horizontal scaling, small footprint |
+| Token cache | `hashicorp/golang-lru` | Bounded memory |
+| Admission | ValidatingAdmissionWebhook (controller-runtime), cert via cert-manager or existing secret | Consistency at apply time |
+| Logging | `log/slog` (stdlib), JSON | Structured, no dependency |
+| Metrics | `prometheus/client_golang` | Standard |
+| Tracing | OpenTelemetry Go, OTLP/HTTP | Vendor-neutral |
+| Container base | `distroless/static:nonroot`, pinned by digest | Minimal, no shell |
+| Build / release | Multi-arch `docker buildx` and Helm packaging in GitHub Actions (no third-party actions); cosign (checksum-pinned binary) and `actions/attest` for signing and provenance | Reproducible, verifiable, few supply-chain dependencies |
+| Chart distribution | OCI registry | GitOps-compatible |
+| Backend drivers | In-process Go interface; gRPC plugins as an option after 1.0 | Simple first; Crossplane-style evolution path |
 
 ---
 
-## 7. Abgrenzungen
+## 7. Boundaries
 
-Siehe auch 1.4 (dauerhafte Nicht-Ziele) und 1.5 (future-vorgesehen, aber nicht v1). Zusätzlich zu den dort genannten Punkten:
+See also §1.4 (permanent non-goals) and §1.5 (anticipated, not before 1.0). Additionally:
 
-- **Kein Replacement für Anti-Spam-Gateways:** Sigillum führt keine Content-Filter oder Spam-Checks durch.
-- **Keine Bounce-Verarbeitung in v1:** Rückläufer werden vom Backend verarbeitet. API-basierte Backends (SendGrid, Graph) können Bounces per Webhook liefern — die Verarbeitung ist für v1.2+ vorgesehen.
-- **Kein Delayed-Delivery:** Mails werden synchron an das Backend gegeben; keine Queue für zeitversetzten Versand.
+- **No replacement for anti-spam gateways:** Sigillum performs no content filtering or spam checks.
+- **No delayed delivery:** messages are handed to the backend synchronously; there is no queue for scheduled sending.
 
----
+**Left to the upstream mail system.** Sigillum does not replicate what relays and mail providers already do well. Recipes in the docs show where to configure it:
 
-## 8. Roadmap und MVP-Scope
-
-### 8.1 MVP (v0.1.0)
-
-Liefert den Kern-Use-Case „Developer sendet per REST, Policy wird durchgesetzt":
-
-- REST-API `/v1/messages` inklusive Attachments
-- ServiceAccount-Token-Auth (TokenReview)
-- CRDs `MailBackend`, `ClusterMailBackend` und `MailPolicy` (nur `type: smtp` implementiert)
-- Rate-Limiting (In-Memory, Single-Replica-fähig)
-- Sender-Restriktionen
-- Prometheus-Metriken (Basis-Set)
-- Strukturierte Logs
-- Helm-Chart
-- ValidatingWebhook für CRDs
-- Controller mit Backend-HealthCheck
-
-### 8.2 v0.2.0
-
-- SMTP-Proxy
-- Redis-basiertes Rate-Limit-Backend für HA
-- Audit-Log-Stream
-- Empfänger-Restriktionen
-- OpenTelemetry-Tracing
-
-### 8.2.1 v0.2.1 (Security-Patch)
-
-- Adress-Härtung: Local-Parts mit `%`, `!`, `@` oder Quotes werden abgelehnt; Anzeigenamen dürfen kein `@` enthalten
-- `Sender` wird gegen `allowedSenders`, `Reply-To` gegen die Empfänger-Restriktionen geprüft; `Resent-*` und doppelte Header werden abgelehnt
-- REST-Größenprüfung zählt Subject und Custom-Header mit; Header-Werte max. 998 Zeichen
-- Helm: `smtp.allowInsecureAuth` folgt per Default `smtp.tls.secretName`; Warnungen bei Klartext-Betrieb und `rateLimit.failOpen`
-
-### 8.3 v0.3.0
-
-- Adressgenaue Empfänger-Allowlist (`recipientRestrictions.allowedRecipients`)
-- Istio-mTLS-Auth (SPIFFE)
-- `MailQuota` (Namespace-weit)
-- Preflight-Endpoint
-- Grafana-Dashboards
-- Dokumentierte Runbooks
-
-### 8.4 v1.0.0 (Produktionsreife)
-
-- API-Promotion `v1alpha1` → `v1beta1` → `v1`
-- Dokumentation vollständig
-- E2E-Testsuite vollständig
-- Chaos-Tests
-- SBOM + Image-Signierung in Release-Pipeline
-
-### 8.5 v1.1+ (Backend-Expansion, future)
-
-- **v1.1:** Microsoft Graph als Send-Backend (`type: microsoftGraph`)
-- **v1.2:** SendGrid als Send-Backend + Webhook-Receiver für Bounces
-- **v1.3:** Gmail API als Send-Backend
-
-### 8.6 v2.0 (Read-Path, future)
-
-- `MailboxBinding`-CRD für Read-Zugriff auf Backends
-- `GET /v1/mailboxes/{name}/messages` REST-Endpoints
-- Webhook-Push für Events (eingehende Mails, Bounces)
-- IMAP-Proxy für Legacy-Reader (optional aktivierbar)
-- Driver-Implementierungen von `Read()` und `Subscribe()` für Graph, Gmail, IMAP
-
----
-
-## 9. Risiken und offene Fragen
-
-### 9.1 Risiken
-
-| Risiko | Mitigation |
+| Concern | Where it belongs |
 |---|---|
-| TokenReview-Last auf kube-apiserver | Caching mit TTL; projected Tokens mit Audience-Binding |
-| Redis-Single-Point-of-Failure | Redis-Sentinel/Cluster; Fallback auf strict-Mode (deny on Redis-down) |
-| Pod-IP-Ambiguität bei SMTP-Legacy-Auth | SASL OAUTHBEARER ist Default; Pod-IP-Auth nur opt-in pro Policy; `UsingLegacyAuth` Status macht Restbestände sichtbar |
-| Abhängigkeit von Upstream-SMTP-Verfügbarkeit | HealthCheck + klare Fehler-Semantik (502 retry-fähig) |
-| Policy-Komplexität (unklare Matches) | Preflight-Endpoint, dry-run-Flag, Priority-Feld für Deterministik |
-| Fehlende Mail-Queue → Verlustrisiko bei Upstream-Ausfall | Dokumentiert als Caller-Verantwortung; Retry-Queue optional v2 |
-
-### 9.2 Offene Fragen
-
-1. **Name:** Ist „Sigillum" final oder ist ein interner Name gewünscht?
-1. **API-Group-Prefix:** `sigillum.dev` vs. internes Firmen-Suffix?
-2. **Multi-Cluster-Support:** Ist Federation mehrerer Cluster ein Zielbild?
-3. **Retry-Queue:** Braucht v1 bereits einen persistenten Retry-Mechanismus?
-4. **Bounce-Handling:** Soll v2 einen eingehenden Bounce-Endpoint haben?
-5. **Backend-Pool:** Soll ein `MailBackend` mehrere Server/Endpoints als Failover-Gruppe definieren können (z. B. primärer SMTP + Fallback-SMTP)?
+| Bounces, delivery status, complaint handling | Provider dashboards and webhooks (SES, Postmark, Mailgun, SendGrid), Exchange message trace |
+| Suppression lists | Provider suppression lists (SES account-level suppression, Postmark, Mailgun) |
+| Journaling / archiving of sent mail | Exchange Online journaling rules, Google Vault, provider archive features |
+| DKIM, SPF, DMARC | Provider / relay (§1.4) |
+| Attachment and content filtering | Exchange transport rules / Defender, Google Workspace content compliance. A simple attachment-type rule in `MailPolicy` stays in the backlog for providers that lack it (§8.8). |
+| Sending reputation, IP warm-up, retries to the recipient MX | Provider / relay |
 
 ---
 
-## 10. Glossar
+## 8. Roadmap
 
-| Begriff | Bedeutung |
+### 8.0 Versioning and prioritization
+
+**Versioning.** Sigillum stays below 1.0 until it has run in production at independent installations and their feedback is in (exit criteria in §8.7). Minor versions (0.x.0) may still change CRDs in breaking ways, always with a documented migration; patch versions (0.x.y) never do.
+
+**Target users.** Small and medium organizations: one to a few clusters (typically staging and production), a small platform team or a single operator, a hosted mail provider (Microsoft 365, Google Workspace, Amazon SES, Mailgun, Postmark, …) or a company relay as upstream, and plenty of off-the-shelf software next to in-house services. Large fleets and very large enterprises are welcome, but their needs are not prioritized yet.
+
+**Rules, applied in order:**
+
+1. **Unblock common setups first.** A feature that decides whether typical workloads or providers can use Sigillum at all comes before anything else.
+2. **Recipe before feature.** When standard Kubernetes tools already solve it (NetworkPolicy, Kyverno, `ValidatingAdmissionPolicy`, cert-manager, External Secrets, Mailpit), ship a tested recipe instead of code.
+3. **Don't replicate the upstream.** Bounces, delivery status, suppression lists, journaling, DKIM and content filtering belong to the mail provider (§7).
+4. **Cheap and safe goes early.** Small fixes to known gaps (§9.3) and security hardening ship in the next minor release.
+5. **Large-scale features wait for demand.** Multi-cluster gateways, fleet-wide quotas and cloud workload identity move up only when users ask.
+
+### 8.1 Released
+
+- **v0.1.0 (MVP):** `POST /v1/messages` with attachments (JSON and multipart); ServiceAccount token auth; CRDs `MailBackend`, `ClusterMailBackend`, `MailPolicy` (`type: smtp`); in-memory rate limiting; sender restrictions; Prometheus metrics; structured logs; Helm chart; validating webhook; controller with backend health checks.
+- **v0.2.0:** SMTP proxy with OAUTHBEARER and pod-IP fallback; Redis rate-limit store; audit stream and shared gateway pipeline; recipient restrictions; OpenTelemetry tracing.
+- **v0.2.1 (security patch):** address hardening (`%`, `!`, `@`, quoted local parts; no `@` in display names); `Sender` and `Reply-To` checks; `Resent-*` and duplicate headers rejected; REST size accounting includes subject and custom headers; header values ≤ 998 characters; `smtp.allowInsecureAuth` follows `smtp.tls.secretName`; Helm warnings for plaintext operation and `rateLimit.failOpen`.
+
+### 8.2 v0.3.0 — Works with off-the-shelf apps, cannot be bypassed
+
+Goal: a small team can route *all* cluster mail through Sigillum, including third-party software, and make sure nothing goes around it.
+
+| Item | Type | Ref |
+|---|---|---|
+| Sigillum-issued SMTP credentials (`MailCredential`, `AUTH PLAIN` / `LOGIN`), generated in all non-excluded namespaces, with rotation and the credential Secret guard | Feature | US-3.7, §4.3.4, §4.10 |
+| Per-address recipient allowlist (`allowedRecipients`) | Feature | US-2.4 |
+| Cluster name in audit, logs and metrics | Feature | US-4.5 |
+| Token cache bounded by token expiry | Gap fix | G-5 |
+| Permanent vs. transient upstream failures distinguishable on REST | Gap fix | G-1 |
+| `preStop` delay before draining | Gap fix | G-3 |
+| Egress and admission recipes (NetworkPolicy, Cilium, Kyverno, `ValidatingAdmissionPolicy`) | Recipe | US-5.7 |
+| Local development recipe with Mailpit | Recipe | US-7.1 |
+| Provider recipes: Microsoft 365, Google Workspace, Amazon SES, Mailgun, Postmark, Brevo via SMTP; Grafana, Alertmanager, Gitea, Nextcloud, Keycloak, Argo CD notifications as clients | Recipe | §8.0 rule 2 |
+| Restart apps on credential rotation with Stakater Reloader | Recipe | US-3.7 |
+
+### 8.3 v0.4.0 — Easy to run, easy to debug
+
+Goal: one-command install on a small cluster, and developers can answer "why was my mail rejected?" themselves.
+
+| Item | Type | Ref |
+|---|---|---|
+| Webhook certificates without cert-manager | Feature | US-5.6 |
+| Preflight endpoint and `kubectl sigillum` plugin (`send`, `whoami`, `explain`, `credential create` / `rotate`) | Feature | US-7.2, §4.4.2 |
+| SMTPS (implicit TLS, port 465) on the proxy | Feature | US-1.5 |
+| OpenAPI 3.1 description | Feature | US-7.3 |
+| Grafana dashboard and `PrometheusRule` alerts | Feature | US-4.6 |
+| Runbooks: upstream outage, Redis outage, CRD upgrade | Docs | §5.7 |
+
+### 8.4 v0.5.0 — Hosted mailboxes (Microsoft 365, Google Workspace)
+
+Goal: keep working when password-based SMTP login is switched off, and protect shared mailbox quotas.
+
+| Item | Type | Ref |
+|---|---|---|
+| `authType: XOAUTH2` (OAuth2 client credentials) for the SMTP driver | Feature | US-6.1 stage 1 |
+| Daily limit `rateLimits.messagesPerDay` | Feature | US-2.7 |
+
+### 8.5 v0.6.0 — API stabilization
+
+Goal: freeze the resource shapes so early adopters can rely on them.
+
+| Item | Type | Ref |
+|---|---|---|
+| Idempotency keys for `POST /v1/messages` | Feature | US-1.6 |
+| Decide and implement or remove `matchedSubjects` | Gap fix | G-4, Q-9 |
+| Decide subject-type precedence and SMTP rate-limit reply code | Decision | Q-6, Q-7 |
+| CRDs to `v1beta1` with a conversion webhook; remove ignored fields (`serviceAccount.namespace`) | API | §5.8 |
+
+### 8.6 v0.7.0 – v0.9.x — Driven by feedback
+
+No fixed scope. Candidates from the backlog (§8.8) move in when users ask for them. The later 0.x releases also carry the 1.0 hardening work: failure-injection tests (relay outage, Redis outage, controller restart), upgrade tests across the last two minor versions, and complete documentation.
+
+### 8.7 v1.0.0 — exit criteria
+
+1.0 is a statement about maturity, not about features. It ships when:
+
+- Sigillum has run in production at **at least three independent organizations for at least three months**, and their feedback has been addressed or explicitly deferred.
+- The CRDs have had **no breaking change for two consecutive minor releases**; they are then promoted from `v1beta1` to `v1`.
+- There is **no open security gap** in §9.3.
+- **Upgrades are tested** from the previous two minor versions, including CRD upgrades.
+- Documentation covers installation, every feature, the recipes and the runbooks.
+
+### 8.8 Feature decisions
+
+Every candidate that has been discussed, with its decision and the reason.
+
+| Feature | Decision | Reason |
+|---|---|---|
+| Sigillum-issued SMTP credentials | v0.3.0 | Most off-the-shelf apps only do `PLAIN` / `LOGIN`; the only alternative is pod-IP trust. No workaround outside Sigillum. Generated by default in all non-excluded namespaces, so small teams have nothing to maintain per namespace. |
+| Restarting apps after rotation | Recipe, v0.3.0 | Stakater Reloader already does it. |
+| Egress enforcement (block direct access to relays) | Recipe, v0.3.0 | NetworkPolicy / CiliumNetworkPolicy do it; essential, but not Sigillum code. |
+| Policy guardrails (sender domains per team, allowed namespaces per `ClusterMailBackend`, no pod-IP in production) | Recipe, v0.3.0 | Kyverno / `ValidatingAdmissionPolicy` do it (§4.9). Resolves Q-8. |
+| Per-address recipient allowlist | v0.3.0 | Common staging need ("only the QA inbox"); no workaround with domain lists. |
+| Cluster name in telemetry | v0.3.0 | Tiny; staging and production usually share one log backend. |
+| Gap fixes G-1, G-3, G-5 | v0.3.0 | Small; G-5 is security-relevant. |
+| Local development | Recipe, v0.3.0 | Mailpit as a `MailBackend` works today. A built-in capture driver is not planned. |
+| Provider support via SMTP (SES, Mailgun, Postmark, Brevo, Google Workspace relay) | Recipe, v0.3.0 | All providers offer SMTP; the existing driver covers them. |
+| Webhook certificates without cert-manager | v0.4.0 | Workaround exists (cert-manager or own secret), but it is the biggest install hurdle on small clusters. |
+| Preflight and kubectl plugin | v0.4.0 | Main debugging aid for developers and policy authors. |
+| SMTPS on port 465 | v0.4.0 | Small; some apps offer nothing else. |
+| OpenAPI description | v0.4.0 | Small; enables generated clients. |
+| Dashboard and alert rules | v0.4.0 | Small teams rarely write their own. |
+| SBOM, signing, dependency scanning | Done (main, first release after v0.2.1) | Cheap in CI; lets security-minded users verify releases. |
+| XOAUTH2 for the SMTP driver | v0.5.0 | Microsoft 365 is common among small and medium organizations, and password-based SMTP AUTH is being retired. Workaround (relay connector) needs a static egress IP. |
+| Daily limit per policy | v0.5.0 | Protects the provider's daily quota of a shared sending account. |
+| Idempotency keys | v0.6.0 | Duplicate mail on retries is real, but rare enough to follow the basics. |
+| `v1beta1` CRDs | v0.6.0 | After the credential and limit fields have settled. |
+| Microsoft Graph driver | Backlog | XOAUTH2 covers most tenants; needed only where SMTP AUTH is disabled entirely. |
+| API drivers (SES, SendGrid, Mailgun, Gmail API) | Backlog | SMTP endpoints already work; worthwhile mainly with cloud workload identity. |
+| Cloud workload identity for upstream auth | Backlog | Larger-organization need; External Secrets plus rotation covers small setups. |
+| Istio mTLS auth | Backlog | Tokens already work inside meshes. |
+| `MailQuota` (namespace-wide) | Backlog | Per-policy daily limit covers most cases. |
+| Attachment-type rules in `MailPolicy` | Backlog | Hosted mailboxes already filter; only relevant for plain relays. |
+| Opt-in traceability headers (`X-Sigillum-Workload`) | Backlog | Audit log and `Received` header already correlate; headers would expose namespace names to recipients. |
+| `GET /v1/capabilities` | Backlog | Only meaningful once a backend offers more than `send`. |
+| Central gateway for many clusters (token validation via OIDC / JWKS, issuer → cluster mapping) | Backlog | Large fleets. One install per cluster via GitOps (for example Argo CD ApplicationSets) works today. |
+| Fleet-wide quotas, SPIFFE federation | Backlog | Large fleets. |
+| Official client SDKs | Not planned | One REST call; clients can be generated from OpenAPI. |
+| Native namespace restriction on `ClusterMailBackend` | Not planned | Admission policy recipe (US-5.7). May be revisited if the recipe proves too hard (Q-8). |
+| Delivery status, bounces, suppression lists | Not planned | Upstream provider (§7). |
+| Mail journaling / archiving | Not planned | Upstream provider (§7). |
+| Built-in capture driver | Not planned | Mailpit (US-7.1). |
+| Read path, IMAP proxy, webhook receiver | After 1.0 | Unchanged architectural vision (§1.5, Epic 6). |
+
+---
+
+## 9. Risks, open questions, known gaps
+
+### 9.1 Risks
+
+| Risk | Mitigation |
 |---|---|
-| **CRD** | Custom Resource Definition — Kubernetes-eigene Erweiterung der API |
-| **TokenReview** | Kubernetes-API, die Bearer-Tokens validiert |
-| **SPIFFE** | Secure Production Identity Framework for Everyone — Standard für Workload-Identität |
-| **Backend** | Mail-System hinter Sigillum, an das Mails weitergeleitet werden und aus dem (future) gelesen wird. Kann SMTP, Graph, Gmail oder SendGrid sein. |
-| **Driver** | Interne Go-Implementierung, die ein konkretes Backend-Protokoll kapselt und das `Driver`-Interface erfüllt. |
-| **Capability** | Deklarierte Fähigkeit eines Backends/Drivers (z. B. `send`, `read`, `subscribeEvents`, `folders`). |
-| **Policy Subject** | Aufrufer-Identität (SA, Pod), auf die eine Policy matcht |
-| **Preflight** | Dry-Run-Validierung einer Mail ohne tatsächliche Zustellung |
+| Workloads bypass Sigillum and talk to the relay directly | Egress recipe (US-5.7); relay credentials exist only in the Sigillum namespace |
+| TokenReview load on kube-apiserver | LRU cache with TTL; projected tokens with audience binding |
+| Static SMTP credentials (US-3.7) leak | Scoped to one ServiceAccount and its policies; 256-bit random; TLS required; hash only in Sigillum; audited; rotation with grace period; instant revocation by deleting the `MailCredential` |
+| Controller write access to Secrets in all namespaces (generated credentials) | No read verbs; mandatory `ValidatingAdmissionPolicy` guard limits writes to labelled Secrets owned by a `MailCredential`; excluded namespaces (default `kube-*` and always the release namespace); controller refuses to write when the guard is missing; bring-your-own-hash mode for teams that want no Secret writes (§4.10) |
+| Redis as single point of failure | Sentinel / Cluster; fail closed (`503`) by default, `failOpen` as explicit opt-in |
+| Rate limits multiplied by replica count | Documented (§4.7, US-5.2); Redis for multi-replica installs |
+| Pod-IP ambiguity for SMTP legacy auth | OAUTHBEARER default, credentials from v0.3.0; pod-IP is a double opt-in; ambiguous IPs rejected; `UsingLegacyAuth` condition |
+| Upstream provider disables password SMTP login | XOAUTH2 in v0.5.0; relay-connector workaround documented |
+| Dependence on upstream availability | Endpoint failover, health checks, clear error semantics (`502` / `451`, rate-limit refund) |
+| Overly permissive policies | Governance via RBAC and admission recipes (§4.9, US-5.7); preflight and `explain` (v0.4.0) |
+| Unclear precedence between overlapping policies | Explicit `priority`, deterministic name tie-break (US-2.6) |
+| No mail queue → loss risk during upstream outage | Caller responsibility; idempotency keys (v0.6.0) make retries safe |
+| CRDs not upgraded by Helm | Documented upgrade procedure (US-5.1), runbook in v0.4.0 |
+| Too few users to validate the design | Stay below 1.0 until the exit criteria (§8.7) are met |
+
+### 9.2 Open questions
+
+| # | Question | Notes |
+|---|---|---|
+| Q-1 | Is "Sigillum" the final name, or is an internal name wanted? | |
+| Q-2 | API group `sigillum.dev` or an internal company suffix? | Must be settled before `v1beta1` (v0.6.0). |
+| Q-3 | Is a persistent retry queue ever needed? | Today the caller retries (§4.7); idempotency keys (US-1.6) reduce the need. |
+| Q-4 | Are backend events (bounces, delivery status) needed inside the cluster? | Default answer: no, the provider handles them (§7). |
+| Q-5 | Is multi-cluster federation a goal? | Backlog; decided by demand (§8.8). |
+| Q-6 | Should subject type (explicit SA > SA selector > pod selector) become a secondary precedence key after `priority`? | Decide by v0.6.0. |
+| Q-7 | Keep `421` for SMTP rate limiting? | `421` conventionally means the server is closing the connection; `451 4.7.x` is the common per-message temporary failure. Decide by v0.6.0. |
+| Q-8 | Should `ClusterMailBackend` restrict which namespaces may reference it natively? | Decided for now: no, use the admission recipe (US-5.7). Revisit if users find the recipe too hard. |
+| Q-9 | What should `MailPolicy.status.matchedSubjects` count, or should it be removed? | See G-4; decide by v0.6.0. |
+| Q-10 | Should the webhook warn when `senderRestrictions` is present with an empty `allowedSenders` list? | That configuration denies every sender and is almost always a mistake (US-2.3). A warning does not change behavior. |
+| Q-11 | `MailCredential` design | **Decided:** controller-generated Secrets by default in all namespaces except `credentials.excludeNamespaces` (default `kube-*`, release namespace always), guarded as in §4.10; bring-your-own argon2id hash as alternative; SHA-256 for generated passwords; no per-policy opt-in; TLS required by default (US-3.7, §4.3.4). |
+
+Settled: a backend can define several endpoints as a failover group (`spec.smtp.endpoints`).
+
+### 9.3 Known gaps
+
+Specified behavior the current release (v0.2.1) does not meet yet:
+
+| ID | Gap | Where specified | Planned |
+|---|---|---|---|
+| G-1 | REST returns `502` for both transient and permanent upstream failures; clients cannot tell whether to retry except from `detail`. SMTP already distinguishes `451` / `554`. | US-1.4, §4.4.3 | v0.3.0 |
+| G-2 | The gateway checks backend `Ready` but not `status.capabilities`. | US-2.5, §4.5 | With the first non-SMTP driver |
+| G-3 | No `preStop` delay: during rollout, late clients may hit a closed listener instead of `503`. | US-5.3 | v0.3.0 |
+| G-4 | `MailPolicy.status.matchedSubjects` is never populated. | §4.3.2 | v0.6.0 |
+| G-5 | TokenReview cache entries are not bounded by the token's `exp` (security). | §5.3 | v0.3.0 |
 
 ---
 
-## 11. Referenzen
+## 10. Glossary
 
-- [kube-mail (Referenz-Projekt, abandoned)](https://github.com/martin-helmich/kube-mail)
-- [Kubernetes TokenRequest API](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/#bound-service-account-tokens)
+| Term | Meaning |
+|---|---|
+| **CRD** | Custom Resource Definition, the Kubernetes API extension mechanism |
+| **TokenReview** | Kubernetes API that validates bearer tokens |
+| **Projected ServiceAccount token** | Short-lived, audience-bound token mounted into a pod |
+| **SPIFFE** | Secure Production Identity Framework for Everyone, a standard for workload identity |
+| **XFCC** | `X-Forwarded-Client-Cert`, the header Envoy / Istio use to pass the client certificate identity |
+| **Backend** | Mail system behind Sigillum that messages are forwarded to (and, in future, read from): SMTP, Graph, Gmail or SendGrid |
+| **Driver** | Internal Go implementation that encapsulates one backend protocol and implements the `Driver` interface |
+| **Capability** | Declared feature of a backend / driver (`send`, `read`, `subscribeEvents`, `folders`) |
+| **Gateway pipeline** | Transport-agnostic send path shared by REST and SMTP: policy, backend, rate limit, send, audit |
+| **Policy subject** | Caller identity (ServiceAccount, pod) a policy matches |
+| **Preflight** | Dry-run validation of a message without delivery |
+| **MailCredential** | Sigillum-issued username / password bound to one ServiceAccount, for SMTP clients without token support; generated into a Secret by the controller or backed by a user-supplied hash (US-3.7) |
+| **Recipe** | Tested configuration of a standard tool (NetworkPolicy, Kyverno, Mailpit, …) shipped instead of a Sigillum feature (§8.0) |
+
+---
+
+## 11. References
+
+- [kube-mail (reference project, abandoned)](https://github.com/martin-helmich/kube-mail)
+- [Kubernetes bound ServiceAccount tokens](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/#bound-service-account-tokens)
+- [Kubernetes TokenReview API](https://kubernetes.io/docs/reference/kubernetes-api/authentication-resources/token-review-v1/)
+- [RFC 5322 — Internet Message Format](https://datatracker.ietf.org/doc/html/rfc5322)
+- [RFC 6409 — Message Submission for Mail](https://datatracker.ietf.org/doc/html/rfc6409)
+- [RFC 7628 — SASL Mechanisms for OAuth (OAUTHBEARER)](https://datatracker.ietf.org/doc/html/rfc7628)
 - [RFC 7807 — Problem Details for HTTP APIs](https://datatracker.ietf.org/doc/html/rfc7807)
-- [SPIFFE Specification](https://github.com/spiffe/spiffe)
-- [OpenTelemetry Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/)
+- [SPIFFE specification](https://github.com/spiffe/spiffe)
+- [Istio: forwardClientCertDetails](https://istio.io/latest/docs/reference/config/istio.mesh.v1alpha1/)
+- [OpenTelemetry semantic conventions](https://opentelemetry.io/docs/specs/semconv/)

@@ -94,7 +94,7 @@ jobs:
           echo "::group::nodes"
           kubectl get nodes -o wide
           echo "::endgroup::"
-          for ns in sigillum-e2e mailhog cert-manager; do
+          for ns in sigillum-e2e mailpit cert-manager; do
             if kubectl get ns "$ns" >/dev/null 2>&1; then
               echo "::group::[$ns] pods"
               kubectl -n "$ns" get pods -o wide
