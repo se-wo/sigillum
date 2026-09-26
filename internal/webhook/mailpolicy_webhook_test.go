@@ -61,3 +61,35 @@ func TestMailPolicyValidator_InvalidSelectorOperator(t *testing.T) {
 		t.Fatal("expected invalid selector operator to be rejected")
 	}
 }
+
+func TestMailPolicyValidator_AllowedRecipients(t *testing.T) {
+	cases := []struct {
+		name    string
+		rcpts   []string
+		wantErr string
+	}{
+		{name: "valid", rcpts: []string{"qa@staging.example.com", "QA-Team@example.com"}},
+		{name: "domain only", rcpts: []string{"example.com"}, wantErr: "allowedRecipients[0]"},
+		{name: "wildcard", rcpts: []string{"*@example.com"}, wantErr: "no wildcards"},
+		{name: "display name", rcpts: []string{"QA <qa@example.com>"}, wantErr: "plain address"},
+		{name: "percent hack", rcpts: []string{"qa%evil.test@example.com"}, wantErr: "allowedRecipients[0]"},
+		{name: "empty", rcpts: []string{""}, wantErr: "allowedRecipients[0]"},
+	}
+	v := &MailPolicyValidator{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mp := validPolicy()
+			mp.Spec.RecipientRestrictions = &sigv1.RecipientRestrictions{AllowedRecipients: tc.rcpts}
+			_, err := v.ValidateCreate(context.Background(), mp)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}

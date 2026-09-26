@@ -297,3 +297,44 @@ func TestMatch_NegativeSelectorFailsClosedWithoutLabels(t *testing.T) {
 		t.Fatal("resolved SA without the label should match a NotIn selector")
 	}
 }
+
+func TestEvaluate_AllowedRecipients(t *testing.T) {
+	p := policy("p", "ns", 1, "sa", "*@x.com")
+	p.Spec.RecipientRestrictions = &sigv1.RecipientRestrictions{
+		AllowedRecipients: []string{"QA@staging.example.com"},
+		BlockedDomains:    []string{"blocked.example.com"},
+	}
+	cases := []struct {
+		name    string
+		rcpts   []string
+		replyTo []string
+		ok      bool
+	}{
+		{"listed address", []string{"qa@staging.example.com"}, nil, true},
+		{"case-insensitive", []string{"Qa@Staging.Example.com"}, nil, true},
+		{"other mailbox in same domain", []string{"dev@staging.example.com"}, nil, false},
+		{"one bad recipient fails all", []string{"qa@staging.example.com", "x@other.com"}, nil, false},
+		{"reply-to checked too", []string{"qa@staging.example.com"}, []string{"x@other.com"}, false},
+	}
+	for _, tc := range cases {
+		got := Evaluate(&p, MessageView{From: "a@x.com", Recipients: tc.rcpts, ReplyTo: tc.replyTo})
+		if got.Allowed != tc.ok {
+			t.Fatalf("%s: want %v got %+v", tc.name, tc.ok, got)
+		}
+	}
+
+	// Both allowlists combine; blockedDomains wins over both.
+	p.Spec.RecipientRestrictions.AllowedDomains = []string{"example.com"}
+	p.Spec.RecipientRestrictions.AllowedRecipients = append(p.Spec.RecipientRestrictions.AllowedRecipients,
+		"ops@blocked.example.com")
+	for rcpt, ok := range map[string]bool{
+		"anyone@example.com":      true,
+		"qa@staging.example.com":  true,
+		"dev@staging.example.com": false,
+		"ops@blocked.example.com": false,
+	} {
+		if got := Evaluate(&p, MessageView{From: "a@x.com", Recipients: []string{rcpt}}); got.Allowed != ok {
+			t.Fatalf("%s: want %v got %+v", rcpt, ok, got)
+		}
+	}
+}

@@ -16,14 +16,32 @@ rules:
   resources:
   - secrets
   verbs:
+  - create
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
   - get
   - list
   - watch
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - validatingadmissionpolicies
+  - validatingadmissionpolicybindings
+  verbs:
+  - get
 - apiGroups:
   - sigillum.dev
   resources:
   - clustermailbackends
   - mailbackends
+  - mailcredentials
   - mailpolicies
   verbs:
   - get
@@ -41,6 +59,7 @@ rules:
   resources:
   - clustermailbackends/status
   - mailbackends/status
+  - mailcredentials/status
   - mailpolicies/status
   verbs:
   - get

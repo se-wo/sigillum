@@ -222,7 +222,10 @@ func senderAllowed(from string, allowed []string) bool {
 	return false
 }
 
-// recipientAllowed applies recipientRestrictions; nil allows every domain.
+// recipientAllowed applies recipientRestrictions; nil allows every
+// recipient. blockedDomains always wins. Otherwise a recipient passes if its
+// domain is in allowedDomains or the address is in allowedRecipients; with
+// both allowlists empty every domain that is not blocked passes.
 func recipientAllowed(addr string, r *sigv1.RecipientRestrictions) bool {
 	if r == nil {
 		return true
@@ -233,11 +236,16 @@ func recipientAllowed(addr string, r *sigv1.RecipientRestrictions) bool {
 			return false
 		}
 	}
-	if len(r.AllowedDomains) == 0 {
+	if len(r.AllowedDomains) == 0 && len(r.AllowedRecipients) == 0 {
 		return true
 	}
 	for _, d := range r.AllowedDomains {
 		if strings.EqualFold(d, domain) {
+			return true
+		}
+	}
+	for _, a := range r.AllowedRecipients {
+		if strings.EqualFold(strings.TrimSpace(a), addr) {
 			return true
 		}
 	}

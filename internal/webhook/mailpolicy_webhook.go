@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"context"
+	"net/mail"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -13,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	"github.com/se-wo/sigillum/internal/policy"
 )
 
 // +kubebuilder:webhook:path=/validate-sigillum-dev-v1alpha1-mailpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=sigillum.dev,resources=mailpolicies,verbs=create;update,versions=v1alpha1,name=vmailpolicy.sigillum.dev,admissionReviewVersions=v1
@@ -99,6 +101,7 @@ func (v *MailPolicyValidator) validate(mp *sigv1.MailPolicy) (admission.Warnings
 		rPath := specPath.Child("recipientRestrictions")
 		allErrs = append(allErrs, validateDomains(rPath.Child("allowedDomains"), rr.AllowedDomains)...)
 		allErrs = append(allErrs, validateDomains(rPath.Child("blockedDomains"), rr.BlockedDomains)...)
+		allErrs = append(allErrs, validateRecipients(rPath.Child("allowedRecipients"), rr.AllowedRecipients)...)
 	}
 
 	if len(allErrs) == 0 {
@@ -118,6 +121,29 @@ func validateSelector(p *field.Path, sel *sigv1.LabelSelectorSubject) field.Erro
 		return field.ErrorList{field.Invalid(p, sel, err.Error())}
 	}
 	return nil
+}
+
+// validateRecipients accepts plain addresses (no display name, no
+// wildcards) whose local part has no routing semantics; recipient matching
+// is an exact comparison, so anything else would silently never match.
+func validateRecipients(p *field.Path, addrs []string) field.ErrorList {
+	var errs field.ErrorList
+	for i, a := range addrs {
+		parsed, err := mail.ParseAddress(a)
+		switch {
+		case strings.ContainsAny(a, "*?["):
+			errs = append(errs, field.Invalid(p.Index(i), a, "must be a single address (no wildcards; use allowedDomains for whole domains)"))
+		case err != nil:
+			errs = append(errs, field.Invalid(p.Index(i), a, err.Error()))
+		case parsed.Name != "" || parsed.Address != a:
+			errs = append(errs, field.Invalid(p.Index(i), a, "must be a plain address such as qa@example.com"))
+		default:
+			if err := policy.ValidateMailbox(a); err != nil {
+				errs = append(errs, field.Invalid(p.Index(i), a, err.Error()))
+			}
+		}
+	}
+	return errs
 }
 
 // validateDomains accepts bare DNS names only. Recipient matching is an exact

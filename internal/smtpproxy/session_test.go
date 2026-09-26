@@ -27,6 +27,7 @@ type stubSender struct {
 	result  gateway.Result
 	reqs    []gateway.Request
 	rejects []string
+	events  []audit.Event
 }
 
 func (s *stubSender) Send(_ context.Context, req gateway.Request) gateway.Result {
@@ -36,10 +37,11 @@ func (s *stubSender) Send(_ context.Context, req gateway.Request) gateway.Result
 	return s.result
 }
 
-func (s *stubSender) Reject(_ audit.Event, reason string) {
+func (s *stubSender) Reject(ev audit.Event, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rejects = append(s.rejects, reason)
+	s.events = append(s.events, ev)
 }
 
 type stubTokens struct{}

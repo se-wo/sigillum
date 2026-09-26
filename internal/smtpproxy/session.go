@@ -1,6 +1,7 @@
 // Package smtpproxy implements the SMTP submission front end for legacy
 // workloads (US-1.2). Callers authenticate with their ServiceAccount token via
-// AUTH OAUTHBEARER (US-3.4) or, only where a policy explicitly opts in, by the
+// AUTH OAUTHBEARER (US-3.4), with a Sigillum-issued MailCredential via AUTH
+// PLAIN or LOGIN (US-3.7) or, only where a policy explicitly opts in, by the
 // source pod's IP (US-3.5). Accepted messages run through the same
 // gateway pipeline as the REST path and are relayed byte-for-byte.
 package smtpproxy
@@ -26,6 +27,7 @@ import (
 
 	"github.com/se-wo/sigillum/internal/apiserver/auth"
 	"github.com/se-wo/sigillum/internal/audit"
+	"github.com/se-wo/sigillum/internal/credential"
 	"github.com/se-wo/sigillum/internal/driver"
 	"github.com/se-wo/sigillum/internal/gateway"
 	"github.com/se-wo/sigillum/internal/policy"
@@ -51,6 +53,13 @@ type Backend struct {
 	Tokens TokenAuthenticator
 	// Pods enables the pod-IP legacy fallback when non-nil.
 	Pods PodResolver
+	// Credentials enables AUTH PLAIN and LOGIN with MailCredentials when
+	// non-nil. They are offered on TLS connections only, unless
+	// AllowInsecureCredentialAuth is set.
+	Credentials                 CredentialVerifier
+	AllowInsecureCredentialAuth bool
+	// AuthFailures throttles repeated failed credential logins (nil: off).
+	AuthFailures *FailureLimiter
 	// AuthTimeout bounds TokenReview and pod lookups.
 	AuthTimeout time.Duration
 	// SendTimeout bounds the pipeline for one message (rate limiter and
@@ -64,14 +73,16 @@ type Backend struct {
 
 // NewSession implements smtp.Backend.
 func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
-	return &session{b: b, remoteIP: remoteIP(c.Conn().RemoteAddr())}, nil
+	return &session{b: b, conn: c, remoteIP: remoteIP(c.Conn().RemoteAddr())}, nil
 }
 
 type session struct {
 	b        *Backend
+	conn     *smtp.Conn
 	remoteIP string
 
-	identity *gateway.Identity // set by AUTH or pod-IP lookup
+	identity *gateway.Identity  // set by AUTH or pod-IP lookup
+	cred     *credential.Result // set by a credential login
 	from     string
 	rcpts    []string
 }
@@ -83,20 +94,31 @@ var (
 
 var errAuthRequired = &smtp.SMTPError{
 	Code: 530, EnhancedCode: smtp.EnhancedCode{5, 7, 0},
-	Message: "Authentication required (AUTH OAUTHBEARER with a ServiceAccount token)",
+	Message: "Authentication required",
 }
 
 // AuthMechanisms implements smtp.AuthSession.
 func (s *session) AuthMechanisms() []string {
-	if s.b.Tokens == nil {
-		return nil
+	var mechs []string
+	if s.b.Tokens != nil {
+		mechs = append(mechs, sasl.OAuthBearer)
 	}
-	return []string{sasl.OAuthBearer}
+	if s.credentialAuthAllowed() {
+		mechs = append(mechs, sasl.Plain, sasl.Login)
+	}
+	return mechs
 }
 
 // Auth implements smtp.AuthSession.
 func (s *session) Auth(mech string) (sasl.Server, error) {
-	if mech != sasl.OAuthBearer || s.b.Tokens == nil {
+	switch mech {
+	case sasl.Plain, sasl.Login:
+		return s.credentialAuth(mech)
+	case sasl.OAuthBearer:
+	default:
+		return nil, smtp.ErrAuthUnknownMechanism
+	}
+	if s.b.Tokens == nil {
 		return nil, smtp.ErrAuthUnknownMechanism
 	}
 	srv := sasl.NewOAuthBearerServer(func(opts sasl.OAuthBearerOptions) *sasl.OAuthBearerError {
@@ -107,6 +129,7 @@ func (s *session) Auth(mech string) (sasl.Server, error) {
 		subj, err := s.b.Tokens.Authenticate(ctx, opts.Token)
 		if err != nil {
 			span.SetStatus(codes.Error, "token rejected")
+			telemetry.AuthFailuresTotal.WithLabelValues(gateway.TransportSMTP, gateway.AuthOAuthBearer, "invalid_token").Inc()
 			s.b.Logger.Info("smtp auth failed", "remote_ip", s.remoteIP, "err", err)
 			s.b.Sender.Reject(audit.Event{
 				MessageID:  uuid.NewString(),
@@ -127,11 +150,16 @@ func (s *session) Auth(mech string) (sasl.Server, error) {
 
 // authFailedAs535 maps any SASL failure to "535 5.7.8 Authentication
 // credentials invalid" as required by US-3.4 (go-smtp would answer 454).
+// Explicit SMTP replies (throttling, temporary failures) pass through.
 type authFailedAs535 struct{ sasl.Server }
 
 func (a authFailedAs535) Next(response []byte) ([]byte, bool, error) {
 	challenge, done, err := a.Server.Next(response)
 	if err != nil {
+		var se *smtp.SMTPError
+		if errors.As(err, &se) {
+			return nil, false, se
+		}
 		return nil, false, &smtp.SMTPError{
 			Code: 535, EnhancedCode: smtp.EnhancedCode{5, 7, 8},
 			Message: "Authentication credentials invalid",
@@ -144,6 +172,13 @@ func (a authFailedAs535) Next(response []byte) ([]byte, bool, error) {
 // its pod IP if (and only if) the fallback is enabled for this deployment;
 // whether a policy then accepts it is decided by legacyAuth.podIPFallback.
 func (s *session) Mail(from string, _ *smtp.MailOptions) error {
+	if s.cred != nil && !s.credentialStillValid() {
+		// Deleted or rotated out since AUTH: revocation also ends open
+		// sessions (US-3.7).
+		s.rejectCommand("invalid_credentials", from, nil)
+		s.identity, s.cred = nil, nil
+		return errCredentialRevoked
+	}
 	if s.identity == nil {
 		if err := s.identifyByPodIP(); err != nil {
 			return err
@@ -250,7 +285,7 @@ func (s *session) Data(r io.Reader) error {
 
 	// Read straight into a buffer that already holds the Received trace
 	// header, so the relayed message is never copied a second time.
-	trace := receivedHeader(s.remoteIP, msgID, s.identity.AuthMethod)
+	trace := receivedHeader(s.remoteIP, msgID, s.identity.AuthMethod, s.isTLS())
 	buf := bytes.NewBuffer(make([]byte, 0, len(trace)+64*1024))
 	buf.WriteString(trace)
 	// go-smtp enforces Server.MaxMessageBytes while we read.
@@ -442,11 +477,15 @@ func addressField(h mail.Header, k string) ([]string, error) {
 }
 
 // receivedHeader builds the RFC 5321 trace header that is prepended to the
-// relayed message, so it can be correlated with the audit log.
-func receivedHeader(remoteIP, msgID, authMethod string) string {
+// relayed message, so it can be correlated with the audit log. The protocol
+// follows RFC 3848: S for TLS, A for SMTP AUTH.
+func receivedHeader(remoteIP, msgID, authMethod string, tls bool) string {
 	proto := "ESMTP"
-	if authMethod == gateway.AuthOAuthBearer {
-		proto = "ESMTPA" // RFC 3848
+	if tls {
+		proto += "S"
+	}
+	if authMethod == gateway.AuthOAuthBearer || authMethod == gateway.AuthSMTPCredential {
+		proto += "A"
 	}
 	return fmt.Sprintf("Received: from [%s] by sigillum with %s id %s;\r\n\t%s\r\n",
 		remoteIP, proto, msgID, time.Now().UTC().Format(time.RFC1123Z))
@@ -458,4 +497,10 @@ func remoteIP(a net.Addr) string {
 		return strings.Trim(a.String(), "[]")
 	}
 	return host
+}
+
+func (s *session) credentialStillValid() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), s.b.AuthTimeout)
+	defer cancel()
+	return s.b.Credentials.StillValid(ctx, s.cred)
 }

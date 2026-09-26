@@ -5,7 +5,9 @@ package auth
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -133,9 +135,42 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (*Subjec
 		Groups:         resp.Status.User.Groups,
 	}
 	if a.cache != nil {
-		a.cache.Add(key, cacheEntry{subject: subj, expires: a.now().Add(a.ttl)})
+		// Never cache a token beyond its own expiry (SPEC §5.3, G-5): the
+		// TokenReview said "valid now", not "valid for the whole TTL".
+		expires := a.now().Add(a.ttl)
+		if exp, ok := tokenExpiry(token); ok && exp.Before(expires) {
+			expires = exp
+		}
+		if a.now().Before(expires) {
+			a.cache.Add(key, cacheEntry{subject: subj, expires: expires})
+		}
 	}
 	return subj, nil
+}
+
+// tokenExpiry reads the exp claim of a JWT without verifying it. That is
+// safe here because it is only used to shorten how long a result the
+// kube-apiserver already verified stays cached, never to accept a token.
+func tokenExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp *json.Number `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == nil {
+		return time.Time{}, false
+	}
+	secs, err := claims.Exp.Float64()
+	if err != nil || secs <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(secs), 0), true
 }
 
 func (a *Authenticator) audienceMatches(got []string) bool {

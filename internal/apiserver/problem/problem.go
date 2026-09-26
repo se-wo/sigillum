@@ -20,6 +20,7 @@ const (
 	TypeTooManyRecipients = "too-many-recipients"
 	TypeRateLimited       = "rate-limited"
 	TypeUpstreamError     = "upstream-error"
+	TypeUpstreamRejected  = "upstream-rejected"
 	TypeBackendNotReady   = "backend-not-ready"
 	TypeNotImplemented    = "not-implemented"
 	TypeShuttingDown      = "shutting-down"

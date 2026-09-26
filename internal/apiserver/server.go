@@ -31,6 +31,7 @@ import (
 	"github.com/se-wo/sigillum/internal/apiserver/auth"
 	"github.com/se-wo/sigillum/internal/apiserver/problem"
 	"github.com/se-wo/sigillum/internal/audit"
+	"github.com/se-wo/sigillum/internal/controller"
 	"github.com/se-wo/sigillum/internal/gateway"
 	"github.com/se-wo/sigillum/internal/policy/ratelimit"
 	"github.com/se-wo/sigillum/internal/telemetry"
@@ -57,7 +58,10 @@ type Server struct {
 	router http.Handler
 
 	cacheSynced atomic.Bool
-	shutting    atomic.Bool
+	// draining fails readiness while requests are still served normally,
+	// so endpoints are removed before the listener closes (G-3).
+	draining atomic.Bool
+	shutting atomic.Bool
 }
 
 // Run starts the api-server (blocking, returns when SIGTERM is observed).
@@ -74,7 +78,10 @@ func init() {
 			tokenCacheTTL   time.Duration
 			audience        string
 			shutdownTimeout time.Duration
+			shutdownDelay   time.Duration
 			auditLog        string
+			clusterName     string
+			secretNs        string
 			rlCfg           ratelimit.Config
 		)
 		fs := flag.NewFlagSet("api", flag.ContinueOnError)
@@ -87,6 +94,9 @@ func init() {
 		fs.DurationVar(&tokenCacheTTL, "token-cache-ttl", 5*time.Minute, "cache TTL for TokenReview results")
 		fs.StringVar(&audience, "token-audience", "sigillum", "expected audience in projected ServiceAccount tokens")
 		fs.DurationVar(&shutdownTimeout, "shutdown-timeout", 25*time.Second, "graceful shutdown deadline")
+		fs.DurationVar(&shutdownDelay, "shutdown-delay", 5*time.Second, "after SIGTERM, keep serving with readiness failing for this long before draining, so the pod leaves the Service endpoints first (a preStop delay)")
+		fs.StringVar(&clusterName, "cluster-name", "", "cluster name added to audit records and log lines (US-4.5)")
+		fs.StringVar(&secretNs, "secret-namespaces", "", "comma-separated namespaces whose Secrets may be read (backend credentials); default: the pod's namespace")
 		rlCfg.BindFlags(fs)
 		fs.StringVar(&auditLog, "audit-log", "stdout", "audit stream sink: stdout, stderr, none, or a file path")
 		if err := fs.Parse(os.Args[1:]); err != nil && err != flag.ErrHelp {
@@ -101,8 +111,12 @@ func init() {
 		if err != nil {
 			return err
 		}
+		if clusterName != "" {
+			logger = logger.With("cluster", clusterName)
+		}
 		cl, err := cluster.New(cfg, func(o *cluster.Options) {
 			o.Scheme = scheme
+			controller.RestrictSecretCache(&o.Cache, controller.SecretNamespaces(secretNs))
 		})
 		if err != nil {
 			return err
@@ -136,6 +150,7 @@ func init() {
 		if err != nil {
 			return err
 		}
+		auditLogger = audit.WithCluster(auditLogger, clusterName)
 		limiter, err := rlCfg.Build(logger)
 		if err != nil {
 			return err
@@ -199,6 +214,11 @@ func init() {
 			return err
 		}
 
+		s.draining.Store(true)
+		if shutdownDelay > 0 {
+			logger.Info("failing readiness before draining", "delay", shutdownDelay.String())
+			time.Sleep(shutdownDelay)
+		}
 		s.shutting.Store(true)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
@@ -270,6 +290,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 		span.End()
 		if err != nil {
+			telemetry.AuthFailuresTotal.WithLabelValues(gateway.TransportREST, gateway.AuthOAuthBearer, "invalid_token").Inc()
 			s.gw.Reject(audit.Event{
 				MessageID: uuid.NewString(),
 				Transport: gateway.TransportREST,

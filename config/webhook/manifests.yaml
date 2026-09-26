@@ -50,6 +50,26 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /validate-sigillum-dev-v1alpha1-mailcredential
+  failurePolicy: Fail
+  name: vmailcredential.sigillum.dev
+  rules:
+  - apiGroups:
+    - sigillum.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - mailcredentials
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /validate-sigillum-dev-v1alpha1-mailpolicy
   failurePolicy: Fail
   name: vmailpolicy.sigillum.dev

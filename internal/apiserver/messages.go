@@ -268,6 +268,28 @@ func writeResult(w http.ResponseWriter, msgID string, res gateway.Result) {
 			Policy:    res.Policy,
 			MessageID: msgID,
 		})
+	case gateway.StatusUpstreamError:
+		if res.Permanent {
+			// The relay refused this message for good (5xx to MAIL, RCPT or
+			// DATA): retrying the same request cannot succeed (G-1).
+			problem.Write(w, problem.Problem{
+				Type:      problem.TypeBase + problem.TypeUpstreamRejected,
+				Title:     "Upstream backend rejected the message",
+				Status:    http.StatusUnprocessableEntity,
+				Detail:    res.Detail,
+				Policy:    res.Policy,
+				MessageID: msgID,
+			})
+			return
+		}
+		problem.Write(w, problem.Problem{
+			Type:      problem.TypeBase + problem.TypeUpstreamError,
+			Title:     "Upstream backend error",
+			Status:    http.StatusBadGateway,
+			Detail:    res.Detail,
+			Policy:    res.Policy,
+			MessageID: msgID,
+		})
 	default:
 		problem.Write(w, problem.Problem{
 			Type:      problem.TypeBase + problem.TypeUpstreamError,

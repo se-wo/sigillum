@@ -113,6 +113,19 @@ func TestWriteResult_UnavailableIs503(t *testing.T) {
 	}
 }
 
+func TestWriteResult_UpstreamTransientVsPermanent(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeResult(w, "m", gateway.Result{Status: gateway.StatusUpstreamError, Policy: "p", Detail: "relay down"})
+	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "errors/upstream-error") {
+		t.Fatalf("transient failure: got %d %s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	writeResult(w, "m", gateway.Result{Status: gateway.StatusUpstreamError, Permanent: true, Policy: "p", Detail: "550 no such user"})
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "errors/upstream-rejected") {
+		t.Fatalf("permanent rejection: got %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestHandleSendMessage_RejectedPayloadAuditsAddresses(t *testing.T) {
 	s, sink := newTestServer()
 	w := post(s, `{"from":"a@team.example","to":["b@x.example"],"bcc":["c@x.example"],"headers":{"X-Evil":"a\r\nBcc: victim@x.example"}}`)
@@ -219,5 +232,25 @@ func TestEstimateSizeCountsSubjectAndHeaders(t *testing.T) {
 	}
 	if got, want := estimateSize(req, nil), int64(100+len("X-Data")+200+4); got != want {
 		t.Fatalf("estimateSize = %d, want %d", got, want)
+	}
+}
+
+func TestReadyz_FailsWhileDrainingButRequestsAreServed(t *testing.T) {
+	s, _ := newTestServer()
+	s.cacheSynced.Store(true)
+	w := httptest.NewRecorder()
+	s.handleReadyz(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("want ready, got %d", w.Code)
+	}
+	// Shutdown delay (G-3): readiness fails, mail is still accepted.
+	s.draining.Store(true)
+	w = httptest.NewRecorder()
+	s.handleReadyz(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503 while draining, got %d", w.Code)
+	}
+	if w := post(s, `{}`); w.Code == http.StatusServiceUnavailable {
+		t.Fatalf("requests must still be served during the shutdown delay, got %d", w.Code)
 	}
 }

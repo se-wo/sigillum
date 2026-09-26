@@ -47,3 +47,21 @@ func TestFromFlag(t *testing.T) {
 		t.Fatalf("file: %v", err)
 	}
 }
+
+func TestWithClusterSetsField(t *testing.T) {
+	var buf bytes.Buffer
+	l := WithCluster(NewJSONLogger(&buf), "prod-eu")
+	l.Record(Event{MessageID: "m", Transport: "smtp", Decision: DecisionAccept,
+		AuthMethod: "smtp_credential", Credential: "grafana.monitoring", CredentialPrevious: true})
+	out := buf.String()
+	for _, want := range []string{`"cluster":"prod-eu"`, `"credential":"grafana.monitoring"`, `"credential_previous":true`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %s in %s", want, out)
+		}
+	}
+	buf.Reset()
+	WithCluster(NewJSONLogger(&buf), "").Record(Event{MessageID: "m"})
+	if strings.Contains(buf.String(), "cluster") || strings.Contains(buf.String(), "credential") {
+		t.Fatalf("unset fields must be omitted: %s", buf.String())
+	}
+}

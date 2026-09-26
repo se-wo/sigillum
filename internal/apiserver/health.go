@@ -10,7 +10,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
-	if s.shutting.Load() {
+	if s.draining.Load() || s.shutting.Load() {
 		http.Error(w, "draining", http.StatusServiceUnavailable)
 		return
 	}
