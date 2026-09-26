@@ -2,6 +2,15 @@ Sigillum {{ .Chart.AppVersion }} installed.
 
   api-server:  {{ include "sigillum.api.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.api.service.port }}
   controller:  {{ include "sigillum.controller.fullname" . }}.{{ .Release.Namespace }}
+{{- if .Values.smtp.enabled }}
+  smtp proxy:  {{ include "sigillum.smtp.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.smtp.service.port }} (auth: {{ join ", " .Values.smtp.authModes }})
+{{- end }}
+{{- if and (eq .Values.rateLimit.backend "memory") (or (gt (int .Values.api.replicas) 1) (and .Values.smtp.enabled (gt (int .Values.smtp.replicas) 0))) }}
+
+WARNING: rateLimit.backend=memory counts per replica. With several api/smtp
+replicas every policy limit is effectively multiplied. Use
+rateLimit.backend=redis for accurate limits.
+{{- end }}
 
 Quickstart:
 
