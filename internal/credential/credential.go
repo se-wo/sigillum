@@ -64,14 +64,14 @@ func HashGenerated(password string) string {
 	return sha256Prefix + hex.EncodeToString(sum[:])
 }
 
-// VerifyGenerated reports whether password matches hash (constant time).
-// SHA-256 is deliberate; see HashGenerated.
 // IsGeneratedHash reports whether hash is the hash of a generated
 // password, as opposed to a bring-your-own argon2id hash.
 func IsGeneratedHash(hash string) bool { return strings.HasPrefix(hash, sha256Prefix) }
 
+// VerifyGenerated reports whether password matches hash (constant time).
+// SHA-256 is deliberate; see HashGenerated.
 func VerifyGenerated(hash, password string) bool {
-	if !strings.HasPrefix(hash, sha256Prefix) {
+	if !IsGeneratedHash(hash) {
 		return false
 	}
 	want, err := hex.DecodeString(strings.TrimPrefix(hash, sha256Prefix))

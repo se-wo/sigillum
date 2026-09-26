@@ -9,13 +9,16 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
 	"net"
 	"net/textproto"
+	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -327,11 +330,41 @@ func TestCredential_RevokedBeforeDataIsNotRelayed(t *testing.T) {
 	}
 	_, _ = io.WriteString(w, "From: grafana@monitoring.example\r\nTo: ops@example.com\r\nSubject: x\r\n\r\nbody\r\n")
 	// Temporary: a message queued before a rotation must not bounce.
-	if err := w.Close(); smtpCode(err) != 454 {
+	err = w.Close()
+	if smtpCode(err) != 454 {
 		t.Fatalf("want 454 at the end of DATA, got %v", err)
 	}
 	if len(sender.reqs) != 0 {
 		t.Fatalf("a revoked credential's message must not be relayed: %+v", sender.reqs)
+	}
+	// The refusal is audited under the message ID quoted in the reply.
+	ev := sender.events[len(sender.events)-1]
+	if sender.rejects[len(sender.rejects)-1] != "invalid_credentials" || ev.MessageID == "" ||
+		!strings.Contains(err.Error(), "(id "+ev.MessageID+")") {
+		t.Fatalf("audit message ID %q not in reply %q", ev.MessageID, err)
+	}
+}
+
+// Review of #20: switching a bring-your-own-hash credential to generated
+// mode ends sessions that logged in with the old password, even before the
+// controller issued a generated one (status.current still holds the
+// argon2id hash).
+func TestCredential_SwitchToGeneratedEndsOwnHashSessions(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	mc := byoCredential(credPassword)
+	cl := credentialClient(t, mc)
+	addr := startProxy(t, &Backend{Sender: sender, AllowInsecureCredentialAuth: true,
+		Credentials: credential.NewVerifier(cl, 1)})
+	c := dial(t, addr)
+	if err := c.Auth(sasl.NewPlainClient("", credUser, credPassword)); err != nil {
+		t.Fatal(err)
+	}
+	mc.Spec.PasswordHash, mc.Spec.SecretName = "", "grafana-smtp"
+	if err := cl.Update(context.Background(), mc); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Mail("grafana@monitoring.example", nil); smtpCode(err) != 454 {
+		t.Fatalf("want 454 after the switch to generated mode, got %v", err)
 	}
 }
 
@@ -442,57 +475,78 @@ func TestCredential_SpecEditKeepsWorking(t *testing.T) {
 	}
 }
 
+// failOnce records one failed attempt of username from ip.
+func failOnce(t *testing.T, f *FailureLimiter, username, ip string) {
+	t.Helper()
+	done, err := f.Begin(context.Background(), username, ip)
+	if err != nil {
+		t.Fatalf("attempt of %s from %s refused: %v", username, ip, err)
+	}
+	done(true)
+}
+
+// blocked reports whether the next attempt of username from ip is refused.
+func blocked(f *FailureLimiter, username, ip string) bool {
+	done, err := f.Begin(context.Background(), username, ip)
+	if err != nil {
+		return errors.Is(err, errThrottled)
+	}
+	done(false)
+	return false
+}
+
 func TestFailureLimiterWindow(t *testing.T) {
 	now := time.Unix(0, 0)
 	f := &FailureLimiter{Window: time.Minute, PerUserIP: 2, now: func() time.Time { return now }}
-	for i := 0; i < 2; i++ {
-		if _, ok := f.Attempt("a", "1.1.1.1"); !ok {
-			t.Fatalf("attempt %d refused", i)
-		}
-	}
-	if _, ok := f.Attempt("a", "1.1.1.1"); ok {
+	failOnce(t, f, "a", "1.1.1.1")
+	failOnce(t, f, "a", "1.1.1.1")
+	if !blocked(f, "a", "1.1.1.1") {
 		t.Fatal("username+IP limit reached")
 	}
 	// Failing on a username from one IP must not lock out the real app,
 	// which logs in from another IP, nor other users behind the same IP
 	// (a mesh sidecar or SNAT gives every caller one source IP).
-	undoA, okA := f.Attempt("a", "2.2.2.2")
-	undoB, okB := f.Attempt("b", "1.1.1.1")
-	if !okA || !okB {
+	if blocked(f, "a", "2.2.2.2") || blocked(f, "b", "1.1.1.1") {
 		t.Fatal("only the username+IP pair is blocked")
 	}
-	undoA()
-	undoB()
 	now = now.Add(61 * time.Second)
-	undo, ok := f.Attempt("a", "1.1.1.1")
-	if !ok {
+	if blocked(f, "a", "1.1.1.1") {
 		t.Fatal("failures must expire after the window")
 	}
-	undo()
-	if f.hits.Len() != 0 {
-		t.Fatalf("expired and taken-back attempts must be pruned, have %d keys", f.hits.Len())
+	if f.hits.Len() != 0 || len(f.busy) != 0 {
+		t.Fatalf("expired keys and finished turns must be pruned, have %d keys, %d turns", f.hits.Len(), len(f.busy))
 	}
 }
 
-// Review of #20: attempts count before the password is checked, so
-// parallel connections cannot all pass the limit while their checks wait
-// for an argon2id slot; a successful check takes its attempt back.
-func TestFailureLimiterCountsInFlightAttempts(t *testing.T) {
-	f := &FailureLimiter{Window: time.Minute, PerUserIP: 3}
-	var undos []func()
-	for i := 0; i < 3; i++ {
-		undo, ok := f.Attempt("a", "1.1.1.1")
-		if !ok {
-			t.Fatalf("attempt %d refused", i)
+// Review of #20: parallel attempts of one username and source IP run one
+// at a time. Parallel correct logins all succeed (they used to be counted
+// as failures while waiting), and parallel wrong ones cannot pass the
+// limit.
+func TestCredential_ParallelLoginsAreSerialized(t *testing.T) {
+	addr := startProxy(t, &Backend{Sender: &stubSender{}, AllowInsecureCredentialAuth: true,
+		Credentials:  credential.NewVerifier(credentialClient(t, byoCredential(credPassword)), 1),
+		AuthFailures: &FailureLimiter{Window: time.Minute, PerUserIP: 3},
+		AuthTimeout:  10 * time.Second})
+	login := func(password string) []int {
+		codes := make([]int, 8)
+		var wg sync.WaitGroup
+		for i := range codes {
+			c := dial(t, addr)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				codes[i] = smtpCode(c.Auth(sasl.NewPlainClient("", credUser, password)))
+			}()
 		}
-		undos = append(undos, undo)
+		wg.Wait()
+		sort.Ints(codes)
+		return codes
 	}
-	if _, ok := f.Attempt("a", "1.1.1.1"); ok {
-		t.Fatal("a fourth attempt in flight must be refused")
+	if got := login(credPassword); fmt.Sprint(got) != "[0 0 0 0 0 0 0 0]" {
+		t.Fatalf("parallel correct logins: %v", got)
 	}
-	undos[1]() // this one had the right password
-	if _, ok := f.Attempt("a", "1.1.1.1"); !ok {
-		t.Fatal("a successful attempt must not count as a failure")
+	if got := login("wrong"); fmt.Sprint(got) != "[454 454 454 454 454 535 535 535]" {
+		t.Fatalf("parallel wrong logins: want 3×535 and the rest throttled, got %v", got)
 	}
 }
 
@@ -500,17 +554,16 @@ func TestFailureLimiterCountsInFlightAttempts(t *testing.T) {
 // failing (review of #20: a full reset used to clear active blocks).
 func TestFailureLimiterFloodKeepsActiveBlock(t *testing.T) {
 	f := &FailureLimiter{Window: time.Hour, PerUserIP: 3}
-	blocked := func() bool { _, ok := f.Attempt("victim.ns", "10.0.0.1"); return !ok }
 	for i := 0; i < 3; i++ {
-		f.Attempt("victim.ns", "10.0.0.1")
+		failOnce(t, f, "victim.ns", "10.0.0.1")
 	}
 	for i := 0; i < maxFailureKeys+10; i++ {
-		f.Attempt(fmt.Sprintf("u%d.ns", i), "10.0.0.2")
-		if i%1000 == 0 && !blocked() {
+		failOnce(t, f, fmt.Sprintf("u%d.ns", i), "10.0.0.2")
+		if i%1000 == 0 && !blocked(f, "victim.ns", "10.0.0.1") {
 			t.Fatalf("active block evicted after %d new keys", i)
 		}
 	}
-	if !blocked() {
+	if !blocked(f, "victim.ns", "10.0.0.1") {
 		t.Fatal("active block evicted by a flood of new keys")
 	}
 }

@@ -146,6 +146,12 @@ func (v *Verifier) StillValid(ctx context.Context, r *Result) (previous bool, er
 		}
 		return false, ErrInvalid
 	}
+	// Generated mode accepts only generated hashes: after a switch from
+	// bring your own hash, status.current still holds the argon2id hash
+	// until the controller issues a password.
+	if !IsGeneratedHash(r.hash) {
+		return false, ErrInvalid
+	}
 	if cur := mc.Status.Current; cur != nil && cur.Hash == r.hash {
 		return false, nil
 	}

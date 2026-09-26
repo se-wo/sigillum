@@ -108,18 +108,20 @@ func (s *session) credentialLogin(username, password string) error {
 		res, err = s.b.Credentials.Check(ctx, mc, password)
 	default:
 		// Only bring-your-own-hash credentials are throttled (see
-		// FailureLimiter). The attempt counts as a failure before the
-		// password is checked, so parallel connections cannot all pass
-		// the limit while their checks wait for an argon2id slot.
-		undo, ok := s.b.AuthFailures.Attempt(username, s.remoteIP)
-		if !ok {
+		// FailureLimiter). Attempts per username and source IP run one
+		// at a time, so parallel connections cannot pass the limit while
+		// their checks wait for an argon2id slot, and parallel correct
+		// logins are not counted as failures.
+		var done func(failed bool)
+		done, err = s.b.AuthFailures.Begin(ctx, username, s.remoteIP)
+		if errors.Is(err, errThrottled) {
 			span.SetStatus(codes.Error, "throttled")
 			s.authFailed(username, "auth_rate_limited")
 			return errAuthThrottled
 		}
-		res, err = s.b.Credentials.Check(ctx, mc, password)
-		if !errors.Is(err, credential.ErrInvalid) {
-			undo()
+		if err == nil {
+			res, err = s.b.Credentials.Check(ctx, mc, password)
+			done(errors.Is(err, credential.ErrInvalid))
 		}
 	}
 	if err != nil {
@@ -208,7 +210,8 @@ func (l *loginServer) Next(response []byte) ([]byte, bool, error) {
 // FailureLimiter throttles repeated failed logins per username and source
 // IP (sliding window, per process). Once a key reaches its limit, further
 // attempts with that username from that IP are refused with 454 without
-// checking the password.
+// checking the password. Attempts of one key run one at a time (Begin), so
+// the count is always settled before the next attempt is let in.
 //
 // Only bring-your-own-hash credentials are throttled (see credentialLogin):
 // they may carry a weak, user-chosen password, and every attempt costs an
@@ -227,55 +230,81 @@ type FailureLimiter struct {
 	// keeps failing stays recent, so flooding the tracker with new keys
 	// cannot evict an active block.
 	hits *lru.Cache[string, []time.Time]
+	// busy serializes the attempts of a key; entries exist only while
+	// attempts are running or waiting.
+	busy map[string]*keyTurn
 	now  func() time.Time
+}
+
+type keyTurn struct {
+	ch      chan struct{}
+	waiters int
 }
 
 // maxFailureKeys bounds the memory of the failure tracker.
 const maxFailureKeys = 100_000
 
+// errThrottled is returned by Begin for a key that used up its failures.
+var errThrottled = errors.New("too many failed logins")
+
 func (f *FailureLimiter) init() {
-	f.once.Do(func() { f.hits, _ = lru.New[string, []time.Time](maxFailureKeys) })
+	f.once.Do(func() {
+		f.hits, _ = lru.New[string, []time.Time](maxFailureKeys)
+		f.busy = map[string]*keyTurn{}
+	})
 }
 
-// Attempt records an attempt of username from ip as a failure, unless the
-// key has used up its failures (ok=false). undo takes the attempt back once
-// the password turned out to be right, or could not be checked.
-func (f *FailureLimiter) Attempt(username, ip string) (undo func(), ok bool) {
+// Begin waits for the turn of username from ip and reports errThrottled
+// once the key has used up its failures, or ctx's error. Otherwise the
+// caller checks the password and calls done with the outcome, which frees
+// the turn.
+func (f *FailureLimiter) Begin(ctx context.Context, username, ip string) (done func(failed bool), err error) {
 	if f == nil || f.PerUserIP <= 0 {
-		return func() {}, true
+		return func(bool) {}, nil
 	}
 	f.init()
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	k := userIPKey(username, ip)
-	if f.countLocked(k) >= f.PerUserIP {
-		return nil, false
-	}
-	t := f.clock()
-	ts, _ := f.hits.Get(k)
-	f.hits.Add(k, append(ts, t))
-	return func() { f.remove(k, t) }, true
-}
-
-// remove drops the failure recorded at t.
-func (f *FailureLimiter) remove(key string, t time.Time) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	ts, ok := f.hits.Get(key)
-	if !ok {
-		return
+	turn := f.busy[k]
+	if turn == nil {
+		turn = &keyTurn{ch: make(chan struct{}, 1)}
+		f.busy[k] = turn
 	}
-	for i := len(ts) - 1; i >= 0; i-- {
-		if ts[i].Equal(t) {
-			ts = append(ts[:i:i], ts[i+1:]...)
-			break
+	turn.waiters++
+	f.mu.Unlock()
+	leave := func() {
+		f.mu.Lock()
+		if turn.waiters--; turn.waiters == 0 {
+			delete(f.busy, k)
 		}
+		f.mu.Unlock()
 	}
-	if len(ts) == 0 {
-		f.hits.Remove(key)
-		return
+	select {
+	case turn.ch <- struct{}{}:
+	case <-ctx.Done():
+		leave()
+		return nil, ctx.Err()
 	}
-	f.hits.Add(key, ts)
+	release := func() {
+		<-turn.ch
+		leave()
+	}
+	f.mu.Lock()
+	blocked := f.countLocked(k) >= f.PerUserIP
+	f.mu.Unlock()
+	if blocked {
+		release()
+		return nil, errThrottled
+	}
+	return func(failed bool) {
+		if failed {
+			f.mu.Lock()
+			ts, _ := f.hits.Get(k)
+			f.hits.Add(k, append(ts, f.clock()))
+			f.mu.Unlock()
+		}
+		release()
+	}, nil
 }
 
 func userIPKey(username, ip string) string { return ip + "\x00" + username }

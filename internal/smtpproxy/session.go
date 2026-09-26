@@ -204,7 +204,7 @@ func (a authFailedAs535) Next(response []byte) ([]byte, bool, error) {
 // its pod IP if (and only if) the fallback is enabled for this deployment;
 // whether a policy then accepts it is decided by legacyAuth.podIPFallback.
 func (s *session) Mail(from string, _ *smtp.MailOptions) error {
-	if err := s.checkCredential(from, nil); err != nil {
+	if err := s.checkCredential(uuid.NewString(), from, nil); err != nil {
 		return err
 	}
 	if s.identity == nil {
@@ -230,7 +230,12 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 
 // rejectCommand audits a refused MAIL or RCPT command for an identified caller.
 func (s *session) rejectCommand(reason, from string, to []string) {
-	s.b.Sender.Reject(s.event(uuid.NewString(), from, to), reason)
+	s.rejectMessage(uuid.NewString(), reason, from, to)
+}
+
+// rejectMessage audits a refusal under an existing message ID.
+func (s *session) rejectMessage(msgID, reason, from string, to []string) {
+	s.b.Sender.Reject(s.event(msgID, from, to), reason)
 }
 
 // event is the audit skeleton for the identified caller.
@@ -335,8 +340,8 @@ func (s *session) Data(r io.Reader) error {
 	}
 
 	// The credential may have been revoked since MAIL FROM.
-	if err := s.checkCredential(s.from, s.rcpts); err != nil {
-		return err
+	if err := s.checkCredential(msgID, s.from, s.rcpts); err != nil {
+		return withMessageID(err, msgID)
 	}
 	to := make([]driver.Address, len(s.rcpts))
 	for i, rc := range s.rcpts {
@@ -523,11 +528,24 @@ func remoteIP(a net.Addr) string {
 	return host
 }
 
+// withMessageID appends the message ID to an SMTP reply, as for every
+// other reply after DATA, so the client can quote it.
+func withMessageID(err error, msgID string) error {
+	var se *smtp.SMTPError
+	if !errors.As(err, &se) {
+		return err
+	}
+	c := *se
+	c.Message += " (id " + msgID + ")"
+	return &c
+}
+
 // checkCredential re-checks a credential login before MAIL and before a
 // message is relayed. A revoked session stays revoked: go-smtp allows no
 // second AUTH, and falling back to the pod IP would continue the session
 // under another identity.
-func (s *session) checkCredential(from string, to []string) error {
+// msgID is the audit message ID of a refusal (the message's own at DATA).
+func (s *session) checkCredential(msgID, from string, to []string) error {
 	if s.revoked {
 		return errCredentialRevoked
 	}
@@ -539,12 +557,12 @@ func (s *session) checkCredential(from string, to []string) error {
 	case errors.Is(err, credential.ErrInvalid):
 		// Deleted or rotated out since AUTH: revocation also ends open
 		// sessions (US-3.7).
-		s.rejectCommand("invalid_credentials", from, to)
+		s.rejectMessage(msgID, "invalid_credentials", from, to)
 		s.identity, s.cred, s.revoked = nil, nil, true
 		return errCredentialRevoked
 	case err != nil:
 		s.b.Logger.Warn("smtp credential lookup failed", "remote_ip", s.remoteIP, "err", err)
-		s.rejectCommand("auth_unavailable", from, to)
+		s.rejectMessage(msgID, "auth_unavailable", from, to)
 		return errAuthUnavailable
 	}
 	// After a rotation the session's password may now be the previous
