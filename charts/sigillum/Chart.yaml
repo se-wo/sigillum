@@ -6,8 +6,8 @@ description: |
   Installs the api-server (REST send path) and controller (CRD reconcilers
   + validating admission webhook) as two Deployments sharing a single image.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.1
+appVersion: "0.1.1"
 icon: ""
 home: https://github.com/se-wo/sigillum
 sources:

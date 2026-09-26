@@ -14,9 +14,9 @@ import (
 
 func TestParseServiceAccountUsername(t *testing.T) {
 	cases := []struct {
-		in           string
-		ns, sa       string
-		ok           bool
+		in     string
+		ns, sa string
+		ok     bool
 	}{
 		{"system:serviceaccount:billing:billing-mailer", "billing", "billing-mailer", true},
 		{"system:serviceaccount::missing-ns", "", "", false},
@@ -82,5 +82,61 @@ func TestAuthenticator_RejectIsCachedNegative(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("expected 1 call due to negative cache, got %d", calls)
+	}
+}
+
+func reviewWithAudiences(auds []string) func(k8stesting.Action) (bool, runtime.Object, error) {
+	return func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &authv1.TokenReview{Status: authv1.TokenReviewStatus{
+			Authenticated: true,
+			User:          authv1.UserInfo{Username: "system:serviceaccount:billing:billing-mailer"},
+			Audiences:     auds,
+		}}, nil
+	}
+}
+
+func TestAuthenticator_RejectsTokenWithoutRequestedAudience(t *testing.T) {
+	cases := map[string][]string{
+		// A non-audience-aware authenticator answers with no audiences,
+		// meaning the token is valid for the kube-apiserver.
+		"empty":           nil,
+		"apiserver token": {"https://kubernetes.default.svc.cluster.local"},
+	}
+	for name, auds := range cases {
+		t.Run(name, func(t *testing.T) {
+			cs := fake.NewSimpleClientset()
+			cs.PrependReactor("create", "tokenreviews", reviewWithAudiences(auds))
+			a, err := New(cs, []string{"sigillum"}, 16, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s, err := a.Authenticate(context.Background(), "tok"); err == nil {
+				t.Fatalf("token without the sigillum audience must be rejected, got %+v", s)
+			}
+			// The rejection is cached like any other negative result.
+			if _, err := a.Authenticate(context.Background(), "tok"); err == nil {
+				t.Fatal("cached result must still reject")
+			}
+		})
+	}
+}
+
+func TestAuthenticator_AcceptsAnyConfiguredAudience(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("create", "tokenreviews", reviewWithAudiences([]string{"other", "sigillum-smtp"}))
+	a, err := New(cs, []string{"sigillum", "sigillum-smtp"}, 0, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Authenticate(context.Background(), "tok"); err != nil {
+		t.Fatalf("intersecting audience must be accepted: %v", err)
+	}
+}
+
+func TestNew_RequiresAudience(t *testing.T) {
+	for _, auds := range [][]string{nil, {}, {""}, {"  "}} {
+		if _, err := New(fake.NewSimpleClientset(), auds, 0, time.Minute); err == nil {
+			t.Errorf("audiences %q: want error", auds)
+		}
 	}
 }
