@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/argon2"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // Username returns the SMTP username of a MailCredential. Namespace names
@@ -65,6 +66,10 @@ func HashGenerated(password string) string {
 
 // VerifyGenerated reports whether password matches hash (constant time).
 // SHA-256 is deliberate; see HashGenerated.
+// IsGeneratedHash reports whether hash is the hash of a generated
+// password, as opposed to a bring-your-own argon2id hash.
+func IsGeneratedHash(hash string) bool { return strings.HasPrefix(hash, sha256Prefix) }
+
 func VerifyGenerated(hash, password string) bool {
 	if !strings.HasPrefix(hash, sha256Prefix) {
 		return false
@@ -265,4 +270,15 @@ func (e Exclusions) split() (exact, prefixes []string) {
 		}
 	}
 	return exact, prefixes
+}
+
+// GeneratedNameError reports why name cannot be the name of a generated
+// MailCredential, or "" if it can. The generated Secret carries the name in
+// the sigillum.dev/credential label, and label values have at most 63
+// characters.
+func GeneratedNameError(name string) string {
+	if msgs := validation.IsValidLabelValue(name); len(msgs) > 0 {
+		return "the name of a generated MailCredential becomes a label value of its Secret: " + strings.Join(msgs, "; ")
+	}
+	return ""
 }

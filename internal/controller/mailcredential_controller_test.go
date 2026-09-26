@@ -208,6 +208,49 @@ func TestBringYourOwnHashAcceptedIntoStatus(t *testing.T) {
 	}
 }
 
+// Review of #20: switching from bring your own hash to generated mode must
+// not advertise a grace period for the argon2id hash, which generated mode
+// cannot verify.
+func TestSwitchToGeneratedDropsOwnHash(t *testing.T) {
+	phc := credential.HashArgon2id("one", []byte("0123456789abcdef"), 7*1024, 5, 1)
+	mc := issuedCredential("1h")
+	mc.Status.SecretName, mc.Status.Previous = "", nil
+	mc.Status.Current = &sigv1.CredentialHash{Hash: phc, CreatedAt: metav1.Now()}
+	r, c := credReconciler(t, mc, interceptor.Funcs{})
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: credKey}); err != nil {
+		t.Fatal(err)
+	}
+	got := getCredential(t, c)
+	if got.Status.Previous != nil {
+		t.Fatalf("the own hash must not become the previous password: %+v", got.Status.Previous)
+	}
+	if !credential.VerifyGenerated(got.Status.Current.Hash, "new-password") {
+		t.Fatalf("a generated password must be issued: %+v", got.Status.Current)
+	}
+}
+
+// Review of #20: a name longer than a label value cannot be a generated
+// credential (webhook disabled); it must fail once, not retry forever.
+func TestGeneratedNameTooLongIsInvalid(t *testing.T) {
+	mc := issuedCredential("1h")
+	mc.Name = strings.Repeat("a", 64)
+	mc.Status = sigv1.MailCredentialStatus{}
+	r, c := credReconciler(t, mc, interceptor.Funcs{})
+	key := client.ObjectKeyFromObject(mc)
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+	if err != nil || res.RequeueAfter != 0 {
+		t.Fatalf("an invalid name is not retried: %v, %+v", err, res)
+	}
+	var got sigv1.MailCredential
+	if err := c.Get(context.Background(), key, &got); err != nil {
+		t.Fatal(err)
+	}
+	ready := meta.FindStatusCondition(got.Status.Conditions, sigv1.ConditionReady)
+	if ready == nil || ready.Reason != sigv1.ReasonInvalidConfiguration || !strings.Contains(ready.Message, "label value") {
+		t.Fatalf("want InvalidConfiguration naming the label limit, got %+v", ready)
+	}
+}
+
 // Missing RBAC is a write failure, not a foreign Secret; the issued
 // password stays valid.
 func TestForbiddenSecretWriteIsNotAConflict(t *testing.T) {

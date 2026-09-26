@@ -90,6 +90,9 @@ func (v *MailCredentialValidator) validate(mc *sigv1.MailCredential) (admission.
 			errs = append(errs, field.Forbidden(spec.Child("secretName"),
 				"generated credentials are disabled in this installation (credentials.enabled=false); set passwordHash instead"))
 		}
+		if msg := credential.GeneratedNameError(mc.Name); msg != "" {
+			errs = append(errs, field.Invalid(field.NewPath("metadata", "name"), mc.Name, msg))
+		}
 		for _, msg := range validation.IsDNS1123Subdomain(mc.Spec.SecretName) {
 			errs = append(errs, field.Invalid(spec.Child("secretName"), mc.Spec.SecretName, msg))
 		}

@@ -126,8 +126,16 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		var err error
 		if mc.Spec.SecretName == "" {
 			fail(sigv1.ReasonInvalidConfiguration, "set spec.secretName (generated mode) or spec.passwordHash (bring your own hash)")
+		} else if msg := credential.GeneratedNameError(mc.Name); msg != "" {
+			fail(sigv1.ReasonInvalidConfiguration, msg)
 		} else if interval, grace, err = rotationSettings(mc.Spec.Rotation); err != nil {
 			fail(sigv1.ReasonInvalidConfiguration, err.Error())
+		}
+		if st.Current != nil && !credential.IsGeneratedHash(st.Current.Hash) {
+			// Switched from bring your own hash: that password is not in
+			// any Secret and cannot be verified in generated mode, so it
+			// gets no grace period.
+			st.Current, st.Previous = nil, nil
 		}
 	}
 	if !finished {

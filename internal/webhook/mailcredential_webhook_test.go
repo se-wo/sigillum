@@ -15,6 +15,7 @@ func TestMailCredentialValidator(t *testing.T) {
 	byo := credential.HashArgon2id("pw", []byte("0123456789abcdef"), 19*1024, 2, 1)
 	cases := []struct {
 		name     string
+		mcName   string
 		ns       string
 		spec     sigv1.MailCredentialSpec
 		disabled bool
@@ -44,6 +45,11 @@ func TestMailCredentialValidator(t *testing.T) {
 			wantErr: "excluded"},
 		{name: "generated disabled", disabled: true, spec: sigv1.MailCredentialSpec{ServiceAccountName: "a", SecretName: "s"},
 			wantErr: "generated credentials are disabled"},
+		// Review of #20: the name becomes the Secret's label value.
+		{name: "generated name too long", mcName: strings.Repeat("a", 64),
+			spec: sigv1.MailCredentialSpec{ServiceAccountName: "a", SecretName: "s"}, wantErr: "label value"},
+		{name: "own hash with a long name", mcName: strings.Repeat("a", 64),
+			spec: sigv1.MailCredentialSpec{ServiceAccountName: "a", PasswordHash: byo}},
 		{name: "own hash while generated disabled", disabled: true,
 			spec: sigv1.MailCredentialSpec{ServiceAccountName: "a", PasswordHash: byo}},
 	}
@@ -57,7 +63,11 @@ func TestMailCredentialValidator(t *testing.T) {
 			if ns == "" {
 				ns = "monitoring"
 			}
-			mc := &sigv1.MailCredential{ObjectMeta: metav1.ObjectMeta{Name: "grafana", Namespace: ns}, Spec: tc.spec}
+			name := tc.mcName
+			if name == "" {
+				name = "grafana"
+			}
+			mc := &sigv1.MailCredential{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}, Spec: tc.spec}
 			_, err := v.ValidateCreate(context.Background(), mc)
 			if tc.wantErr == "" {
 				if err != nil {
