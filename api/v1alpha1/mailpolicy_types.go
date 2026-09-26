@@ -63,15 +63,18 @@ type SenderRestrictions struct {
 // addresses (US-2.4). Domains match exactly and case-insensitively;
 // subdomains must be listed separately. BlockedDomains takes precedence over
 // both allowlists. A recipient is allowed if its domain is in AllowedDomains
-// or the whole address is in AllowedRecipients.
+// or the address matches an AllowedRecipients entry.
 type RecipientRestrictions struct {
 	// AllowedDomains lists recipient domains allowed as a whole. If both
 	// AllowedDomains and AllowedRecipients are empty, any domain that is not
 	// blocked is allowed.
 	// +optional
 	AllowedDomains []string `json:"allowedDomains,omitempty"`
-	// AllowedRecipients lists single allowed addresses (exact,
-	// case-insensitive), for example a QA inbox on a staging cluster.
+	// AllowedRecipients lists allowed addresses: exact addresses or glob
+	// patterns anchored on a bare domain ("alerts@example.com",
+	// "*@oncall.example.com"), matched case-insensitively like
+	// allowedSenders. For example the alerting inbox of a workload, or the
+	// QA inbox of a staging cluster.
 	// +optional
 	AllowedRecipients []string `json:"allowedRecipients,omitempty"`
 	// BlockedDomains are always rejected, even if also allowed.

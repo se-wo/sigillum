@@ -193,9 +193,9 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 
 *Acceptance criteria:*
 - `recipientRestrictions.allowedDomains` and `allowedRecipients` (allowlists) and `blockedDomains` (denylist), all optional. Omitted block = no recipient restriction.
-- The denylist wins over both allowlists. A recipient passes if its domain is in `allowedDomains` **or** the whole address is in `allowedRecipients`. With both allowlists empty, any domain that is not blocked passes.
+- The denylist wins over both allowlists. A recipient passes if its domain is in `allowedDomains` **or** the address matches an `allowedRecipients` entry. With both allowlists empty, any domain that is not blocked passes.
 - Domains match exactly and case-insensitively; subdomains must be listed separately. The webhook requires bare domains (no `@`, no wildcards).
-- `allowedDomains: [example.com]` allows every mailbox `@example.com`. `allowedRecipients` **[v0.3.0]** allows single addresses (exact, case-insensitive; the webhook requires plain addresses without display name or wildcards), mainly for staging clusters that may only mail a QA inbox.
+- `allowedDomains: [example.com]` allows every mailbox `@example.com`. `allowedRecipients` **[v0.3.0]** narrows this to single mailboxes (least privilege: a workload that only notifies `alerts@example.com` cannot mail the rest of the company, even when compromised). Entries are exact addresses or globs, matched case-insensitively like `allowedSenders` (shared matcher). The webhook requires plain addresses without display name and routing local parts, and globs of the form `<local-part pattern>@<bare domain>` (for example `*@oncall.example.com`); `*`, `*@*`, wildcard domains and bare domains are rejected, since whole domains belong in `allowedDomains`.
 - Checked addresses: all recipients (`to`, `cc`, `bcc` on REST; `RCPT TO` on SMTP) and all `Reply-To` addresses, since replies go there.
 - Local parts with routing semantics (`%`, `!`, quoted local parts such as `"user@other"@example.com`) are rejected as `invalid_payload`. The domain check only looks at the part after the last `@`; an upstream MTA that honors the percent hack or bang paths could otherwise deliver to a foreign domain.
 - On violation: `403` with problem type `recipient-not-allowed`.
@@ -687,8 +687,9 @@ spec:
     allowedDomains:          # whole domains
       - example.com
       - customer.example.com
-    allowedRecipients:       # single addresses (v0.3.0)
+    allowedRecipients:       # single mailboxes or domain-anchored globs (v0.3.0)
       - qa@partner.example.org
+      - "*@oncall.example.com"
     blockedDomains: []       # wins over both allowlists
   rateLimits:                # counted per policy, sliding window
     messagesPerMinute: 60
@@ -709,7 +710,7 @@ status:
   observedGeneration: 1
 ```
 
-Webhook validation (in addition to the schema): at least one subject; exactly one matcher per subject; `serviceAccount.name` set; selectors non-empty and valid; `backendRef.name` set and `kind` known; no empty `allowedSenders` entries; recipient domains are bare domains; `allowedRecipients` are plain addresses without wildcards or routing local parts.
+Webhook validation (in addition to the schema): at least one subject; exactly one matcher per subject; `serviceAccount.name` set; selectors non-empty and valid; `backendRef.name` set and `kind` known; no empty `allowedSenders` entries; recipient domains are bare domains; `allowedRecipients` entries are plain addresses without routing local parts, or globs anchored on a bare domain.
 
 `status.matchedSubjects` exists in the schema but is never populated **[gap G-4]**. Its intended meaning (number of ServiceAccounts in the namespace the policy currently matches) needs a decision before it is implemented or removed.
 
@@ -1236,7 +1237,7 @@ See also §1.4 (permanent non-goals) and §1.5 (anticipated, not before 1.0). Ad
 
 - **v0.1.0 (MVP):** `POST /v1/messages` with attachments (JSON and multipart); ServiceAccount token auth; CRDs `MailBackend`, `ClusterMailBackend`, `MailPolicy` (`type: smtp`); in-memory rate limiting; sender restrictions; Prometheus metrics; structured logs; Helm chart; validating webhook; controller with backend health checks.
 - **v0.2.0:** SMTP proxy with OAUTHBEARER and pod-IP fallback; Redis rate-limit store; audit stream and shared gateway pipeline; recipient restrictions; OpenTelemetry tracing.
-- **v0.3.0:** see §8.2. `MailCredential` with `AUTH PLAIN` / `LOGIN` on the SMTP proxy, generated passwords behind the credential Secret guard, rotation and bring-your-own argon2id hashes; `allowedRecipients`; `--cluster-name`; `422 upstream-rejected` (G-1); shutdown delay (G-3); token cache bounded by `exp` (G-5); Secret informer restricted to the readable namespaces; recipes in `examples/` (local development, egress, admission, providers, clients, Reloader).
+- **v0.3.0:** see §8.2. `MailCredential` with `AUTH PLAIN` / `LOGIN` on the SMTP proxy, generated passwords behind the credential Secret guard, rotation and bring-your-own argon2id hashes; `allowedRecipients` (exact and glob, #6); `--cluster-name`; `422 upstream-rejected` (G-1); shutdown delay (G-3); token cache bounded by `exp` (G-5); Secret informer restricted to the readable namespaces; recipes in `examples/` (local development, egress, admission, providers, clients, Reloader).
 - **v0.2.1 (security patch):** address hardening (`%`, `!`, `@`, quoted local parts; no `@` in display names); `Sender` and `Reply-To` checks; `Resent-*` and duplicate headers rejected; REST size accounting includes subject and custom headers; header values ≤ 998 characters; `smtp.allowInsecureAuth` follows `smtp.tls.secretName`; Helm warnings for plaintext operation and `rateLimit.failOpen`.
 
 ### 8.2 v0.3.0 — Works with off-the-shelf apps, cannot be bypassed (released)

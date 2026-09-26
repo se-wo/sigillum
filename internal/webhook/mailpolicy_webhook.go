@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"net/mail"
+	"path/filepath"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -123,27 +124,52 @@ func validateSelector(p *field.Path, sel *sigv1.LabelSelectorSubject) field.Erro
 	return nil
 }
 
-// validateRecipients accepts plain addresses (no display name, no
-// wildcards) whose local part has no routing semantics; recipient matching
-// is an exact comparison, so anything else would silently never match.
-func validateRecipients(p *field.Path, addrs []string) field.ErrorList {
+// validateRecipients accepts plain addresses whose local part has no
+// routing semantics, and globs whose domain part is a bare domain
+// ("*@oncall.example.com"). A glob's * also matches '@', so an unanchored
+// domain would widen the list far beyond its intent; "*", "*@*" and bare
+// domains are refused (whole domains belong in allowedDomains).
+func validateRecipients(p *field.Path, entries []string) field.ErrorList {
 	var errs field.ErrorList
-	for i, a := range addrs {
-		parsed, err := mail.ParseAddress(a)
-		switch {
-		case strings.ContainsAny(a, "*?["):
-			errs = append(errs, field.Invalid(p.Index(i), a, "must be a single address (no wildcards; use allowedDomains for whole domains)"))
-		case err != nil:
-			errs = append(errs, field.Invalid(p.Index(i), a, err.Error()))
-		case parsed.Name != "" || parsed.Address != a:
-			errs = append(errs, field.Invalid(p.Index(i), a, "must be a plain address such as qa@example.com"))
-		default:
-			if err := policy.ValidateMailbox(a); err != nil {
-				errs = append(errs, field.Invalid(p.Index(i), a, err.Error()))
-			}
+	for i, e := range entries {
+		if msg := recipientEntryError(e); msg != "" {
+			errs = append(errs, field.Invalid(p.Index(i), e, msg))
 		}
 	}
 	return errs
+}
+
+func recipientEntryError(e string) string {
+	if !strings.ContainsAny(e, "*?[") {
+		parsed, err := mail.ParseAddress(e)
+		switch {
+		case err != nil:
+			return err.Error()
+		case parsed.Name != "" || parsed.Address != e:
+			return "must be a plain address such as alerts@example.com"
+		}
+		if err := policy.ValidateMailbox(e); err != nil {
+			return err.Error()
+		}
+		return ""
+	}
+	local, domain, ok := strings.Cut(e, "@")
+	switch {
+	case !ok || strings.Contains(domain, "@"):
+		return "a pattern must have the form <local-part pattern>@<domain>, e.g. *@oncall.example.com"
+	case strings.ContainsAny(domain, "*?["):
+		return "the domain of a pattern must not contain wildcards; list whole domains in allowedDomains"
+	case len(validation.IsDNS1123Subdomain(strings.ToLower(domain))) > 0:
+		return "the domain of a pattern must be a bare domain"
+	case local == "":
+		return "the local part of a pattern must not be empty"
+	case strings.ContainsAny(local, "%!\"<>() ,;:"):
+		return "the local part of a pattern must not contain routing or quoting characters"
+	}
+	if _, err := filepath.Match(e, ""); err != nil {
+		return "invalid glob pattern: " + err.Error()
+	}
+	return ""
 }
 
 // validateDomains accepts bare DNS names only. Recipient matching is an exact

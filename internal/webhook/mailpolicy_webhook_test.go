@@ -69,8 +69,16 @@ func TestMailPolicyValidator_AllowedRecipients(t *testing.T) {
 		wantErr string
 	}{
 		{name: "valid", rcpts: []string{"qa@staging.example.com", "QA-Team@example.com"}},
+		{name: "globs anchored on a domain", rcpts: []string{"*@oncall.example.com", "alerts-?@example.com", "team-[ab]@example.com"}},
 		{name: "domain only", rcpts: []string{"example.com"}, wantErr: "allowedRecipients[0]"},
-		{name: "wildcard", rcpts: []string{"*@example.com"}, wantErr: "no wildcards"},
+		{name: "star", rcpts: []string{"*"}, wantErr: "<local-part pattern>@<domain>"},
+		{name: "star at star", rcpts: []string{"*@*"}, wantErr: "must not contain wildcards"},
+		{name: "unanchored domain", rcpts: []string{"*@*.example.com"}, wantErr: "must not contain wildcards"},
+		{name: "glob across the at sign", rcpts: []string{"*example.com"}, wantErr: "<local-part pattern>@<domain>"},
+		{name: "two at signs", rcpts: []string{"*@x@example.com"}, wantErr: "<local-part pattern>@<domain>"},
+		{name: "empty local part", rcpts: []string{"@example.com"}, wantErr: "allowedRecipients[0]"},
+		{name: "routing in pattern", rcpts: []string{"*%evil.test@example.com"}, wantErr: "routing"},
+		{name: "bad glob", rcpts: []string{"[a@example.com"}, wantErr: "invalid glob"},
 		{name: "display name", rcpts: []string{"QA <qa@example.com>"}, wantErr: "plain address"},
 		{name: "percent hack", rcpts: []string{"qa%evil.test@example.com"}, wantErr: "allowedRecipients[0]"},
 		{name: "empty", rcpts: []string{""}, wantErr: "allowedRecipients[0]"},

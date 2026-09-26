@@ -338,3 +338,34 @@ func TestEvaluate_AllowedRecipients(t *testing.T) {
 		}
 	}
 }
+
+func TestEvaluate_AllowedRecipientsGlob(t *testing.T) {
+	p := policy("p", "ns", 1, "sa", "*@x.com")
+	p.Spec.RecipientRestrictions = &sigv1.RecipientRestrictions{
+		AllowedRecipients: []string{"alerts@contoso.com", "*@oncall.contoso.com"},
+		BlockedDomains:    []string{"blocked.oncall.contoso.com"},
+	}
+	for rcpt, ok := range map[string]bool{
+		"alerts@contoso.com":           true,
+		"ALERTS@Contoso.com":           true,
+		"anyone@oncall.contoso.com":    true,
+		"Pager@OnCall.Contoso.com":     true,
+		"ceo@contoso.com":              false, // same domain, not listed
+		"x@sub.oncall.contoso.com":     false, // the glob is anchored on the domain
+		"x@blocked.oncall.contoso.com": false,
+		"alerts@contoso.com.evil.test": false,
+		"oncall@contoso.com":           false,
+	} {
+		got := Evaluate(&p, MessageView{From: "a@x.com", Recipients: []string{rcpt}})
+		if got.Allowed != ok {
+			t.Errorf("%s: want %v got %+v", rcpt, ok, got)
+		}
+		if !ok && got.DenyReason != DenyRecipientBlocked {
+			t.Errorf("%s: want recipient_not_allowed, got %s", rcpt, got.DenyReason)
+		}
+	}
+	if got := Evaluate(&p, MessageView{From: "a@x.com", Recipients: []string{"alerts@contoso.com"},
+		ReplyTo: []string{"ceo@contoso.com"}}); got.Allowed {
+		t.Fatal("Reply-To outside allowedRecipients must be denied")
+	}
+}

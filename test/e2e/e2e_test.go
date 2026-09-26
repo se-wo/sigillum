@@ -272,6 +272,32 @@ func testMailCredential(t *testing.T, root string) {
 		t.Fatal("a wrong password must be refused")
 	}
 
+	// allowedRecipients: a listed mailbox and a glob match pass, another
+	// mailbox in the same domain is refused (issue #6).
+	sendTo := func(rcpt, subject string) error {
+		c, err := smtp.Dial("127.0.0.1:" + smtpPort)
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		if err := c.Auth(sasl.NewPlainClient("", user, first)); err != nil {
+			return fmt.Errorf("AUTH PLAIN: %w", err)
+		}
+		msg := "From: grafana@example.com\r\nTo: " + rcpt + "\r\nSubject: " + subject + "\r\n\r\nrecipient check\r\n"
+		if err := smtpSend(c, "grafana@example.com", rcpt, msg); err != nil {
+			return err
+		}
+		return c.Quit()
+	}
+	if err := sendTo("pager@oncall.example.com", "e2e glob recipient"); err != nil {
+		t.Fatalf("glob-matched recipient must be accepted: %v", err)
+	}
+	waitForMailpit(t, "e2e glob recipient")
+	var se *smtp.SMTPError
+	if err := sendTo("eve@noreply.example.com", "never"); !errors.As(err, &se) || se.Code != 550 {
+		t.Fatalf("mailbox outside allowedRecipients must be refused with 550, got %v", err)
+	}
+
 	// Rotate on demand; both passwords work during the grace period.
 	run(t, root, "kubectl", "-n", appsNS, "annotate", "mailcredential", "grafana", "sigillum.dev/rotate=1", "--overwrite")
 	var second string
@@ -566,6 +592,10 @@ spec:
   senderRestrictions:
     allowedSenders:
     - grafana@example.com
+  recipientRestrictions:        # issue #6: single mailboxes and domain globs
+    allowedRecipients:
+    - bob@noreply.example.com
+    - "*@oncall.example.com"
 `
 
 const noSendersPolicyManifest = `---

@@ -204,27 +204,36 @@ func Evaluate(p *sigv1.MailPolicy, msg MessageView) Decision {
 // senderAllowed handles exact-match and `*@suffix` glob patterns. An empty
 // allow-list denies all (per spec defaults — explicit allow is required).
 func senderAllowed(from string, allowed []string) bool {
-	if len(allowed) == 0 {
-		return false
-	}
-	from = strings.ToLower(strings.TrimSpace(from))
 	for _, pattern := range allowed {
-		p := strings.ToLower(strings.TrimSpace(pattern))
-		if p == from {
+		if AddressMatches(from, pattern) {
 			return true
 		}
-		if strings.ContainsAny(p, "*?[") {
-			if ok, _ := filepath.Match(p, from); ok {
-				return true
-			}
-		}
+	}
+	return false
+}
+
+// AddressMatches reports whether addr matches an allowedSenders or
+// allowedRecipients entry: case-insensitively, exactly or, if the entry
+// contains *, ? or [, as a filepath.Match glob over the whole address.
+// A glob's * also matches '@', so entries must anchor on the domain
+// ("*@example.com"); the webhook enforces that for allowedRecipients.
+func AddressMatches(addr, pattern string) bool {
+	a := strings.ToLower(strings.TrimSpace(addr))
+	p := strings.ToLower(strings.TrimSpace(pattern))
+	if p == a {
+		return true
+	}
+	if strings.ContainsAny(p, "*?[") {
+		ok, _ := filepath.Match(p, a)
+		return ok
 	}
 	return false
 }
 
 // recipientAllowed applies recipientRestrictions; nil allows every
 // recipient. blockedDomains always wins. Otherwise a recipient passes if its
-// domain is in allowedDomains or the address is in allowedRecipients; with
+// domain is in allowedDomains or the address matches an allowedRecipients
+// entry (exact or glob, as allowedSenders); with
 // both allowlists empty every domain that is not blocked passes.
 func recipientAllowed(addr string, r *sigv1.RecipientRestrictions) bool {
 	if r == nil {
@@ -244,8 +253,8 @@ func recipientAllowed(addr string, r *sigv1.RecipientRestrictions) bool {
 			return true
 		}
 	}
-	for _, a := range r.AllowedRecipients {
-		if strings.EqualFold(strings.TrimSpace(a), addr) {
+	for _, p := range r.AllowedRecipients {
+		if AddressMatches(addr, p) {
 			return true
 		}
 	}

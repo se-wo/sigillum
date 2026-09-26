@@ -83,7 +83,7 @@ spec:
     allowedSenders: ["noreply@example.com", "*@billing.example.com"]
   recipientRestrictions:
     allowedDomains: ["example.com", "customer.example.com"]  # every mailbox in these domains
-    allowedRecipients: ["qa@partner.example.org"]            # plus single addresses
+    allowedRecipients: ["alerts@partner.example.org", "*@oncall.example.com"]  # plus single mailboxes / globs
     blockedDomains: []            # denylist wins over both allowlists
   messageLimits:
     maxRecipients: 50
