@@ -3,12 +3,14 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -105,6 +107,9 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		mc = fresh
 	}
+	// Unchanged status is not written again (ServiceAccount events,
+	// SecretConflict and GuardMissing requeues).
+	orig := *mc.Status.DeepCopy()
 	st := &mc.Status
 	accepted := st.Current // keeps CreatedAt of an unchanged bring-your-own hash
 	st.Username = credential.Username(mc.Name, mc.Namespace)
@@ -269,10 +274,17 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		Reason:             reason,
 		Message:            message,
 	})
-	if err := r.updateStatus(ctx, &mc, secretWritten); err != nil {
-		return ctrl.Result{}, err
+	if !equality.Semantic.DeepEqual(orig, mc.Status) || secretWritten {
+		if err := r.updateStatus(ctx, &mc, secretWritten); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
-	return result, retErr
+	if retErr != nil {
+		// controller-runtime ignores a Result that comes with an error;
+		// the error's backoff decides the retry.
+		return ctrl.Result{}, retErr
+	}
+	return result, nil
 }
 
 // updateStatus writes mc.Status. After a new password was written to the
@@ -286,7 +298,7 @@ func (r *MailCredentialReconciler) updateStatus(ctx context.Context, mc *sigv1.M
 		return err
 	}
 	status := *mc.Status.DeepCopy()
-	return retry.OnError(statusRetryBackoff, func(error) bool { return true }, func() error {
+	return retry.OnError(statusRetryBackoff, func(err error) bool { return ctx.Err() == nil && transient(err) }, func() error {
 		var latest sigv1.MailCredential
 		if err := r.apiReader().Get(ctx, client.ObjectKeyFromObject(mc), &latest); err != nil {
 			return client.IgnoreNotFound(err)
@@ -297,6 +309,20 @@ func (r *MailCredentialReconciler) updateStatus(ctx context.Context, mc *sigv1.M
 		latest.Status = status
 		return r.Status().Update(ctx, &latest)
 	})
+}
+
+// transient reports whether a failed status write may succeed on retry:
+// conflicts, timeouts, throttling, unavailable or failing API servers and
+// errors without an API status (network). Invalid, forbidden and similar
+// answers will not change.
+func transient(err error) bool {
+	var status apierrors.APIStatus
+	if !errors.As(err, &status) {
+		return true
+	}
+	return apierrors.IsConflict(err) || apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) ||
+		apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) || apierrors.IsInternalError(err) ||
+		apierrors.IsUnexpectedServerError(err)
 }
 
 // statusRetryBackoff spans about 12s, enough to ride out a timeout or an
@@ -332,24 +358,10 @@ func rotationDue(mc *sigv1.MailCredential, now time.Time, interval time.Duration
 	return ""
 }
 
+// rotationSettings parses spec.rotation like the webhook does (which may
+// be disabled).
 func rotationSettings(rot *sigv1.CredentialRotation) (interval, grace time.Duration, err error) {
-	grace = credential.DefaultGracePeriod
-	if rot == nil {
-		return 0, grace, nil
-	}
-	if interval, err = credential.ParseDuration(rot.Interval); err != nil {
-		return 0, 0, fmt.Errorf("spec.rotation.interval: %w", err)
-	}
-	// Also checked by the webhook, which may be disabled.
-	if interval != 0 && interval < credential.MinRotationInterval {
-		return 0, 0, fmt.Errorf("spec.rotation.interval: must be at least 1h")
-	}
-	if rot.GracePeriod != "" {
-		if grace, err = credential.ParseDuration(rot.GracePeriod); err != nil {
-			return 0, 0, fmt.Errorf("spec.rotation.gracePeriod: %w", err)
-		}
-	}
-	return interval, grace, nil
+	return credential.ParseRotation(rot)
 }
 
 // nextCredentialEvent is the time until the previous password expires or

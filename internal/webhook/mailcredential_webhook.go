@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -91,15 +92,9 @@ func (v *MailCredentialValidator) validate(mc *sigv1.MailCredential) (admission.
 		for _, msg := range validation.IsDNS1123Subdomain(mc.Spec.SecretName) {
 			errs = append(errs, field.Invalid(spec.Child("secretName"), mc.Spec.SecretName, msg))
 		}
-		if rot := mc.Spec.Rotation; rot != nil {
-			rPath := spec.Child("rotation")
-			if d, err := credential.ParseDuration(rot.Interval); err != nil {
-				errs = append(errs, field.Invalid(rPath.Child("interval"), rot.Interval, err.Error()))
-			} else if d != 0 && d < credential.MinRotationInterval {
-				errs = append(errs, field.Invalid(rPath.Child("interval"), rot.Interval, "must be at least 1h"))
-			}
-			if _, err := credential.ParseDuration(rot.GracePeriod); err != nil {
-				errs = append(errs, field.Invalid(rPath.Child("gracePeriod"), rot.GracePeriod, err.Error()))
+		if _, _, err := credential.ParseRotation(mc.Spec.Rotation); err != nil {
+			for _, e := range rotationErrors(err) {
+				errs = append(errs, field.Invalid(spec.Child("rotation", e.Field), e.Value, e.Detail))
 			}
 		}
 	}
@@ -108,4 +103,20 @@ func (v *MailCredentialValidator) validate(mc *sigv1.MailCredential) (admission.
 		return nil, nil
 	}
 	return nil, apierrors.NewInvalid(gk, mc.Name, errs)
+}
+
+// rotationErrors unpacks the *credential.RotationError values of err.
+func rotationErrors(err error) []*credential.RotationError {
+	var out []*credential.RotationError
+	var one *credential.RotationError
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, e := range joined.Unwrap() {
+			if errors.As(e, &one) {
+				out = append(out, one)
+			}
+		}
+	} else if errors.As(err, &one) {
+		out = append(out, one)
+	}
+	return out
 }

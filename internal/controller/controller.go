@@ -111,6 +111,12 @@ func init() {
 
 		releaseNs := os.Getenv("POD_NAMESPACE")
 		exclusions := credential.ParseExclusions(credentialExclude, releaseNs)
+		if err := exclusions.Validate(); err != nil {
+			return fmt.Errorf("--credential-exclude-namespaces: %w", err)
+		}
+		if credentialSMTPPort < 1 || credentialSMTPPort > 65535 {
+			return fmt.Errorf("--credential-smtp-port must be between 1 and 65535, got %d", credentialSMTPPort)
+		}
 
 		opts := ctrl.Options{
 			Scheme:                  scheme,

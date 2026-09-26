@@ -35,6 +35,9 @@ Works with off-the-shelf apps and cannot be bypassed (SPEC §8.2).
   `rbac.allowedSecretNamespaces`.
 - `terminationGracePeriodSeconds` is 35 (was 30) for the api-server and
   SMTP proxy.
+- The SMTP proxy's default memory limit is 512Mi (was 256Mi): besides
+  message buffers it now budgets for two concurrent argon2id checks of up
+  to 64 MiB each (`values.yaml` explains the budget).
 
 ### Added
 

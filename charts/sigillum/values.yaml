@@ -100,10 +100,14 @@ smtp:
     secretName: ""    # enables STARTTLS with tls.crt / tls.key
   maxMessageBytes: 33554432
   maxRecipients: 100
-  # Messages buffered and relayed at once per pod. Each can hold up to
-  # maxMessageBytes in memory, so keep maxConcurrentMessages x
-  # maxMessageBytes well below resources.limits.memory. Further messages
-  # wait up to sendTimeout, then get a retryable 451.
+  # Messages buffered and relayed at once per pod. Further messages wait up
+  # to sendTimeout, then get a retryable 451. Memory budget per pod, to stay
+  # below resources.limits.memory:
+  #   maxConcurrentMessages x maxMessageBytes (4 x 32 MiB), a growing buffer
+  #   may briefly hold up to twice that
+  # + 2 x 64 MiB for argon2id checks of bring-your-own-hash MailCredentials
+  #   (authModes credential; at most two run at once)
+  # + about 64 MiB for the process and its informer caches.
   maxConcurrentMessages: 4
   sendTimeout: 60s
   shutdownDelay: 5s
@@ -115,7 +119,7 @@ smtp:
       memory: 128Mi
     limits:
       cpu: 500m
-      memory: 256Mi
+      memory: 512Mi
   podAnnotations: {}
   podLabels: {}
   nodeSelector: {}
@@ -163,7 +167,7 @@ credentials:
   # (spec.passwordHash), and the controller gets no Secret write access.
   enabled: true
   # Namespaces that may not hold MailCredentials: exact names, or prefixes
-  # ending in "*". The release namespace (which holds the relay credentials)
+  # ending in a single "*" ("*-system" is refused). The release namespace (which holds the relay credentials)
   # is always excluded. Add platform namespaces such as cert-manager or
   # istio-system as needed.
   excludeNamespaces:

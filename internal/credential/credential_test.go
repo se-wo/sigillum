@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 )
 
 func TestUsernameRoundTrip(t *testing.T) {
@@ -129,5 +131,38 @@ func TestExclusions(t *testing.T) {
 	exact, prefixes := e.split()
 	if strings.Join(exact, ",") != "cert-manager" || strings.Join(prefixes, ",") != "kube-,istio-" {
 		t.Fatalf("split: %v %v", exact, prefixes)
+	}
+}
+
+// Review of #20: a '*' that is not a single trailing one never matches, so
+// it is rejected instead of silently excluding nothing.
+func TestExclusionsValidate(t *testing.T) {
+	if err := ParseExclusions("kube-*, cert-manager ,istio-*", "sigillum-system").Validate(); err != nil {
+		t.Fatalf("valid patterns rejected: %v", err)
+	}
+	for _, bad := range []string{"*-system", "kube-*-a", "**", "a**"} {
+		if err := ParseExclusions(bad, "").Validate(); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+// Review of #20: one rotation parser for the webhook and the controller.
+func TestParseRotation(t *testing.T) {
+	iv, grace, err := ParseRotation(nil)
+	if err != nil || iv != 0 || grace != DefaultGracePeriod {
+		t.Fatalf("nil: %v %v %v", iv, grace, err)
+	}
+	iv, grace, err = ParseRotation(&sigv1.CredentialRotation{Interval: "90d", GracePeriod: "0s"})
+	if err != nil || iv != 90*24*time.Hour || grace != 0 {
+		t.Fatalf("90d/0s: %v %v %v", iv, grace, err)
+	}
+	_, _, err = ParseRotation(&sigv1.CredentialRotation{Interval: "90s", GracePeriod: "soon"})
+	var fields []string
+	for _, e := range err.(interface{ Unwrap() []error }).Unwrap() {
+		fields = append(fields, e.(*RotationError).Field)
+	}
+	if strings.Join(fields, ",") != "interval,gracePeriod" || !strings.Contains(err.Error(), "spec.rotation.interval: must be at least 1h") {
+		t.Fatalf("want both fields reported, got %v", err)
 	}
 }

@@ -1,4 +1,13 @@
 {{- if .Values.controller.enabled }}
+{{- range .Values.credentials.excludeNamespaces }}
+{{- if contains "*" (trimSuffix "*" (trim .)) }}
+{{- fail (printf "credentials.excludeNamespaces: %q: only a single trailing '*' (a prefix such as kube-*) is supported" .) }}
+{{- end }}
+{{- end }}
+{{- $smtpPort := int (default .Values.smtp.service.port .Values.credentials.smtpPort) }}
+{{- if or (lt $smtpPort 1) (gt $smtpPort 65535) }}
+{{- fail (printf "credentials.smtpPort must be between 1 and 65535, got %d" $smtpPort) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

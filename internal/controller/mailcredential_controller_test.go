@@ -291,8 +291,14 @@ func TestForbiddenSecretWriteIsNotAConflict(t *testing.T) {
 			return cl.Patch(ctx, obj, p, opts...)
 		},
 	})
-	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: credKey}); err == nil {
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: credKey})
+	if err == nil {
 		t.Fatal("a failed Secret write must be retried with backoff")
+	}
+	// Review of #20: controller-runtime ignores (and warns about) a
+	// Result that comes with an error.
+	if res != (ctrl.Result{}) {
+		t.Fatalf("an error must come with an empty Result, got %+v", res)
 	}
 	mc := getCredential(t, c)
 	ready := meta.FindStatusCondition(mc.Status.Conditions, sigv1.ConditionReady)
@@ -407,6 +413,63 @@ func TestSecretsManagedOnEarlyFailure(t *testing.T) {
 	managed := meta.FindStatusCondition(getCredential(t, c).Status.Conditions, sigv1.ConditionSecretsManaged)
 	if managed == nil || managed.Status != metav1.ConditionFalse || managed.Reason != sigv1.ReasonGuardMissing {
 		t.Fatalf("SecretsManaged must follow the guard on every path, got %+v", managed)
+	}
+}
+
+// Review of #20: only transient status write errors are retried, and none
+// once the context is done; a permanent one must not block the worker for
+// the whole backoff.
+func TestRotationStatusWriteStopsOnPermanentErrors(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err    error
+		cancel bool
+	}{
+		"invalid":   {err: apierrors.NewInvalid(schema.GroupKind{Group: "sigillum.dev", Kind: "MailCredential"}, "grafana", nil)},
+		"cancelled": {err: apierrors.NewTimeoutError("request timed out", 1), cancel: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			r, _ := credReconciler(t, issuedCredential("1h"), interceptor.Funcs{
+				SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+					calls++
+					return tc.err
+				},
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.cancel {
+				cancel()
+			} else {
+				defer cancel()
+			}
+			start := time.Now()
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: credKey}); err == nil {
+				t.Fatal("the failed status write must be reported")
+			}
+			if calls > 2 || time.Since(start) > time.Second {
+				t.Fatalf("retried a permanent failure: %d calls in %s", calls, time.Since(start))
+			}
+		})
+	}
+}
+
+// Review of #20: an unchanged status is not written again.
+func TestUnchangedStatusIsNotWritten(t *testing.T) {
+	writes := 0
+	mc := issuedCredential("1h")
+	mc.Annotations = nil
+	r, _ := credReconciler(t, mc, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			writes++
+			return cl.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+	for i := 0; i < 2; i++ {
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: credKey}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if writes != 1 {
+		t.Fatalf("want one status write for two identical reconciles, got %d", writes)
 	}
 }
 

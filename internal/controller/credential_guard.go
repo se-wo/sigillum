@@ -87,14 +87,14 @@ func (g *GuardChecker) Check(ctx context.Context) bool {
 			"guard", g.Guard.Name, "err", err.Error())
 		return false
 	}
-	changed := !g.checked || (g.err == nil) != (err == nil)
+	// A new reason counts as a change too (missing, then tampered), so
+	// the conditions and the error log name the current problem.
+	changed := !g.checked || (g.err == nil) != (err == nil) ||
+		(err != nil && g.err != nil && err.Error() != g.err.Error())
 	g.checked, g.err = true, err
 	g.mu.Unlock()
 	if changed && g.changed != nil {
-		select {
-		case g.changed <- struct{}{}:
-		default: // a change is already pending
-		}
+		g.signal()
 	}
 	if err != nil {
 		credentialGuardOK.Set(0)
@@ -157,16 +157,36 @@ func (r guardRequeuer) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-r.g.changed:
-			r.g.requeueAll(ctx)
+			if err := r.g.requeueAll(ctx); err != nil {
+				r.g.Log.Error(err, "list MailCredentials after guard change; retrying")
+				// The signal was consumed: re-arm it after a pause, or
+				// the conditions would stay stale until an unrelated event.
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(requeueRetryDelay):
+				}
+				r.g.signal()
+			}
 		}
 	}
 }
 
-func (g *GuardChecker) requeueAll(ctx context.Context) {
+// requeueRetryDelay spaces retries of a failed requeue.
+var requeueRetryDelay = 5 * time.Second
+
+// signal records a pending verdict change (coalescing).
+func (g *GuardChecker) signal() {
+	select {
+	case g.changed <- struct{}{}:
+	default: // a change is already pending
+	}
+}
+
+func (g *GuardChecker) requeueAll(ctx context.Context) error {
 	var list sigv1.MailCredentialList
 	if err := g.Lister.List(ctx, &list); err != nil {
-		g.Log.Error(err, "list MailCredentials after guard change")
-		return
+		return err
 	}
 	for i := range list.Items {
 		if !list.Items[i].Generated() {
@@ -175,7 +195,8 @@ func (g *GuardChecker) requeueAll(ctx context.Context) {
 		select {
 		case g.events <- event.GenericEvent{Object: &list.Items[i]}:
 		case <-ctx.Done():
-			return
+			return nil
 		}
 	}
+	return nil
 }

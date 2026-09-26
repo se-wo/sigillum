@@ -21,6 +21,8 @@ import (
 
 	"golang.org/x/crypto/argon2"
 	"k8s.io/apimachinery/pkg/util/validation"
+
+	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 )
 
 // Username returns the SMTP username of a MailCredential. Namespace names
@@ -227,6 +229,45 @@ const DefaultGracePeriod = 24 * time.Hour
 // password every few seconds and restarting the app each time.
 const MinRotationInterval = time.Hour
 
+// RotationError names the invalid spec.rotation field.
+type RotationError struct {
+	Field  string // "interval" or "gracePeriod"
+	Value  string
+	Detail string
+}
+
+func (e *RotationError) Error() string { return "spec.rotation." + e.Field + ": " + e.Detail }
+
+// ParseRotation parses spec.rotation for the webhook and the controller:
+// the interval (0 rotates on demand only, otherwise at least
+// MinRotationInterval) and the grace period (default DefaultGracePeriod).
+// Errors are *RotationError values, joined when both fields are invalid.
+func ParseRotation(rot *sigv1.CredentialRotation) (interval, grace time.Duration, err error) {
+	grace = DefaultGracePeriod
+	if rot == nil {
+		return 0, grace, nil
+	}
+	var errs []error
+	if d, perr := ParseDuration(rot.Interval); perr != nil {
+		errs = append(errs, &RotationError{Field: "interval", Value: rot.Interval, Detail: perr.Error()})
+	} else if d != 0 && d < MinRotationInterval {
+		errs = append(errs, &RotationError{Field: "interval", Value: rot.Interval, Detail: "must be at least 1h"})
+	} else {
+		interval = d
+	}
+	if rot.GracePeriod != "" {
+		if d, perr := ParseDuration(rot.GracePeriod); perr != nil {
+			errs = append(errs, &RotationError{Field: "gracePeriod", Value: rot.GracePeriod, Detail: perr.Error()})
+		} else {
+			grace = d
+		}
+	}
+	if len(errs) > 0 {
+		return 0, 0, errors.Join(errs...)
+	}
+	return interval, grace, nil
+}
+
 // Exclusions decides which namespaces may hold generated credentials.
 type Exclusions struct {
 	// Patterns are exact namespace names, or prefixes ending in "*".
@@ -244,6 +285,17 @@ func ParseExclusions(list, releaseNamespace string) Exclusions {
 		}
 	}
 	return e
+}
+
+// Validate rejects patterns the matcher would treat as exact names by
+// mistake: a '*' anywhere but at the end ("*-system") never matches.
+func (e Exclusions) Validate() error {
+	for _, p := range e.Patterns {
+		if strings.Contains(strings.TrimSuffix(p, "*"), "*") {
+			return fmt.Errorf("exclusion pattern %q: only a single trailing '*' (a prefix such as kube-*) is supported", p)
+		}
+	}
+	return nil
 }
 
 // Excluded reports whether namespace ns may not hold credentials.

@@ -336,3 +336,22 @@ func TestChartRequiresKubernetes132(t *testing.T) {
 		t.Fatal("guard must be rendered without --api-versions")
 	}
 }
+
+// Review of #20: values the controller would refuse, or silently misread,
+// fail the render instead.
+func TestChartRejectsInvalidCredentialValues(t *testing.T) {
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm not installed")
+	}
+	for _, tc := range []struct{ set, want string }{
+		{"credentials.excludeNamespaces={kube-*,*-system}", "only a single trailing '*'"},
+		{"credentials.smtpPort=70000", "credentials.smtpPort must be between 1 and 65535"},
+	} {
+		out, err := exec.Command(helm, "template", "t", chartDir(t), "--kube-version", testKubeVersion,
+			"--set", tc.set).CombinedOutput()
+		if err == nil || !strings.Contains(string(out), tc.want) {
+			t.Errorf("--set %s: want render failure %q, got %v\n%s", tc.set, tc.want, err, out)
+		}
+	}
+}

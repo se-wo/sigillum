@@ -151,6 +151,9 @@ func NewServer(o *Options, backend smtp.Backend, tlsCfg *tls.Config) *smtp.Serve
 	return s
 }
 
+// maxConcurrentArgon2 bounds concurrent argon2id verifications per pod.
+const maxConcurrentArgon2 = 2
+
 // Run starts the SMTP proxy and blocks until SIGTERM.
 func Run(logger *slog.Logger) error {
 	o, err := ParseFlags(os.Args[1:])
@@ -227,7 +230,9 @@ func Run(logger *slog.Logger) error {
 		if _, err := cl.GetCache().GetInformer(ctx, &sigv1.MailCredential{}, cache.BlockUntilSynced(false)); err != nil {
 			return fmt.Errorf("watch MailCredentials: %w", err)
 		}
-		backend.Credentials = credential.NewVerifier(cl.GetClient(), 2)
+		// Two argon2id checks at once (up to Argon2MaxMemoryKiB each); the
+		// chart's memory limit budgets for them (values.yaml smtp).
+		backend.Credentials = credential.NewVerifier(cl.GetClient(), maxConcurrentArgon2)
 		backend.AllowInsecureCredentialAuth = o.AllowInsecureCredentialAuth
 		backend.AuthFailures = &FailureLimiter{Window: o.AuthFailureWindow,
 			PerUserIP: o.AuthFailuresPerUserIP}

@@ -793,7 +793,7 @@ A rotation interval below 1 h is rejected by the webhook and, if the webhook is 
 
 Controller behavior in generated mode:
 - The Secret is created; if it exists, its `data` is replaced with a JSON patch whose `test` operations require the `sigillum.dev/credential` label and `sigillum.dev/credential-uid` annotation of this `MailCredential`. The controller cannot read Secrets, so this is how it recognises a foreign Secret of the same name without reading it: such a Secret is not touched (reason `SecretConflict`, retried every minute: a recreated `MailCredential` usually just waits for the garbage collector to remove its predecessor's Secret). Missing RBAC is reported as `SecretWriteFailed`, not as a conflict. Both make the credential `Ready=False` only if it has no password yet; a password issued earlier stays valid in its Secret, also after `spec.secretName` changed, and the failure is reported in the `Ready` message. The credential Secret guard (§4.10) enforces the same rule independently.
-- The controller decides on rotations from the `MailCredential` as read from the API server, not from its informer cache: a reconcile that started before the cache held the previous rotation's status would otherwise rotate again and leave a password in the Secret that status does not accept. For the same reason, once a new password is in the Secret, a failed status write is retried (about 12 s) whatever the error.
+- The controller decides on rotations from the `MailCredential` as read from the API server, not from its informer cache: a reconcile that started before the cache held the previous rotation's status would otherwise rotate again and leave a password in the Secret that status does not accept. For the same reason, once a new password is in the Secret, a failed status write is retried for about 12 s if the error is transient (conflict, timeout, throttling, unavailable API server). An unchanged status is not written again.
 - The Secret is written before the status, and a conflicting status update is then retried against the latest object, so the hash of a password already in the Secret is not lost. If the status update still fails, the next reconcile issues another password; an issued hash therefore never lacks its Secret.
 - A rotation with `gracePeriod: 0` also drops the previous hash of an earlier rotation.
 - The controller cannot read Secrets (§4.10), so it neither notices nor restores a deleted Secret. A rotation (`sigillum.dev/rotate`) recreates it with a new password. The app's failing logins show up in the audit stream and the auth-failure metric.
@@ -1068,7 +1068,7 @@ Chart values:
 ```yaml
 credentials:
   enabled: true              # generated mode; false = bring-your-own-hash only
-  excludeNamespaces:         # exact names, or prefixes ending in "*"
+  excludeNamespaces:         # exact names, or prefixes ending in one "*" (other "*" fail the render)
     - "kube-*"               # kube-system, kube-public, kube-node-lease, …
   # The release namespace is always excluded. Add platform namespaces you
   # never want to hold mail credentials, for example cert-manager or
