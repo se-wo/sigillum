@@ -1,84 +1,132 @@
 name: release
 
+# Only GitHub-owned actions are used: the repository's Actions policy allows
+# actions owned by se-wo, created by GitHub, or helm/kind-action. Docker
+# buildx and Helm are preinstalled on ubuntu-latest and driven from shell.
+# Actions are pinned to commit SHAs (not tags); tag comments track which
+# human-readable release the SHA corresponds to. Bump deliberately.
+#
+# Pull requests that touch the release inputs run the same build without
+# pushing, so a broken release is caught before a tag is cut.
 on:
   push:
     tags: ['v*']
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - Dockerfile
+      - charts/**
 
-# Actions are pinned to commit SHAs (not tags). Tag comments track which
-# human-readable release the SHA corresponds to. Bump deliberately.
 permissions:
   contents: read
-  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  PLATFORMS: linux/amd64,linux/arm64
+  PUBLISH: ${{ github.event_name == 'push' }}
 
 jobs:
   image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+      - name: compute version and tags
+        id: meta
+        run: |
+          if [ "$PUBLISH" = true ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(awk '/^version:/ {print $2}' charts/sigillum/Chart.yaml)-dryrun"
+          fi
+          tags="$IMAGE:$version"
+          # Stable releases also move the major.minor and latest tags;
+          # pre-releases (x.y.z-rc.1) only get their exact tag.
+          if [[ "$version" != *-* ]]; then
+            tags="$tags,$IMAGE:${version%.*},$IMAGE:latest"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "version=$version tags=$tags"
 
-      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+      - name: set up buildx
+        run: |
+          docker buildx version
+          docker buildx create --name sigillum --driver docker-container --use
+          docker buildx inspect --bootstrap
 
-      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: log in to ghcr.io
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
-      - id: meta
-        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}
-
-      - uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VERSION=${{ github.ref_name }}
-            COMMIT=${{ github.sha }}
-          provenance: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: build (and push on tags)
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          CREATED: ${{ steps.meta.outputs.created }}
+        run: |
+          args=(--platform "$PLATFORMS"
+                --build-arg "VERSION=$VERSION"
+                --build-arg "COMMIT=$GITHUB_SHA"
+                --build-arg "DATE=$CREATED"
+                --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+                --label "org.opencontainers.image.revision=$GITHUB_SHA"
+                --label "org.opencontainers.image.version=$VERSION"
+                --label "org.opencontainers.image.created=$CREATED"
+                --provenance=false)
+          IFS=, read -ra tag_list <<< "$TAGS"
+          for t in "${tag_list[@]}"; do args+=(--tag "$t"); done
+          if [ "$PUBLISH" = true ]; then args+=(--push); fi
+          docker buildx build "${args[@]}" .
 
   chart:
     runs-on: ubuntu-latest
     needs: image
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: extract version
         id: v
         run: |
-          v="${GITHUB_REF_NAME#v}"
-          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [ "$PUBLISH" = true ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(awk '/^version:/ {print $2}' charts/sigillum/Chart.yaml)" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: sanity-check chart version
+        if: env.PUBLISH == 'true'
+        env:
+          WANT: ${{ steps.v.outputs.version }}
         run: |
-          want='${{ steps.v.outputs.version }}'
-          got=$(grep '^version:' charts/sigillum/Chart.yaml | awk '{print $2}')
-          if [ "$got" != "$want" ]; then
-            echo "chart version $got != tag version $want"
+          got=$(awk '/^version:/ {print $2}' charts/sigillum/Chart.yaml)
+          if [ "$got" != "$WANT" ]; then
+            echo "chart version $got != tag version $WANT"
             exit 1
           fi
 
-      - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
-        with:
-          version: v3.15.4
-
-      - name: package chart
-        run: helm package charts/sigillum --version '${{ steps.v.outputs.version }}' --app-version '${{ steps.v.outputs.version }}'
-
-      - name: login to ghcr
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u '${{ github.actor }}' --password-stdin
+      - name: lint and package chart
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          helm version
+          helm lint charts/sigillum
+          helm package charts/sigillum --version "$VERSION" --app-version "$VERSION"
 
       - name: push chart to OCI registry
-        run: helm push sigillum-${{ steps.v.outputs.version }}.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+        if: env.PUBLISH == 'true'
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          helm push "sigillum-$VERSION.tgz" "oci://ghcr.io/$GITHUB_REPOSITORY_OWNER/charts"
