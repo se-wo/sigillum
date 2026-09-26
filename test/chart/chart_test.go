@@ -166,6 +166,12 @@ func TestChartNoSecretWritesWithoutGuard(t *testing.T) {
 			if find(objs, "ValidatingAdmissionPolicy", "") != nil {
 				t.Fatal("guard must not be rendered")
 			}
+			// Without the guard, generated mode is off, so the webhook
+			// rejects generated credentials instead of admitting ones
+			// that stay GuardMissing forever.
+			if got := args(t, objs, "t-sigillum-controller")["credentials-generated"]; got != "false" {
+				t.Fatalf("--credentials-generated=%q without the guard, want false", got)
+			}
 			for _, u := range objs {
 				if u.GetKind() != "ClusterRole" && u.GetKind() != "Role" {
 					continue

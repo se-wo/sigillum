@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -182,11 +183,19 @@ func TestCredential_LoginMechanismAndInsecureOptIn(t *testing.T) {
 	expect(250)
 }
 
+// byoCredential is a ready bring-your-own-hash credential for password.
+func byoCredential(password string) *sigv1.MailCredential {
+	mc := readyCredential("unused")
+	mc.Spec.SecretName, mc.Status.Current = "", nil
+	mc.Spec.PasswordHash = credential.HashArgon2id(password, []byte("0123456789abcdef"), 7*1024, 5, 1)
+	return mc
+}
+
 func TestCredential_FailuresAreAuditedAndThrottled(t *testing.T) {
 	sender := &stubSender{}
 	b := &Backend{Sender: sender, AllowInsecureCredentialAuth: true,
-		Credentials:  credential.NewVerifier(credentialClient(t, readyCredential(credPassword)), 1),
-		AuthFailures: &FailureLimiter{Window: time.Minute, PerUserIP: 2, PerIP: 100}}
+		Credentials:  credential.NewVerifier(credentialClient(t, byoCredential(credPassword)), 1),
+		AuthFailures: &FailureLimiter{Window: time.Minute, PerUserIP: 2}}
 	addr := startProxy(t, b)
 
 	for i := 0; i < 2; i++ {
@@ -195,7 +204,8 @@ func TestCredential_FailuresAreAuditedAndThrottled(t *testing.T) {
 			t.Fatalf("attempt %d: want 535, got %v", i, err)
 		}
 	}
-	// The limit is reached: even the right password is refused for now.
+	// The limit is reached for this username from this IP: even the right
+	// password is refused for now.
 	c := dial(t, addr)
 	if err := c.Auth(sasl.NewPlainClient("", credUser, credPassword)); smtpCode(err) != 454 {
 		t.Fatalf("want 454 while throttled, got %v", err)
@@ -275,31 +285,58 @@ func TestCredential_NotReadyIsRefused(t *testing.T) {
 
 func TestFailureLimiterWindow(t *testing.T) {
 	now := time.Unix(0, 0)
-	f := &FailureLimiter{Window: time.Minute, PerUserIP: 2, PerIP: 3, now: func() time.Time { return now }}
+	f := &FailureLimiter{Window: time.Minute, PerUserIP: 2, now: func() time.Time { return now }}
 	f.Fail("a", "1.1.1.1")
 	f.Fail("a", "1.1.1.1")
 	if !f.Blocked("a", "1.1.1.1") {
 		t.Fatal("username+IP limit reached")
 	}
 	// Failing on a username from one IP must not lock out the real app,
-	// which logs in from another IP.
-	if f.Blocked("a", "2.2.2.2") {
-		t.Fatal("the same username from another IP is not blocked")
-	}
-	if f.Blocked("b", "2.2.2.2") {
-		t.Fatal("other user and IP are not blocked")
-	}
-	f.Fail("b", "1.1.1.1")
-	if !f.Blocked("c", "1.1.1.1") {
-		t.Fatal("IP limit reached")
+	// which logs in from another IP, nor other users behind the same IP
+	// (a mesh sidecar or SNAT gives every caller one source IP).
+	if f.Blocked("a", "2.2.2.2") || f.Blocked("b", "1.1.1.1") {
+		t.Fatal("only the username+IP pair is blocked")
 	}
 	now = now.Add(61 * time.Second)
 	if f.Blocked("a", "1.1.1.1") {
 		t.Fatal("failures must expire after the window")
 	}
-	_ = f.Blocked("b", "1.1.1.1")
-	if len(f.hits) != 0 {
-		t.Fatalf("expired keys must be pruned when looked at, have %d", len(f.hits))
+	if f.hits.Len() != 0 {
+		t.Fatalf("expired keys must be pruned when looked at, have %d", f.hits.Len())
+	}
+}
+
+// Flooding the tracker with new keys must not evict a key that keeps
+// failing (review of #20: a full reset used to clear active blocks).
+func TestFailureLimiterFloodKeepsActiveBlock(t *testing.T) {
+	f := &FailureLimiter{Window: time.Hour, PerUserIP: 3}
+	for i := 0; i < 3; i++ {
+		f.Fail("victim.ns", "10.0.0.1")
+	}
+	for i := 0; i < maxFailureKeys+10; i++ {
+		f.Fail(fmt.Sprintf("u%d.ns", i), "10.0.0.2")
+		if i%1000 == 0 && !f.Blocked("victim.ns", "10.0.0.1") {
+			t.Fatalf("active block evicted after %d new keys", i)
+		}
+	}
+	if !f.Blocked("victim.ns", "10.0.0.1") {
+		t.Fatal("active block evicted by a flood of new keys")
+	}
+}
+
+// Generated passwords have 256 bits: they are never throttled, so nobody
+// can lock out the real app by failing on its username.
+func TestCredential_GeneratedNotThrottled(t *testing.T) {
+	addr := startProxy(t, &Backend{Sender: &stubSender{}, AllowInsecureCredentialAuth: true,
+		Credentials:  credential.NewVerifier(credentialClient(t, readyCredential(credPassword)), 1),
+		AuthFailures: &FailureLimiter{Window: time.Minute, PerUserIP: 1}})
+	for i := 0; i < 3; i++ {
+		if err := dial(t, addr).Auth(sasl.NewPlainClient("", credUser, "wrong")); smtpCode(err) != 535 {
+			t.Fatalf("attempt %d: want 535, got %v", i, err)
+		}
+	}
+	if err := dial(t, addr).Auth(sasl.NewPlainClient("", credUser, credPassword)); err != nil {
+		t.Fatalf("generated credential must not be throttled: %v", err)
 	}
 }
 

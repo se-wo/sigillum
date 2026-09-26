@@ -124,6 +124,20 @@ func (v *Verifier) StillValid(ctx context.Context, r *Result) bool {
 	return prev != nil && prev.Hash == r.hash && v.now().Before(prev.ValidUntil.Time)
 }
 
+// UserChosen reports whether username names an existing bring-your-own-hash
+// MailCredential (a user-chosen, possibly weak password).
+func (v *Verifier) UserChosen(ctx context.Context, username string) bool {
+	ns, name, ok := ParseUsername(username)
+	if !ok {
+		return false
+	}
+	var mc sigv1.MailCredential
+	if err := v.Reader.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &mc); err != nil {
+		return false
+	}
+	return !mc.Generated()
+}
+
 func nameOf(username string) string {
 	_, name, _ := ParseUsername(username)
 	return name

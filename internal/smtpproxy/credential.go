@@ -9,6 +9,7 @@ import (
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 	"github.com/google/uuid"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"go.opentelemetry.io/otel/codes"
 
 	"github.com/se-wo/sigillum/internal/audit"
@@ -22,6 +23,9 @@ import (
 type CredentialVerifier interface {
 	Verify(ctx context.Context, username, password string) (*credential.Result, error)
 	StillValid(ctx context.Context, r *credential.Result) bool
+	// UserChosen reports whether username belongs to a bring-your-own-hash
+	// credential, whose password may be weak.
+	UserChosen(ctx context.Context, username string) bool
 }
 
 var (
@@ -75,7 +79,6 @@ func (s *session) credentialAuth(mech string) (sasl.Server, error) {
 			// The authorization identity must be empty or the user itself:
 			// a credential never acts for another identity.
 			if identity != "" && identity != username {
-				s.b.AuthFailures.Fail(username, s.remoteIP)
 				s.authFailed(username, "invalid_credentials")
 				return errInvalidCredentials
 			}
@@ -93,7 +96,9 @@ func (s *session) credentialLogin(username, password string) error {
 	ctx, span := telemetry.Tracer().Start(ctx, "auth.credential")
 	defer span.End()
 
-	if s.b.AuthFailures.Blocked(username, s.remoteIP) {
+	// Only bring-your-own-hash credentials are throttled; see FailureLimiter.
+	throttled := s.b.AuthFailures != nil && s.b.Credentials.UserChosen(ctx, username)
+	if throttled && s.b.AuthFailures.Blocked(username, s.remoteIP) {
 		span.SetStatus(codes.Error, "throttled")
 		s.authFailed(username, "auth_rate_limited")
 		return errAuthThrottled
@@ -106,7 +111,9 @@ func (s *session) credentialLogin(username, password string) error {
 			s.authFailed(username, "auth_unavailable")
 			return errAuthUnavailable
 		}
-		s.b.AuthFailures.Fail(username, s.remoteIP)
+		if throttled {
+			s.b.AuthFailures.Fail(username, s.remoteIP)
+		}
 		s.b.Logger.Info("smtp auth failed", "remote_ip", s.remoteIP, "auth_method", gateway.AuthSMTPCredential,
 			"credential", auditUsername(username))
 		s.authFailed(username, "invalid_credentials")
@@ -184,72 +191,83 @@ func (l *loginServer) Next(response []byte) ([]byte, bool, error) {
 }
 
 // FailureLimiter throttles repeated failed logins per username and source
-// IP, and per source IP (sliding window, per process). Once a key reaches
-// its limit, further attempts are refused with 454 without checking the
-// password. Failures are deliberately not counted per username alone:
-// anyone who can reach the proxy could then lock out a credential's real
-// app by failing on its username. The throttle mainly protects
-// bring-your-own (possibly weak) passwords and bounds argon2id work;
-// generated 256-bit passwords cannot be guessed anyway.
+// IP (sliding window, per process). Once a key reaches its limit, further
+// attempts with that username from that IP are refused with 454 without
+// checking the password.
+//
+// Only bring-your-own-hash credentials are throttled (see credentialLogin):
+// they may carry a weak, user-chosen password, and every attempt costs an
+// argon2id computation. Generated passwords have 256 bits and cannot be
+// guessed, so throttling them would only let anyone who reaches the proxy
+// lock out a real app. For the same reason nothing is counted per username
+// or per source IP alone; behind a mesh sidecar or SNAT all callers share
+// one source IP.
 type FailureLimiter struct {
 	Window    time.Duration
 	PerUserIP int
-	PerIP     int
 
+	once sync.Once
 	mu   sync.Mutex
-	hits map[string][]time.Time
+	// hits holds failure timestamps per key, bounded as an LRU: a key that
+	// keeps failing stays recent, so flooding the tracker with new keys
+	// cannot evict an active block.
+	hits *lru.Cache[string, []time.Time]
 	now  func() time.Time
 }
 
-// maxFailureKeys bounds memory; beyond it the tracker starts over.
+// maxFailureKeys bounds the memory of the failure tracker.
 const maxFailureKeys = 100_000
 
-// Blocked reports whether username from ip, or ip, has used up its
-// failures.
+func (f *FailureLimiter) init() {
+	f.once.Do(func() { f.hits, _ = lru.New[string, []time.Time](maxFailureKeys) })
+}
+
+// Blocked reports whether username from ip has used up its failures.
 func (f *FailureLimiter) Blocked(username, ip string) bool {
-	if f == nil {
+	if f == nil || f.PerUserIP <= 0 {
 		return false
 	}
+	f.init()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return (f.PerUserIP > 0 && f.countLocked(userIPKey(username, ip)) >= f.PerUserIP) ||
-		(f.PerIP > 0 && f.countLocked("ip:"+ip) >= f.PerIP)
+	return f.countLocked(userIPKey(username, ip)) >= f.PerUserIP
 }
 
 // Fail records a failed attempt.
 func (f *FailureLimiter) Fail(username, ip string) {
-	if f == nil {
+	if f == nil || f.PerUserIP <= 0 {
 		return
 	}
+	f.init()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.hits == nil || len(f.hits) > maxFailureKeys {
-		f.hits = map[string][]time.Time{}
-	}
-	now := f.clock()
-	for _, k := range []string{userIPKey(username, ip), "ip:" + ip} {
-		f.countLocked(k)
-		f.hits[k] = append(f.hits[k], now)
-	}
+	k := userIPKey(username, ip)
+	f.countLocked(k)
+	ts, _ := f.hits.Get(k)
+	f.hits.Add(k, append(ts, f.clock()))
 }
 
-func userIPKey(username, ip string) string { return "u:" + ip + "\x00" + username }
+func userIPKey(username, ip string) string { return ip + "\x00" + username }
 
 // countLocked prunes and counts the failures of key inside the window.
 func (f *FailureLimiter) countLocked(key string) int {
-	ts := f.hits[key]
+	ts, ok := f.hits.Get(key)
+	if !ok {
+		return 0
+	}
 	cut := f.clock().Add(-f.Window)
 	i := 0
 	for i < len(ts) && !ts[i].After(cut) {
 		i++
 	}
-	ts = ts[i:]
-	if len(ts) == 0 {
-		delete(f.hits, key)
+	if i == len(ts) {
+		f.hits.Remove(key)
 		return 0
 	}
-	f.hits[key] = ts
-	return len(ts)
+	if i > 0 {
+		f.hits.Add(key, ts[i:])
+	}
+	return len(ts) - i
 }
 
 func (f *FailureLimiter) clock() time.Time {

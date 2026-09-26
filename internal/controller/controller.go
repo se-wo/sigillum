@@ -162,6 +162,9 @@ func init() {
 			if err := mgr.Add(checker); err != nil {
 				return err
 			}
+			if err := mgr.Add(checker.Requeuer()); err != nil {
+				return err
+			}
 			credReconciler.Guard = checker
 		}
 		if err := credReconciler.SetupWithManager(mgr); err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -163,7 +164,7 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		switch {
 		case !r.GeneratedEnabled:
-			fail(sigv1.ReasonGeneratedModeDisabled, "generated credentials are disabled (chart credentials.enabled=false); use spec.passwordHash")
+			fail(sigv1.ReasonGeneratedModeDisabled, "generated credentials are disabled (chart credentials.enabled=false, or Kubernetes < 1.30 without ValidatingAdmissionPolicy); use spec.passwordHash")
 		case why == "":
 		case !guardOK:
 			keepOrFail(sigv1.ReasonGuardMissing, guardMsg)
@@ -374,21 +375,9 @@ func (r *MailCredentialReconciler) writeSecret(ctx context.Context, mc *sigv1.Ma
 	return false, err
 }
 
-// jsonPointerEscape escapes a map key for use in a JSON pointer (RFC 6901).
-func jsonPointerEscape(s string) string {
-	out := make([]byte, 0, len(s))
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '~':
-			out = append(out, '~', '0')
-		case '/':
-			out = append(out, '~', '1')
-		default:
-			out = append(out, s[i])
-		}
-	}
-	return string(out)
-}
+// jsonPointerEscape escapes a map key for use in a JSON pointer (RFC 6901:
+// "~" before "/").
+var jsonPointerEscape = strings.NewReplacer("~", "~0", "/", "~1").Replace
 
 func (r *MailCredentialReconciler) apiReader() client.Reader {
 	if r.APIReader != nil {

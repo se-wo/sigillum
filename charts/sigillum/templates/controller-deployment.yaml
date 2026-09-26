@@ -36,7 +36,10 @@ spec:
             - --disable-webhook=true
             {{- end }}
             {{- include "sigillum.commonArgs" . | nindent 12 }}
-            - --credentials-generated={{ .Values.credentials.enabled }}
+            # Generated credentials need the guard, which needs
+            # ValidatingAdmissionPolicy (Kubernetes >= 1.30); without it the
+            # webhook rejects them up front instead of leaving them GuardMissing.
+            - --credentials-generated={{ ne (include "sigillum.credentials.guarded" .) "" }}
             - --credential-exclude-namespaces={{ join "," .Values.credentials.excludeNamespaces }}
             - --credential-guard-name={{ include "sigillum.credentials.guardName" . }}
             - --credential-smtp-host={{ include "sigillum.credentials.smtpHost" . }}

@@ -9,6 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
@@ -27,8 +28,9 @@ func init() {
 
 // GuardChecker periodically verifies the credential Secret guard (SPEC
 // §4.10). While the guard is missing or changed the MailCredential
-// reconciler writes no Secrets. When the verdict changes, every
-// MailCredential is requeued so its Ready condition follows.
+// reconciler writes no Secrets. When the verdict changes, the leader
+// requeues every generated MailCredential (Requeuer) so its conditions
+// follow.
 type GuardChecker struct {
 	Guard    credential.Guard
 	Reader   client.Reader // uncached: the controller may only get the guard by name
@@ -39,6 +41,8 @@ type GuardChecker struct {
 	mu      sync.Mutex
 	checked bool
 	err     error
+	// changed signals a verdict change (buffer 1: changes coalesce).
+	changed chan struct{}
 	events  chan event.GenericEvent
 }
 
@@ -46,7 +50,7 @@ type GuardChecker struct {
 // starts so reconcilers never act on an unknown verdict.
 func NewGuardChecker(g credential.Guard, reader, lister client.Reader, interval time.Duration, log logr.Logger) *GuardChecker {
 	return &GuardChecker{Guard: g, Reader: reader, Lister: lister, Interval: interval, Log: log,
-		events: make(chan event.GenericEvent, 1024)}
+		changed: make(chan struct{}, 1), events: make(chan event.GenericEvent)}
 }
 
 // OK reports whether the guard was verified, and the reason if not.
@@ -75,6 +79,12 @@ func (g *GuardChecker) Check(ctx context.Context) bool {
 	changed := !g.checked || (g.err == nil) != (err == nil)
 	g.checked, g.err = true, err
 	g.mu.Unlock()
+	if changed && g.changed != nil {
+		select {
+		case g.changed <- struct{}{}:
+		default: // a change is already pending
+		}
+	}
 	if err != nil {
 		credentialGuardOK.Set(0)
 		if changed {
@@ -106,9 +116,7 @@ func (g *GuardChecker) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-time.After(wait):
-			if g.Check(ctx) {
-				g.requeueAll(ctx)
-			}
+			g.Check(ctx)
 		}
 	}
 }
@@ -116,6 +124,26 @@ func (g *GuardChecker) Start(ctx context.Context) error {
 // NeedLeaderElection implements manager.LeaderElectionRunnable: every
 // replica keeps its verdict current so a new leader starts with one.
 func (g *GuardChecker) NeedLeaderElection() bool { return false }
+
+// Requeuer returns the leader-only runnable that requeues every generated
+// MailCredential after a verdict change. It runs where the controller (the
+// consumer of Events) runs, so it can send without dropping events.
+func (g *GuardChecker) Requeuer() manager.Runnable { return guardRequeuer{g} }
+
+type guardRequeuer struct{ g *GuardChecker }
+
+func (r guardRequeuer) NeedLeaderElection() bool { return true }
+
+func (r guardRequeuer) Start(ctx context.Context) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-r.g.changed:
+			r.g.requeueAll(ctx)
+		}
+	}
+}
 
 func (g *GuardChecker) requeueAll(ctx context.Context) {
 	var list sigv1.MailCredentialList
@@ -127,12 +155,10 @@ func (g *GuardChecker) requeueAll(ctx context.Context) {
 		if !list.Items[i].Generated() {
 			continue
 		}
-		// Non-blocking: on a replica that is not the leader nobody consumes
-		// the channel. Dropped events are caught by the reconciler's
-		// periodic requeue of credentials waiting for the guard.
 		select {
 		case g.events <- event.GenericEvent{Object: &list.Items[i]}:
-		default:
+		case <-ctx.Done():
+			return
 		}
 	}
 }

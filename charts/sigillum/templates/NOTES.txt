@@ -40,10 +40,9 @@ behind mesh mTLS.
 {{- if and .Values.controller.enabled .Values.credentials.enabled (not (include "sigillum.credentials.guarded" .)) }}
 
 NOTE: generated MailCredentials need ValidatingAdmissionPolicy (Kubernetes
->= 1.30), which this cluster does not serve, so the controller was given no
-Secret write access. MailCredentials in generated mode will report
-Ready=False (GuardMissing); use spec.passwordHash instead, or set
-credentials.enabled=false.
+>= 1.30), which this cluster does not serve, so generated mode is off and the
+controller has no Secret write access. The webhook rejects MailCredentials
+without spec.passwordHash; use bring-your-own-hash mode instead.
 {{- end }}
 {{- if and (eq .Values.rateLimit.backend "redis") .Values.rateLimit.failOpen }}
 

@@ -88,7 +88,7 @@ func (v *MailCredentialValidator) validate(mc *sigv1.MailCredential) (admission.
 	default:
 		if !v.GeneratedEnabled {
 			errs = append(errs, field.Forbidden(spec.Child("secretName"),
-				"generated credentials are disabled in this installation; set passwordHash instead"))
+				"generated credentials are disabled in this installation (credentials.enabled=false, or Kubernetes < 1.30 without ValidatingAdmissionPolicy); set passwordHash instead"))
 		}
 		for _, msg := range validation.IsDNS1123Subdomain(mc.Spec.SecretName) {
 			errs = append(errs, field.Invalid(spec.Child("secretName"), mc.Spec.SecretName, msg))

@@ -189,3 +189,15 @@ func TestRotationDecidedOnFreshObjectNotStaleCache(t *testing.T) {
 		t.Fatalf("status must accept the password in the Secret (%q); rotated twice from a stale cache", sec.Data["password"])
 	}
 }
+
+func TestJSONPointerEscape(t *testing.T) {
+	for in, want := range map[string]string{
+		"sigillum.dev/credential": "sigillum.dev~1credential",
+		"a~/b":                    "a~0~1b",
+		"~1":                      "~01",
+	} {
+		if got := jsonPointerEscape(in); got != want {
+			t.Errorf("jsonPointerEscape(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

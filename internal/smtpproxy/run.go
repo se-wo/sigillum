@@ -57,7 +57,6 @@ type Options struct {
 	AllowInsecureCredentialAuth bool
 	AuthFailureWindow           time.Duration
 	AuthFailuresPerUserIP       int
-	AuthFailuresPerIP           int
 	MaxMessageBytes             int64
 	MaxRecipients               int
 	ReadTimeout                 time.Duration
@@ -89,8 +88,7 @@ func ParseFlags(args []string) (*Options, error) {
 	fs.BoolVar(&o.AllowInsecureAuth, "allow-insecure-auth", true, "allow AUTH without STARTTLS (cluster-internal traffic, ideally mesh-encrypted)")
 	fs.BoolVar(&o.AllowInsecureCredentialAuth, "allow-insecure-credential-auth", false, "also offer AUTH PLAIN/LOGIN (mode credential) without STARTTLS; only behind mesh mTLS")
 	fs.DurationVar(&o.AuthFailureWindow, "auth-failure-window", 5*time.Minute, "window for counting failed credential logins")
-	fs.IntVar(&o.AuthFailuresPerUserIP, "auth-failures-per-user-ip", 10, "failed credential logins per username and source IP within the window before further attempts from that IP are refused (0 = unlimited)")
-	fs.IntVar(&o.AuthFailuresPerIP, "auth-failures-per-ip", 30, "failed credential logins per source IP and window before further attempts are refused (0 = unlimited)")
+	fs.IntVar(&o.AuthFailuresPerUserIP, "auth-failures-per-user-ip", 10, "failed logins of a bring-your-own-hash credential per username and source IP within the window before further attempts from that IP are refused (0 = unlimited; generated credentials are never throttled)")
 	fs.Int64Var(&o.MaxMessageBytes, "max-message-bytes", 32*1024*1024, "hard ceiling per message (policies enforce lower limits)")
 	fs.IntVar(&o.MaxRecipients, "max-recipients", 100, "hard ceiling of RCPT TO per message")
 	fs.DurationVar(&o.ReadTimeout, "read-timeout", 60*time.Second, "per-command read timeout")
@@ -224,7 +222,7 @@ func Run(logger *slog.Logger) error {
 		backend.Credentials = credential.NewVerifier(cl.GetClient(), 2)
 		backend.AllowInsecureCredentialAuth = o.AllowInsecureCredentialAuth
 		backend.AuthFailures = &FailureLimiter{Window: o.AuthFailureWindow,
-			PerUserIP: o.AuthFailuresPerUserIP, PerIP: o.AuthFailuresPerIP}
+			PerUserIP: o.AuthFailuresPerUserIP}
 	}
 
 	auditLogger, err := audit.FromFlag(o.AuditLog)
