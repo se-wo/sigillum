@@ -61,9 +61,11 @@ Works with off-the-shelf apps and cannot be bypassed (SPEC §8.2).
 - `--shutdown-delay` (chart `api.shutdownDelay`, `smtp.shutdownDelay`).
 - Recipes in `examples/`: local development with Mailpit, egress blocking
   (NetworkPolicy, Kyverno, Cilium), admission guardrails
-  (ValidatingAdmissionPolicy, Kyverno), provider backends (Microsoft 365,
-  Google Workspace, Amazon SES, Mailgun, Postmark, Brevo), MailCredential
-  setups for Grafana, Alertmanager, Gitea, Nextcloud, Keycloak and Argo CD
+  (ValidatingAdmissionPolicy, Kyverno), provider backends (Microsoft 365
+  via SMTP AUTH, relay connector or High Volume Email, Azure Communication
+  Services, Google Workspace, Amazon SES, Mailgun, Postmark, Brevo, with
+  the state of password logins per provider), MailCredential setups for
+  Grafana, Alertmanager, Gitea, Nextcloud, Keycloak and Argo CD
   notifications, and Stakater Reloader for rotations.
 - Release: images and charts are signed keyless with cosign and carry SLSA
   build provenance; images carry SPDX SBOMs (README, "Supply chain").

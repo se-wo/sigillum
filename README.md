@@ -188,9 +188,11 @@ callers. STARTTLS is offered when `smtp.tls.secretName` is set.
 rather than more Sigillum features: a local-development profile with
 Mailpit, NetworkPolicy/Cilium rules that block direct SMTP egress so
 Sigillum cannot be bypassed, admission policies (ValidatingAdmissionPolicy
-and Kyverno) for policy authors, backends for Microsoft 365, Google
-Workspace, Amazon SES, Mailgun, Postmark and Brevo, MailCredential setups for
-common apps, and a Stakater Reloader recipe for credential rotation.
+and Kyverno) for policy authors, backends for Microsoft 365 (including the
+options that survive the retirement of SMTP AUTH passwords), Azure
+Communication Services, Google Workspace, Amazon SES, Mailgun, Postmark and
+Brevo, MailCredential setups for common apps, and a Stakater Reloader recipe
+for credential rotation.
 
 ## Upgrading
 

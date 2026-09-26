@@ -1,4 +1,5 @@
-# Postmark SMTP. Username and password are both the Server API token.
+# Postmark SMTP. Username and password are both the Server API token, or use
+# a dedicated SMTP token (access key as username, secret key as password).
 apiVersion: v1
 kind: Secret
 metadata:

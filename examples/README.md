@@ -12,7 +12,7 @@ and the kind e2e suite enforces `require-sender-restrictions`.
 | [`local-dev/`](local-dev/) | Sigillum + Mailpit on kind, k3d, minikube or Docker Desktop in a few minutes | US-7.1 |
 | [`egress/`](egress/) | Block direct SMTP egress so Sigillum cannot be bypassed | US-5.7 |
 | [`admission/`](admission/) | Guardrails for policy authors (ValidatingAdmissionPolicy and Kyverno) | US-5.7, §4.9 |
-| [`providers/`](providers/) | Backends for Microsoft 365, Google Workspace, Amazon SES, Mailgun, Postmark, Brevo | §8.2 |
+| [`providers/`](providers/) | Backends for Microsoft 365 (SMTP AUTH, relay connector, High Volume Email), Azure Communication Services, Google Workspace, Amazon SES, Mailgun, Postmark, Brevo, with the state of password logins per provider | §8.2 |
 | [`clients/`](clients/) | MailCredentials for Grafana, Alertmanager, Gitea, Nextcloud, Keycloak, Argo CD notifications | US-3.7 |
 | [`reloader/`](reloader/) | Restart apps after a credential rotation with Stakater Reloader | US-3.7 |
 

@@ -1,6 +1,20 @@
-# Microsoft 365 via SMTP AUTH (client submission). The mailbox needs SMTP
-# AUTH enabled (Set-CASMailbox -SmtpClientAuthenticationDisabled $false) and
-# every sender must be the mailbox itself or one it may send as.
+# Microsoft 365 via SMTP AUTH with a mailbox password (client submission).
+#
+# Stopgap only. Microsoft is retiring Basic authentication for SMTP AUTH
+# (Exchange Online timeline of January 2026): it is disabled by default for
+# existing tenants at the end of December 2026 (admins can still re-enable
+# it), new tenants no longer get it, and the final removal date is to be
+# announced in the second half of 2027. Sigillum's OAuth support for the SMTP
+# driver (authType XOAUTH2) is planned for v0.5.0. Until then, prefer one of:
+#   microsoft-365-connector.yaml          relay connector, no password
+#   azure-communication-services.yaml     Entra app client secret
+#   microsoft-365-hve.yaml                High Volume Email, internal recipients
+#
+# Requirements: SMTP AUTH enabled for the tenant and the mailbox
+# (Set-CASMailbox <mailbox> -SmtpClientAuthenticationDisabled $false), no
+# Security Defaults / Conditional Access blocking legacy auth, and every
+# sender is the mailbox itself or one it may send as. Limit: 10,000
+# recipients per day and mailbox.
 apiVersion: v1
 kind: Secret
 metadata:

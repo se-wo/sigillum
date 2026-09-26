@@ -1,0 +1,30 @@
+# Microsoft 365 via an inbound connector ("SMTP relay"): no password at all.
+# Exchange Online accepts the mail because it comes from your cluster's
+# static egress IP, configured in an inbound connector (Exchange admin
+# center > Mail flow > Connectors, from "Your organization's email server",
+# identified by IP address). Not affected by the Basic auth retirement.
+#
+# Requirements:
+#   - A static egress IP for the Sigillum pods (NAT gateway, egress gateway).
+#   - Outbound TCP 25 allowed from the Sigillum pods; many clouds block port
+#     25 by default. Adjust the egress recipe (examples/egress/) to allow it
+#     for Sigillum only.
+#   - Senders in accepted domains of the tenant. Mail to external recipients
+#     is relayed too, subject to Exchange Online's outbound limits.
+#   - Replace the host with your tenant's MX endpoint
+#     (<domain-with-dashes>.mail.protection.outlook.com, see your MX record).
+apiVersion: sigillum.dev/v1alpha1
+kind: ClusterMailBackend
+metadata:
+  name: microsoft-365-connector
+spec:
+  type: smtp
+  smtp:
+    endpoints:
+      - host: example-com.mail.protection.outlook.com
+        port: 25
+        tls: starttls
+    authType: NONE
+    connectionTimeoutSeconds: 10
+  healthCheck:
+    intervalSeconds: 300

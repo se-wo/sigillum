@@ -1,5 +1,14 @@
-# Google Workspace SMTP relay with SMTP authentication. Use an app password
-# of a Workspace user; the relay must allow authenticated senders.
+# Google Workspace SMTP relay service (smtp-relay.gmail.com). Configure it in
+# the Admin console: Apps > Google Workspace > Gmail > Routing > SMTP relay
+# service. Two ways to authenticate; pick one backend.
+#
+# "Less secure apps" are gone for all Workspace accounts, and smtp.gmail.com
+# rejects plain account passwords. Password logins only work with an app
+# password, which needs 2-Step Verification on the account and app
+# passwords not being disabled by the Workspace admin.
+#
+# 1. SMTP authentication with an app password ("Require SMTP
+#    Authentication" in the relay setting).
 apiVersion: v1
 kind: Secret
 metadata:
@@ -7,8 +16,8 @@ metadata:
   namespace: sigillum-system
 type: Opaque
 stringData:
-  username: "noreply@example.com"
-  password: "REPLACE-ME"   # set out of band; do not commit
+  username: "noreply@example.com"   # a Workspace user with 2-Step Verification
+  password: "REPLACE-ME"            # its app password; set out of band
 ---
 apiVersion: sigillum.dev/v1alpha1
 kind: ClusterMailBackend
@@ -25,6 +34,25 @@ spec:
     credentialsRef:
       name: google-workspace-smtp
       namespace: sigillum-system
+    connectionTimeoutSeconds: 10
+  healthCheck:
+    intervalSeconds: 300
+---
+# 2. No password: the relay accepts mail from the cluster's static egress
+#    IP ("Only accept mail from the specified IP addresses" in the relay
+#    setting). Needs a static egress IP for the Sigillum pods.
+apiVersion: sigillum.dev/v1alpha1
+kind: ClusterMailBackend
+metadata:
+  name: google-workspace-ip
+spec:
+  type: smtp
+  smtp:
+    endpoints:
+      - host: smtp-relay.gmail.com
+        port: 587
+        tls: starttls
+    authType: NONE
     connectionTimeoutSeconds: 10
   healthCheck:
     intervalSeconds: 300

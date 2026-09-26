@@ -1,0 +1,38 @@
+# Microsoft 365 High Volume Email (HVE): an SMTP endpoint for applications
+# sending to recipients inside your own tenant (alerts, reports, internal
+# notifications). Microsoft keeps Basic authentication for HVE until
+# September 2028, longer than for regular SMTP AUTH; OAuth is supported too.
+#
+# Requirements: an HVE account created in the Exchange admin center, and
+# only internal recipients (use recipientRestrictions.allowedDomains in the
+# MailPolicy so external addresses fail early with a clear 403 instead of an
+# upstream rejection). Check Microsoft's current HVE status, licensing and
+# limits before relying on it.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: microsoft-365-hve-smtp
+  namespace: sigillum-system
+type: Opaque
+stringData:
+  username: "hve-app@example.com"   # the HVE account
+  password: "REPLACE-ME"            # set out of band; do not commit
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: ClusterMailBackend
+metadata:
+  name: microsoft-365-hve
+spec:
+  type: smtp
+  smtp:
+    endpoints:
+      - host: smtp-hve.office365.com
+        port: 587
+        tls: starttls
+    authType: LOGIN
+    credentialsRef:
+      name: microsoft-365-hve-smtp
+      namespace: sigillum-system
+    connectionTimeoutSeconds: 10
+  healthCheck:
+    intervalSeconds: 300

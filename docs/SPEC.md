@@ -466,7 +466,8 @@ This epic describes *architectural constraints*, not features to build now. The 
 *Stage 1 — OAuth for the SMTP driver* **[planned v0.5.0]**:
 - New `authType: XOAUTH2` for SMTP backends. The driver obtains tokens with the OAuth2 client-credentials flow (tenant ID, client ID and client secret from the credentials Secret) and refreshes them itself.
 - Works for Microsoft 365 (`smtp.office365.com`) and Google Workspace (`smtp.gmail.com`) alike.
-- Workaround until then: a Microsoft 365 connector for SMTP relay (requires a static egress IP), or a mailbox with SMTP AUTH still enabled.
+- Timeline pressure (Exchange Online, January 2026): Basic authentication for SMTP AUTH is disabled by default for existing tenants at the end of December 2026 (admins can re-enable it), is unavailable to new tenants, and gets a final removal date in the second half of 2027.
+- Workarounds until then (recipes in `examples/providers/`): a Microsoft 365 inbound connector for SMTP relay (static egress IP, outbound port 25); Azure Communication Services Email over SMTP, authenticated with an Entra application's client secret; High Volume Email (`smtp-hve.office365.com`, Basic auth until September 2028, internal recipients only); or a mailbox with SMTP AUTH still enabled, as a bridge.
 
 *Stage 2 — Graph driver* **[backlog]**:
 - `type: microsoftGraph` (`Mail.Send`), for tenants that disable SMTP AUTH entirely or need Graph's higher limits.
@@ -1254,7 +1255,7 @@ Goal: a small team can route *all* cluster mail through Sigillum, including thir
 | `preStop` delay before draining | Gap fix | G-3 |
 | Egress and admission recipes (NetworkPolicy, Cilium, Kyverno, `ValidatingAdmissionPolicy`) | Recipe | US-5.7 |
 | Local development recipe with Mailpit | Recipe | US-7.1 |
-| Provider recipes: Microsoft 365, Google Workspace, Amazon SES, Mailgun, Postmark, Brevo via SMTP; Grafana, Alertmanager, Gitea, Nextcloud, Keycloak, Argo CD notifications as clients | Recipe | §8.0 rule 2 |
+| Provider recipes: Microsoft 365 (SMTP AUTH, relay connector, High Volume Email), Azure Communication Services, Google Workspace, Amazon SES, Mailgun, Postmark, Brevo via SMTP; Grafana, Alertmanager, Gitea, Nextcloud, Keycloak, Argo CD notifications as clients | Recipe | §8.0 rule 2 |
 | Restart apps on credential rotation with Stakater Reloader | Recipe | US-3.7 |
 
 ### 8.3 v0.4.0 — Easy to run, easy to debug
@@ -1325,7 +1326,7 @@ Every candidate that has been discussed, with its decision and the reason.
 | OpenAPI description | v0.4.0 | Small; enables generated clients. |
 | Dashboard and alert rules | v0.4.0 | Small teams rarely write their own. |
 | SBOM, signing, dependency scanning | Done (main, first release after v0.2.1) | Cheap in CI; lets security-minded users verify releases. |
-| XOAUTH2 for the SMTP driver | v0.5.0 | Microsoft 365 is common among small and medium organizations, and password-based SMTP AUTH is being retired. Workaround (relay connector) needs a static egress IP. |
+| XOAUTH2 for the SMTP driver | v0.5.0 | Microsoft 365 is common among small and medium organizations, and password-based SMTP AUTH is disabled by default from the end of December 2026. Workarounds: relay connector (static egress IP), Azure Communication Services, High Volume Email (internal only). |
 | Daily limit per policy | v0.5.0 | Protects the provider's daily quota of a shared sending account. |
 | Idempotency keys | v0.6.0 | Duplicate mail on retries is real, but rare enough to follow the basics. |
 | `v1beta1` CRDs | v0.6.0 | After the credential and limit fields have settled. |
@@ -1361,7 +1362,7 @@ Every candidate that has been discussed, with its decision and the reason.
 | Redis as single point of failure | Sentinel / Cluster; fail closed (`503`) by default, `failOpen` as explicit opt-in |
 | Rate limits multiplied by replica count | Documented (§4.7, US-5.2); Redis for multi-replica installs |
 | Pod-IP ambiguity for SMTP legacy auth | OAUTHBEARER default, credentials from v0.3.0; pod-IP is a double opt-in; ambiguous IPs rejected; `UsingLegacyAuth` condition |
-| Upstream provider disables password SMTP login | XOAUTH2 in v0.5.0; relay-connector workaround documented |
+| Upstream provider disables password SMTP login | XOAUTH2 in v0.5.0; relay connector, Azure Communication Services and HVE recipes (`examples/providers/`) |
 | Dependence on upstream availability | Endpoint failover, health checks, clear error semantics (`502` / `451`, rate-limit refund) |
 | Overly permissive policies | Governance via RBAC and admission recipes (§4.9, US-5.7); preflight and `explain` (v0.4.0) |
 | Unclear precedence between overlapping policies | Explicit `priority`, deterministic name tie-break (US-2.6) |
