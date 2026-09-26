@@ -147,3 +147,45 @@ func TestForbiddenSecretWriteIsNotAConflict(t *testing.T) {
 		t.Fatal("status must keep the hash of the password still in the Secret")
 	}
 }
+
+// Review of #20: a reconcile that starts before the informer cache holds the
+// status of the previous rotation must not rotate again. Otherwise the
+// Secret gets a second password while status keeps accepting only the
+// first, and the controller, unable to read Secrets, never notices.
+func TestRotationDecidedOnFreshObjectNotStaleCache(t *testing.T) {
+	stale := issuedCredential("1h")
+	var staleCache bool
+	passwords := []string{"p1", "p2"}
+	r, base := credReconciler(t, stale.DeepCopy(), interceptor.Funcs{})
+	// The reconciler reads through a cache that can lag behind the API
+	// server; the fake client itself plays the API server.
+	r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if mc, ok := obj.(*sigv1.MailCredential); ok && staleCache {
+				stale.DeepCopyInto(mc)
+				return nil
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	r.APIReader = base
+	r.GeneratePassword = func() (string, error) { p := passwords[0]; passwords = passwords[1:]; return p, nil }
+
+	req := ctrl.Request{NamespacedName: credKey}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	// The key was re-queued meanwhile; the cache still has the object from
+	// before the first rotation.
+	staleCache = true
+	_, _ = r.Reconcile(context.Background(), req)
+
+	var sec corev1.Secret
+	if err := base.Get(context.Background(), types.NamespacedName{Namespace: credKey.Namespace, Name: "grafana-smtp"}, &sec); err != nil {
+		t.Fatal(err)
+	}
+	mc := getCredential(t, base)
+	if !credential.VerifyGenerated(mc.Status.Current.Hash, string(sec.Data["password"])) {
+		t.Fatalf("status must accept the password in the Secret (%q); rotated twice from a stale cache", sec.Data["password"])
+	}
+}

@@ -60,6 +60,9 @@ type MailCredentialReconciler struct {
 	// SMTPHost and SMTPPort are written into generated Secrets.
 	SMTPHost string
 	SMTPPort int32
+	// APIReader reads MailCredentials from the API server, bypassing the
+	// informer cache (mgr.GetAPIReader()). Nil: use the client.
+	APIReader client.Reader
 
 	// Test hooks.
 	Now              func() time.Time
@@ -74,8 +77,13 @@ type MailCredentialReconciler struct {
 
 func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	// Read from the API server, not the informer cache. A key re-queued
+	// while the previous reconcile ran can start before the cache holds the
+	// status that reconcile wrote; deciding on that stale copy would rotate
+	// again, putting a second password into the Secret while status keeps
+	// only the first, and the controller cannot read Secrets to notice.
 	var mc sigv1.MailCredential
-	if err := r.Get(ctx, req.NamespacedName, &mc); err != nil {
+	if err := r.apiReader().Get(ctx, req.NamespacedName, &mc); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	now := r.now()
@@ -238,7 +246,7 @@ func (r *MailCredentialReconciler) updateStatus(ctx context.Context, mc *sigv1.M
 	status := *mc.Status.DeepCopy()
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		var latest sigv1.MailCredential
-		if err := r.Get(ctx, client.ObjectKeyFromObject(mc), &latest); err != nil {
+		if err := r.apiReader().Get(ctx, client.ObjectKeyFromObject(mc), &latest); err != nil {
 			return client.IgnoreNotFound(err)
 		}
 		if latest.UID != mc.UID {
@@ -380,6 +388,13 @@ func jsonPointerEscape(s string) string {
 		}
 	}
 	return string(out)
+}
+
+func (r *MailCredentialReconciler) apiReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 func (r *MailCredentialReconciler) now() time.Time {

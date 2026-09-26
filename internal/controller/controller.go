@@ -137,6 +137,7 @@ func init() {
 
 		credReconciler := &MailCredentialReconciler{
 			Client:           mgr.GetClient(),
+			APIReader:        mgr.GetAPIReader(),
 			Exclusions:       exclusions,
 			GeneratedEnabled: credentialsGenerated,
 			SMTPHost:         credentialSMTPHost,
