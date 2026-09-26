@@ -1,0 +1,10 @@
+# Strategic-merge patch for the Grafana Deployment: Reloader restarts it
+# when the generated credential Secret changes.
+#   kubectl -n monitoring patch deployment grafana --patch-file grafana-deployment-patch.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: monitoring
+  annotations:
+    secret.reloader.stakater.com/reload: grafana-smtp

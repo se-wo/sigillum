@@ -1,0 +1,31 @@
+# Amazon SES SMTP interface. Username and password are SES SMTP
+# credentials (derived from an IAM user with ses:SendRawEmail), not the IAM
+# access key. Change the region in the host name.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: amazon-ses-smtp
+  namespace: sigillum-system
+type: Opaque
+stringData:
+  username: "REPLACE-ME"   # SES SMTP user name
+  password: "REPLACE-ME"   # set out of band; do not commit
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: ClusterMailBackend
+metadata:
+  name: amazon-ses
+spec:
+  type: smtp
+  smtp:
+    endpoints:
+      - host: email-smtp.eu-central-1.amazonaws.com
+        port: 587
+        tls: starttls
+    authType: PLAIN
+    credentialsRef:
+      name: amazon-ses-smtp
+      namespace: sigillum-system
+    connectionTimeoutSeconds: 10
+  healthCheck:
+    intervalSeconds: 300

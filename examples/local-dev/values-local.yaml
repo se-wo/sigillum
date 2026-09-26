@@ -1,0 +1,20 @@
+# Local development profile (US-7.1). Not for production.
+api:
+  replicas: 1
+  podDisruptionBudget:
+    enabled: false
+smtp:
+  enabled: true
+  replicas: 1
+  podDisruptionBudget:
+    enabled: false
+  authModes: [oauthbearer, credential]
+  # Plaintext AUTH, including MailCredential passwords, is fine on a laptop.
+  allowInsecureAuth: true
+rateLimit:
+  backend: memory
+# The webhook needs a serving certificate (cert-manager or a Secret). Skip it
+# locally; the controller still reports invalid resources in status.
+webhook:
+  enabled: false
+logLevel: debug

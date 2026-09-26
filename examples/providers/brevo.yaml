@@ -1,0 +1,30 @@
+# Brevo (formerly Sendinblue) SMTP relay. The password is an SMTP key from
+# the Brevo console, not the account password.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: brevo-smtp
+  namespace: sigillum-system
+type: Opaque
+stringData:
+  username: "account-login@example.com"
+  password: "REPLACE-ME"   # set out of band; do not commit
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: ClusterMailBackend
+metadata:
+  name: brevo
+spec:
+  type: smtp
+  smtp:
+    endpoints:
+      - host: smtp-relay.brevo.com
+        port: 587
+        tls: starttls
+    authType: LOGIN
+    credentialsRef:
+      name: brevo-smtp
+      namespace: sigillum-system
+    connectionTimeoutSeconds: 10
+  healthCheck:
+    intervalSeconds: 300

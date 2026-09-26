@@ -1,0 +1,80 @@
+# The ValidatingAdmissionPolicy recipes in this directory as one Kyverno
+# ClusterPolicy (Kyverno >= 1.11 for CEL rules). Drop rules you do not want.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: sigillum-mailpolicy-guardrails
+  annotations:
+    policies.kyverno.io/title: Sigillum MailPolicy guardrails
+    policies.kyverno.io/description: >-
+      Senders are required and stay within the namespace's domain, cluster
+      backends need a namespace opt-in, and pod-IP authentication is banned
+      in production.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-sender-restrictions
+      match:
+        any:
+          - resources:
+              kinds: [sigillum.dev/v1alpha1/MailPolicy]
+      validate:
+        cel:
+          expressions:
+            - expression: >-
+                has(object.spec.senderRestrictions) &&
+                has(object.spec.senderRestrictions.allowedSenders) &&
+                size(object.spec.senderRestrictions.allowedSenders) > 0
+              message: MailPolicy must list its allowed senders in spec.senderRestrictions.allowedSenders
+    - name: sender-domain
+      match:
+        any:
+          - resources:
+              kinds: [sigillum.dev/v1alpha1/MailPolicy]
+              namespaceSelector:
+                matchExpressions:
+                  - { key: sigillum.dev/sender-domain, operator: Exists }
+      validate:
+        cel:
+          variables:
+            - name: domain
+              expression: "namespaceObject.metadata.labels['sigillum.dev/sender-domain'].lowerAscii()"
+          expressions:
+            - expression: >-
+                has(object.spec.senderRestrictions) &&
+                has(object.spec.senderRestrictions.allowedSenders) &&
+                object.spec.senderRestrictions.allowedSenders.all(s, s.lowerAscii().endsWith('@' + variables.domain))
+              messageExpression: "'every allowedSenders entry must end in @' + variables.domain"
+    - name: restrict-cluster-backends
+      match:
+        any:
+          - resources:
+              kinds: [sigillum.dev/v1alpha1/MailPolicy]
+      validate:
+        cel:
+          variables:
+            - name: label
+              expression: "'backends.sigillum.dev/' + object.spec.backendRef.name"
+          expressions:
+            - expression: >-
+                (has(object.spec.backendRef.kind) && object.spec.backendRef.kind == 'MailBackend') ||
+                (has(namespaceObject.metadata.labels) &&
+                 variables.label in namespaceObject.metadata.labels &&
+                 namespaceObject.metadata.labels[variables.label] == 'true')
+              messageExpression: "'this namespace may not use ClusterMailBackend ' + object.spec.backendRef.name"
+    - name: forbid-podip-fallback-in-production
+      match:
+        any:
+          - resources:
+              kinds: [sigillum.dev/v1alpha1/MailPolicy]
+              namespaceSelector:
+                matchLabels: { environment: production }
+      validate:
+        cel:
+          expressions:
+            - expression: >-
+                !has(object.spec.legacyAuth) ||
+                !has(object.spec.legacyAuth.podIPFallback) ||
+                !object.spec.legacyAuth.podIPFallback
+              message: spec.legacyAuth.podIPFallback is not allowed in production namespaces

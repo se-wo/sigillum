@@ -1,0 +1,30 @@
+# Argo CD notifications in bring-your-own-hash mode. Username:
+# argocd-notifications.argocd.
+apiVersion: sigillum.dev/v1alpha1
+kind: MailCredential
+metadata:
+  name: argocd-notifications
+  namespace: argocd
+spec:
+  serviceAccountName: argocd-notifications-controller
+  # Bring your own hash: the password lives in argocd-notifications-secret.
+  # Placeholder (the hash of "replace-me"); replace it with the output of
+  # the argon2 command in README.md.
+  passwordHash: "$argon2id$v=19$m=19456,t=2,p=1$c2lnaWxsdW0tZXhhbXBsZQ$PUtNkxmqzQ3aotaiuQlhV0Lw5Bu/ewNamOMtdz+2nRI"
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: MailPolicy
+metadata:
+  name: argocd-notifications-mail
+  namespace: argocd
+spec:
+  subjects:
+    - serviceAccount: { name: argocd-notifications-controller }
+  backendRef:
+    name: corporate-smtp
+    kind: ClusterMailBackend
+  senderRestrictions:
+    allowedSenders: ["argocd@example.com"]
+  rateLimits:
+    messagesPerMinute: 30
+    messagesPerHour: 500

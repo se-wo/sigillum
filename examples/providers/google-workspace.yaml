@@ -1,0 +1,30 @@
+# Google Workspace SMTP relay with SMTP authentication. Use an app password
+# of a Workspace user; the relay must allow authenticated senders.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: google-workspace-smtp
+  namespace: sigillum-system
+type: Opaque
+stringData:
+  username: "noreply@example.com"
+  password: "REPLACE-ME"   # set out of band; do not commit
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: ClusterMailBackend
+metadata:
+  name: google-workspace
+spec:
+  type: smtp
+  smtp:
+    endpoints:
+      - host: smtp-relay.gmail.com
+        port: 587
+        tls: starttls
+    authType: PLAIN
+    credentialsRef:
+      name: google-workspace-smtp
+      namespace: sigillum-system
+    connectionTimeoutSeconds: 10
+  healthCheck:
+    intervalSeconds: 300

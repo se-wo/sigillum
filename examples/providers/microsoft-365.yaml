@@ -1,0 +1,31 @@
+# Microsoft 365 via SMTP AUTH (client submission). The mailbox needs SMTP
+# AUTH enabled (Set-CASMailbox -SmtpClientAuthenticationDisabled $false) and
+# every sender must be the mailbox itself or one it may send as.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: microsoft-365-smtp
+  namespace: sigillum-system
+type: Opaque
+stringData:
+  username: "noreply@example.com"
+  password: "REPLACE-ME"   # set out of band; do not commit
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: ClusterMailBackend
+metadata:
+  name: microsoft-365
+spec:
+  type: smtp
+  smtp:
+    endpoints:
+      - host: smtp.office365.com
+        port: 587
+        tls: starttls
+    authType: LOGIN
+    credentialsRef:
+      name: microsoft-365-smtp
+      namespace: sigillum-system
+    connectionTimeoutSeconds: 10
+  healthCheck:
+    intervalSeconds: 300

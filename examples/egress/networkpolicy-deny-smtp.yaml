@@ -1,0 +1,18 @@
+# Allow all egress except TCP 25, 465 and 587 for every pod in the
+# namespace (US-5.7). Needs a CNI that supports endPort (Kubernetes >= 1.25).
+# Do not apply it to the Sigillum release namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sigillum-deny-smtp-egress
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        - { protocol: TCP, port: 1, endPort: 24 }
+        - { protocol: TCP, port: 26, endPort: 464 }
+        - { protocol: TCP, port: 466, endPort: 586 }
+        - { protocol: TCP, port: 588, endPort: 65535 }
+        - { protocol: UDP, port: 1, endPort: 65535 }
+        - { protocol: SCTP, port: 1, endPort: 65535 }

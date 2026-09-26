@@ -1,0 +1,27 @@
+# Nextcloud. Username: nextcloud.nextcloud, Secret: nextcloud-smtp. The chart's
+# ServiceAccount must be enabled (rbac.enabled / serviceAccount.create).
+apiVersion: sigillum.dev/v1alpha1
+kind: MailCredential
+metadata:
+  name: nextcloud
+  namespace: nextcloud
+spec:
+  serviceAccountName: nextcloud
+  secretName: nextcloud-smtp
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: MailPolicy
+metadata:
+  name: nextcloud-mail
+  namespace: nextcloud
+spec:
+  subjects:
+    - serviceAccount: { name: nextcloud }
+  backendRef:
+    name: corporate-smtp
+    kind: ClusterMailBackend
+  senderRestrictions:
+    allowedSenders: ["nextcloud@example.com"]
+  rateLimits:
+    messagesPerMinute: 30
+    messagesPerHour: 500

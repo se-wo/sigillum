@@ -1,0 +1,55 @@
+# Cilium >= 1.15 (US-5.7).
+#
+# 1. Cluster-wide: deny TCP 25, 465 and 587 to anywhere for every pod outside
+#    the Sigillum release namespace. Deny rules win over any allow rule.
+#    enableDefaultDeny=false keeps all other traffic as it is.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: sigillum-deny-smtp-egress
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: io.kubernetes.pod.namespace
+        operator: NotIn
+        values: [sigillum-system]
+  enableDefaultDeny:
+    egress: false
+    ingress: false
+  egressDeny:
+    - toEntities: [all]
+      toPorts:
+        - ports:
+            - { port: "25", protocol: TCP }
+            - { port: "465", protocol: TCP }
+            - { port: "587", protocol: TCP }
+---
+# 2. Optional, tighter: Sigillum itself may reach only DNS, the API server,
+#    in-cluster services (Redis, Mailpit, OpenTelemetry) and the relay by
+#    name. Replace smtp.office365.com with your relay.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: sigillum-egress
+  namespace: sigillum-system
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: sigillum
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: ANY }
+          rules:
+            dns:
+              - matchPattern: "*"
+    - toEntities: [kube-apiserver, cluster]
+    - toFQDNs:
+        - matchName: smtp.office365.com
+      toPorts:
+        - ports:
+            - { port: "587", protocol: TCP }

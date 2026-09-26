@@ -1,0 +1,29 @@
+# Alertmanager (kube-prometheus-stack). Username: alertmanager.monitoring. The
+# ServiceAccount name follows the kube-prometheus-stack release name.
+apiVersion: sigillum.dev/v1alpha1
+kind: MailCredential
+metadata:
+  name: alertmanager
+  namespace: monitoring
+spec:
+  serviceAccountName: kube-prometheus-stack-alertmanager
+  secretName: alertmanager-smtp
+  rotation:
+    interval: 90d
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: MailPolicy
+metadata:
+  name: alertmanager-mail
+  namespace: monitoring
+spec:
+  subjects:
+    - serviceAccount: { name: kube-prometheus-stack-alertmanager }
+  backendRef:
+    name: corporate-smtp
+    kind: ClusterMailBackend
+  senderRestrictions:
+    allowedSenders: ["alertmanager@monitoring.example.com"]
+  rateLimits:
+    messagesPerMinute: 30
+    messagesPerHour: 500
