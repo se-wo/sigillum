@@ -13,10 +13,12 @@ BIN_DIR  ?= bin
 LOCALBIN ?= $(CURDIR)/bin
 
 CONTROLLER_GEN_VERSION ?= v0.16.5
+GOVULNCHECK_VERSION    ?= v1.8.0
 ENVTEST_VERSION       ?= release-0.18
 ENVTEST_K8S_VERSION   ?= 1.30.0
 
 CONTROLLER_GEN := $(LOCALBIN)/controller-gen
+GOVULNCHECK    := $(LOCALBIN)/govulncheck
 ENVTEST        := $(LOCALBIN)/setup-envtest
 
 IMAGE_REPO ?= ghcr.io/se-wo/sigillum
@@ -77,6 +79,10 @@ docker-build:
 kind-load:
 	kind load docker-image $(IMAGE_REPO):$(IMAGE_TAG)
 
+.PHONY: vulncheck
+vulncheck: govulncheck
+	$(GOVULNCHECK) $(PKG)
+
 .PHONY: e2e
 e2e:
 	$(GO) test -tags=e2e ./test/e2e/... -timeout=20m -v
@@ -91,6 +97,10 @@ controller-gen: $(LOCALBIN)
 .PHONY: envtest
 envtest: $(LOCALBIN)
 	@test -x $(ENVTEST) || GOBIN=$(LOCALBIN) $(GO) install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION)
+
+.PHONY: govulncheck
+govulncheck: $(LOCALBIN)
+	@test -x $(GOVULNCHECK) || GOBIN=$(LOCALBIN) $(GO) install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 
 .PHONY: clean
 clean:
