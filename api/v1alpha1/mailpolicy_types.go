@@ -58,11 +58,15 @@ type SenderRestrictions struct {
 	AllowedSenders []string `json:"allowedSenders,omitempty"`
 }
 
-// RecipientRestrictions are reserved for v0.2; included so a future driver
-// release can populate them without a CRD migration.
+// RecipientRestrictions restrict the domains of To/Cc/Bcc recipients
+// (US-2.4). Domains match exactly and case-insensitively; subdomains must be
+// listed separately. BlockedDomains takes precedence over AllowedDomains.
 type RecipientRestrictions struct {
+	// AllowedDomains, if non-empty, is the exhaustive list of recipient
+	// domains. Empty means "any domain not blocked".
 	// +optional
 	AllowedDomains []string `json:"allowedDomains,omitempty"`
+	// BlockedDomains are always rejected, even if also allowed.
 	// +optional
 	BlockedDomains []string `json:"blockedDomains,omitempty"`
 }

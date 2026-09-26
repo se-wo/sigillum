@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -32,6 +33,19 @@ func (s *cachedPolicyStore) ListInNamespace(namespace string) []sigv1.MailPolicy
 		return nil
 	}
 	return list.Items
+}
+
+// serviceAccountLabels returns the labels of the caller's ServiceAccount from
+// the informer cache. A lookup failure yields nil, so selector subjects simply
+// do not match (fail closed) instead of failing the request.
+func (s *Server) serviceAccountLabels(ctx context.Context, namespace, name string) map[string]string {
+	var sa corev1.ServiceAccount
+	if err := s.k8sReader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &sa); err != nil {
+		s.logger.Warn("service account lookup failed; selector subjects will not match",
+			"namespace", namespace, "service_account", name, "err", err)
+		return nil
+	}
+	return sa.Labels
 }
 
 // backendForPolicy resolves the policy's BackendRef into a live driver.

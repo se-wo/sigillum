@@ -179,10 +179,14 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// snapshot scoped to the caller's namespace so the engine sees nothing
 	// outside it.
 	policies := s.policyStore.ListInNamespace(subject.Namespace)
-	matched := policy.Match(policies, policy.Caller{
+	caller := policy.Caller{
 		Namespace:      subject.Namespace,
 		ServiceAccount: subject.ServiceAccount,
-	})
+	}
+	if policy.NeedsSALabels(policies) {
+		caller.SALabels = s.serviceAccountLabels(ctx, subject.Namespace, subject.ServiceAccount)
+	}
+	matched := policy.Match(policies, caller)
 	decision := policy.Evaluate(matched, view)
 	if !decision.Allowed {
 		emitDeny(logger, subject, view, decision)

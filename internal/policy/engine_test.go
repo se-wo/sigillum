@@ -182,3 +182,44 @@ func TestMatch_EmptyAllowedSendersStillMatchesPolicyButDeniesEvaluation(t *testi
 		t.Skip("evaluation handles via SenderRestrictions only when set; nil restrictions allow")
 	}
 }
+
+func TestMatch_ServiceAccountSelectorExpressions(t *testing.T) {
+	p := sigv1.MailPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "expr", Namespace: "billing"},
+		Spec: sigv1.MailPolicySpec{
+			Subjects: []sigv1.PolicySubject{{
+				ServiceAccountSelector: &sigv1.LabelSelectorSubject{
+					MatchExpressions: []metav1.LabelSelectorRequirement{{
+						Key: "tier", Operator: metav1.LabelSelectorOpIn, Values: []string{"batch", "notify"},
+					}},
+				},
+			}},
+		},
+	}
+	policies := []sigv1.MailPolicy{p}
+	if !NeedsSALabels(policies) {
+		t.Fatal("NeedsSALabels must report selector subjects")
+	}
+	in := Caller{Namespace: "billing", ServiceAccount: "x", SALabels: map[string]string{"tier": "notify"}}
+	if got := Match(policies, in); got == nil {
+		t.Fatal("expected matchExpressions to match")
+	}
+	out := Caller{Namespace: "billing", ServiceAccount: "x", SALabels: map[string]string{"tier": "web"}}
+	if got := Match(policies, out); got != nil {
+		t.Fatalf("expected no match, got %s", got.Name)
+	}
+	if NeedsSALabels([]sigv1.MailPolicy{policy("p", "billing", 1, "sa")}) {
+		t.Fatal("NeedsSALabels must be false without selector subjects")
+	}
+}
+
+func TestEvaluate_RecipientCaseAndNoAllowlist(t *testing.T) {
+	p := policy("p", "ns", 1, "sa", "*@x.com")
+	p.Spec.RecipientRestrictions = &sigv1.RecipientRestrictions{BlockedDomains: []string{"Gmail.com"}}
+	if got := Evaluate(&p, MessageView{From: "a@x.com", Recipients: []string{"ok@corp.example", "a@GMAIL.com"}}); got.Allowed {
+		t.Fatal("blocked domain must match case-insensitively")
+	}
+	if got := Evaluate(&p, MessageView{From: "a@x.com", Recipients: []string{"ok@corp.example"}}); !got.Allowed {
+		t.Fatalf("empty allowlist must allow non-blocked domains, got %+v", got)
+	}
+}

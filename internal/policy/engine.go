@@ -8,6 +8,9 @@ import (
 	"sort"
 	"strings"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 )
 
@@ -15,10 +18,24 @@ import (
 type Caller struct {
 	Namespace      string
 	ServiceAccount string
-	// SALabels is empty unless the engine resolves the SA labels — for v1 we
-	// only consult ServiceAccount / ServiceAccountSelector via SA name +
-	// labels supplied by the caller-side resolver.
+	// SALabels are the labels of the caller's ServiceAccount, resolved by the
+	// transport layer. Only needed when a candidate policy uses a
+	// serviceAccountSelector (see NeedsSALabels).
 	SALabels map[string]string
+}
+
+// NeedsSALabels reports whether any of the policies carries a
+// serviceAccountSelector subject, i.e. whether the transport layer has to
+// resolve the caller's ServiceAccount labels before calling Match.
+func NeedsSALabels(policies []sigv1.MailPolicy) bool {
+	for _, p := range policies {
+		for _, s := range p.Spec.Subjects {
+			if s.ServiceAccountSelector != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // MessageView is the subset of the inbound payload the engine needs to decide.
@@ -84,7 +101,7 @@ func subjectMatches(p sigv1.MailPolicy, caller Caller) bool {
 		if s.ServiceAccount != nil && s.ServiceAccount.Name == caller.ServiceAccount {
 			return true
 		}
-		if s.ServiceAccountSelector != nil && labelsMatch(s.ServiceAccountSelector.MatchLabels, caller.SALabels) {
+		if s.ServiceAccountSelector != nil && selectorMatches(s.ServiceAccountSelector, caller.SALabels) {
 			return true
 		}
 		// PodSelector is intentionally ignored on the REST path (SMTP-only).
@@ -92,16 +109,20 @@ func subjectMatches(p sigv1.MailPolicy, caller Caller) bool {
 	return false
 }
 
-func labelsMatch(want, have map[string]string) bool {
-	if len(want) == 0 {
+// selectorMatches evaluates matchLabels and matchExpressions. An empty
+// selector never matches — a policy must not accidentally bind every SA.
+func selectorMatches(sel *sigv1.LabelSelectorSubject, have map[string]string) bool {
+	if len(sel.MatchLabels) == 0 && len(sel.MatchExpressions) == 0 {
 		return false
 	}
-	for k, v := range want {
-		if have[k] != v {
-			return false
-		}
+	ls, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
+		MatchLabels:      sel.MatchLabels,
+		MatchExpressions: sel.MatchExpressions,
+	})
+	if err != nil {
+		return false
 	}
-	return true
+	return ls.Matches(labels.Set(have))
 }
 
 // Evaluate decides accept/deny for one message against one already-matched

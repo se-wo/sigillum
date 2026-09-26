@@ -123,14 +123,20 @@ spec:
                 type: object
               recipientRestrictions:
                 description: |-
-                  RecipientRestrictions are reserved for v0.2; included so a future driver
-                  release can populate them without a CRD migration.
+                  RecipientRestrictions restrict the domains of To/Cc/Bcc recipients
+                  (US-2.4). Domains match exactly and case-insensitively; subdomains must be
+                  listed separately. BlockedDomains takes precedence over AllowedDomains.
                 properties:
                   allowedDomains:
+                    description: |-
+                      AllowedDomains, if non-empty, is the exhaustive list of recipient
+                      domains. Empty means "any domain not blocked".
                     items:
                       type: string
                     type: array
                   blockedDomains:
+                    description: BlockedDomains are always rejected, even if also
+                      allowed.
                     items:
                       type: string
                     type: array
