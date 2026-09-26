@@ -63,8 +63,14 @@ func (f *fakeDriver) Send(_ context.Context, m *driver.Message) (*driver.SendRes
 
 type denyLimiter struct{}
 
-func (denyLimiter) Allow(context.Context, string, int32, int32) (bool, time.Duration) {
-	return false, 42 * time.Second
+func (denyLimiter) Allow(context.Context, string, int32, int32) (bool, time.Duration, error) {
+	return false, 42 * time.Second, nil
+}
+
+type brokenLimiter struct{}
+
+func (brokenLimiter) Allow(context.Context, string, int32, int32) (bool, time.Duration, error) {
+	return false, 0, ratelimit.ErrUnavailable
 }
 
 func readyBackend(name string, ready bool) *sigv1.ClusterMailBackend {
@@ -221,5 +227,20 @@ func TestSend_ServiceAccountSelectorResolvesLabels(t *testing.T) {
 	g, _ := newGateway(t, &fakeDriver{}, p, sa, readyBackend("relay", true))
 	if res := g.Send(context.Background(), request("app@team.example")); res.Status != StatusAccepted {
 		t.Fatalf("selector subject should match via SA labels, got %+v", res)
+	}
+}
+
+func TestSend_LimiterUnavailable(t *testing.T) {
+	d := &fakeDriver{}
+	g, rec := newGateway(t, d, testPolicy(), readyBackend("relay", true))
+	g.Limiter = brokenLimiter{}
+	if res := g.Send(context.Background(), request("app@team.example")); res.Status != StatusUnavailable {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	if len(d.sent) != 0 {
+		t.Fatal("must not send when the limiter is down (fail closed)")
+	}
+	if ev := rec.last(t); ev.Reason != "ratelimit_unavailable" {
+		t.Fatalf("unexpected audit event %+v", ev)
 	}
 }

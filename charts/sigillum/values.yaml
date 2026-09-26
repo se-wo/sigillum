@@ -111,6 +111,27 @@ containerSecurityContext:
   capabilities:
     drop: [ALL]
 
+## Rate limiting ##
+# memory: per-replica counters — with api.replicas > 1 every replica enforces
+#         the policy limit on its own, so the effective limit multiplies.
+# redis:  one sliding window shared by all replicas (recommended for HA).
+rateLimit:
+  backend: memory
+  # Only for backend=redis: admit mail while Redis is unreachable instead of
+  # answering 503. Off by default (fail closed).
+  failOpen: false
+  redis:
+    # One address = single node; several = Cluster, or Sentinel if
+    # masterName is set.
+    addrs: []
+    masterName: ""
+    db: 0
+    tls: false
+    # Secret holding the Redis password (and optionally ACL username).
+    existingSecret: ""
+    passwordKey: password
+    usernameKey: ""
+
 ## Observability ##
 # Audit stream (US-4.3): one JSON record per mail request, accepted or
 # rejected, tagged "stream":"audit". Never contains subject/body/attachments.

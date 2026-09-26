@@ -88,6 +88,9 @@ const (
 	StatusRateLimited
 	StatusBackendNotReady
 	StatusUpstreamError
+	// StatusUnavailable: a Sigillum dependency (e.g. the Redis rate-limit
+	// store) is down. Retryable; not the caller's fault.
+	StatusUnavailable
 )
 
 // Result is the outcome of Send.
@@ -163,7 +166,13 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 	ev.Policy = p.Name
 
 	if rl := p.Spec.RateLimits; rl != nil && (rl.MessagesPerMinute > 0 || rl.MessagesPerHour > 0) {
-		ok, retry := g.Limiter.Allow(ctx, p.Namespace+"/"+p.Name, rl.MessagesPerMinute, rl.MessagesPerHour)
+		ok, retry, err := g.Limiter.Allow(ctx, p.Namespace+"/"+p.Name, rl.MessagesPerMinute, rl.MessagesPerHour)
+		if err != nil {
+			logger.Error("rate limiter unavailable", "policy", p.Name, "err", err)
+			ev.Decision, ev.Reason = audit.DecisionReject, "ratelimit_unavailable"
+			g.Audit.Record(ev)
+			return Result{Status: StatusUnavailable, Policy: p.Name, Detail: "rate limiter unavailable; retry later"}
+		}
 		if !ok {
 			telemetry.RatelimitRejectedTotal.WithLabelValues(p.Namespace, p.Name).Inc()
 			logger.Info("request rejected", "result", "ratelimited", "policy", p.Name)

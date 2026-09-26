@@ -31,8 +31,8 @@ func (a *auditSink) Record(e audit.Event) {
 
 type fixedLimiter struct{}
 
-func (fixedLimiter) Allow(context.Context, string, int32, int32) (bool, time.Duration) {
-	return true, 0
+func (fixedLimiter) Allow(context.Context, string, int32, int32) (bool, time.Duration, error) {
+	return true, 0, nil
 }
 
 func newTestServer() (*Server, *auditSink) {
@@ -97,5 +97,13 @@ func TestWriteResult_RateLimitedSetsRetryAfter(t *testing.T) {
 	writeResult(w, "m", gateway.Result{Status: gateway.StatusRateLimited, RetryAfter: 7 * time.Second, Policy: "p"})
 	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") != "7" {
 		t.Fatalf("got %d Retry-After=%q", w.Code, w.Header().Get("Retry-After"))
+	}
+}
+
+func TestWriteResult_UnavailableIs503(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeResult(w, "m", gateway.Result{Status: gateway.StatusUnavailable, Policy: "p"})
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "unavailable") {
+		t.Fatalf("got %d %s", w.Code, w.Body.String())
 	}
 }

@@ -72,3 +72,43 @@ app.kubernetes.io/component: controller
 {{- define "sigillum.webhook.secretName" -}}
 {{- default (printf "%s-webhook-tls" (include "sigillum.fullname" .)) .Values.webhook.certificate.secretName -}}
 {{- end -}}
+
+{{/*
+Rate-limit flags shared by every Deployment that sends mail.
+*/}}
+{{- define "sigillum.ratelimitArgs" -}}
+- --ratelimit-backend={{ .Values.rateLimit.backend }}
+{{- if eq .Values.rateLimit.backend "redis" }}
+{{- if not .Values.rateLimit.redis.addrs }}
+{{- fail "rateLimit.redis.addrs is required when rateLimit.backend=redis" }}
+{{- end }}
+- --redis-addrs={{ .Values.rateLimit.redis.addrs | join "," }}
+{{- with .Values.rateLimit.redis.masterName }}
+- --redis-master={{ . }}
+{{- end }}
+- --redis-db={{ .Values.rateLimit.redis.db }}
+- --redis-tls={{ .Values.rateLimit.redis.tls }}
+- --ratelimit-fail-open={{ .Values.rateLimit.failOpen }}
+{{- end }}
+{{- end }}
+
+{{/*
+Redis credentials from an existing Secret (never rendered into args).
+*/}}
+{{- define "sigillum.ratelimitEnv" -}}
+{{- if and (eq .Values.rateLimit.backend "redis") .Values.rateLimit.redis.existingSecret }}
+- name: SIGILLUM_REDIS_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.rateLimit.redis.existingSecret }}
+      key: {{ .Values.rateLimit.redis.passwordKey }}
+{{- with .Values.rateLimit.redis.usernameKey }}
+- name: SIGILLUM_REDIS_USERNAME
+  valueFrom:
+    secretKeyRef:
+      name: {{ $.Values.rateLimit.redis.existingSecret }}
+      key: {{ . }}
+      optional: true
+{{- end }}
+{{- end }}
+{{- end }}

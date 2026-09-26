@@ -74,6 +74,7 @@ func init() {
 			audience        string
 			shutdownTimeout time.Duration
 			auditLog        string
+			rlCfg           ratelimit.Config
 		)
 		fs := flag.NewFlagSet("api", flag.ContinueOnError)
 		// --mode is consumed by the entrypoint; accept it here so Parse does
@@ -85,6 +86,7 @@ func init() {
 		fs.DurationVar(&tokenCacheTTL, "token-cache-ttl", 5*time.Minute, "cache TTL for TokenReview results")
 		fs.StringVar(&audience, "token-audience", "sigillum", "expected audience in projected ServiceAccount tokens")
 		fs.DurationVar(&shutdownTimeout, "shutdown-timeout", 25*time.Second, "graceful shutdown deadline")
+		rlCfg.BindFlags(fs)
 		fs.StringVar(&auditLog, "audit-log", "stdout", "audit stream sink: stdout, stderr, none, or a file path")
 		if err := fs.Parse(os.Args[1:]); err != nil && err != flag.ErrHelp {
 			return err
@@ -122,6 +124,10 @@ func init() {
 		if err != nil {
 			return err
 		}
+		limiter, err := rlCfg.Build(logger)
+		if err != nil {
+			return err
+		}
 
 		s := &Server{
 			logger: logger,
@@ -130,7 +136,7 @@ func init() {
 				Audit:    auditLogger,
 				Policies: gateway.CachedPolicyStore{C: cl.GetClient()},
 				Reader:   cl.GetClient(),
-				Limiter:  ratelimit.NewMemoryLimiter(),
+				Limiter:  limiter,
 			},
 			authn: authn,
 		}

@@ -222,6 +222,16 @@ func writeResult(w http.ResponseWriter, msgID string, res gateway.Result) {
 			Policy:    res.Policy,
 			MessageID: msgID,
 		})
+	case gateway.StatusUnavailable:
+		w.Header().Set("Retry-After", "5")
+		problem.Write(w, problem.Problem{
+			Type:      problem.TypeBase + problem.TypeUnavailable,
+			Title:     "Service temporarily unavailable",
+			Status:    http.StatusServiceUnavailable,
+			Detail:    res.Detail,
+			Policy:    res.Policy,
+			MessageID: msgID,
+		})
 	case gateway.StatusBackendNotReady:
 		problem.Write(w, problem.Problem{
 			Type:      problem.TypeBase + problem.TypeBackendNotReady,
