@@ -14,7 +14,10 @@ LOCALBIN ?= $(CURDIR)/bin
 
 CONTROLLER_GEN_VERSION ?= v0.16.5
 GOVULNCHECK_VERSION    ?= v1.8.0
-ENVTEST_VERSION       ?= release-0.18
+# setup-envtest has no tagged releases; this pseudo-version is the head of
+# controller-runtime's release-0.18 branch (commit 42f791873869), pinned so
+# the tool can't change underneath us.
+ENVTEST_VERSION       ?= v0.0.0-20250106171007-42f791873869
 ENVTEST_K8S_VERSION   ?= 1.30.0
 
 CONTROLLER_GEN := $(LOCALBIN)/controller-gen

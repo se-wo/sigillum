@@ -1,0 +1,4 @@
+# BuildKit uses this instead of .dockerignore for Dockerfile.ci, which only
+# needs the prebuilt binary (and .dockerignore excludes bin/).
+*
+!bin/sigillum

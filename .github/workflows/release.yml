@@ -1,8 +1,9 @@
 name: release
 
 # Only GitHub-owned actions are used: the repository's Actions policy allows
-# actions owned by se-wo, created by GitHub, or helm/kind-action. Docker
-# buildx and Helm are preinstalled on ubuntu-latest and driven from shell;
+# actions created by GitHub, helm/kind-action and this repository's own local
+# actions. Docker buildx and Helm are preinstalled on ubuntu-latest and driven
+# from shell;
 # cosign is a checksum-pinned release binary (.github/actions/setup-cosign).
 # Actions are pinned to commit SHAs (not tags); tag comments track which
 # human-readable release the SHA corresponds to. Dependabot bumps them.
@@ -25,6 +26,7 @@ on:
       - .github/workflows/release.yml
       - .github/actions/**
       - Dockerfile
+      - .dockerignore
       - charts/**
 
 permissions:
@@ -44,7 +46,21 @@ jobs:
       id-token: write      # Sigstore signing certificate (cosign, attest)
       attestations: write  # store the provenance attestation in GitHub
     steps:
+      # Full history so the tagged commit can be checked against main.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Only commits that landed on main (i.e. passed review and the
+      # required checks) may be released.
+      - name: verify tagged commit is on main
+        if: env.PUBLISH == 'true'
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA ($GITHUB_REF_NAME) is not on main; refusing to release"
+            exit 1
+          fi
 
       - name: compute version and tags
         id: meta
@@ -164,6 +180,8 @@ jobs:
       CHART: ghcr.io/${{ github.repository_owner }}/charts/sigillum
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: ./.github/actions/setup-cosign
 
