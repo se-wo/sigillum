@@ -1191,7 +1191,7 @@ These targets are not yet verified by a benchmark in CI.
 | Area | Decision | Rationale |
 |---|---|---|
 | Kubernetes | 1.32 or later (chart `kubeVersion`); envtest and the kind E2E run on a current release (1.36) | Oldest minor still in (LTS) support; `ValidatingAdmissionPolicy` for the credential Secret guard |
-| Language | Go (module `go 1.25`, toolchain 1.26) | Ecosystem, kubebuilder, performance |
+| Language | Go (module `go 1.27`, toolchain 1.27) | Ecosystem, kubebuilder, performance |
 | Framework | controller-runtime / kubebuilder markers | De-facto standard for operators |
 | REST router | chi | Small, low-dependency |
 | SMTP | `emersion/go-smtp` + `emersion/go-sasl` | RFC-compliant, including OAUTHBEARER (RFC 7628) |
