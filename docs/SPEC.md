@@ -6,7 +6,7 @@
 |---|---|
 | **Name** | Sigillum |
 | **Spec version** | 0.3.0 (matches release v0.3.0) |
-| **Status** | Living document. Each requirement carries its implementation status; the roadmap (§8) is prioritized for small and medium organizations. |
+| **Status** | Living document. Each requirement carries its implementation status; the roadmap (§8) is prioritized for individuals and small and medium organizations. |
 | **Author** | Sebastian (private OSS project) |
 | **Audience** | Platform engineering (fictional). Private OSS project, inspired by real requirements. |
 | **Purpose** | Functional and technical basis for implementation and review |
@@ -63,7 +63,7 @@ The following are explicitly **not** part of this product, now or later:
 These capabilities are not planned before 1.0, but the architecture must allow them without breaking changes to CRDs or the API:
 
 - **Read path.** Mailbox access via backend-native APIs (IMAP, Microsoft Graph `Mail.Read`, Gmail API). Read support stays optional per backend.
-- **Backend diversity.** Besides SMTP, API-based backends: Microsoft Graph (`Mail.Send` / `Mail.Read`), SendGrid, Gmail API. Each backend declares its capabilities; policies and the API surface respect them.
+- **Backend diversity.** Besides SMTP, API-based backends: Microsoft Graph (`Mail.Send` / `Mail.Read`), SendGrid, Gmail API. Each backend declares its capabilities; policies and the API surface respect them. Sending through Microsoft Graph and the Gmail API is pulled forward to v0.4.0 (US-6.1, US-6.2); reading stays after 1.0.
 - **IMAP proxy for legacy readers.** Analogous to the SMTP proxy on the send path, an IMAP proxy could let legacy workloads read mailboxes whose backend is actually Graph or Gmail.
 
 Consequence for the architecture today: CRDs, the driver interface and the capability model are shaped so these extensions are *additive*. No migration path and no new API groups are needed.
@@ -127,7 +127,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - Whether a request may be retried is defined per status code in §4.4.3. It is **not** "4xx = never retry, 5xx = always retry": `429` is retryable. Upstream failures are split since v0.3.0: `502 upstream-error` is transient (retry), `422 upstream-rejected` is a permanent rejection of this message by the relay (do not retry unchanged).
 - Policy denials name the policy that denied the request (`policy` field).
 
-#### US-1.5 — SMTPS (implicit TLS) on the proxy **[planned v0.4.0]**
+#### US-1.5 — SMTPS (implicit TLS) on the proxy **[planned v0.5.0]**
 **As a** developer **I want** the SMTP proxy to accept implicit TLS on port 465, **so that** applications that only offer "SSL/TLS" (not STARTTLS) can use it.
 
 *Acceptance criteria:*
@@ -152,7 +152,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 
 *Acceptance criteria:*
 - Namespace-scoped CRD `MailBackend` and cluster-scoped CRD `ClusterMailBackend`.
-- The spec has a `type` discriminator (`smtp` implemented; `microsoftGraph`, `sendgrid`, `gmail` reserved in the schema enum).
+- The spec has a `type` discriminator (`smtp` implemented; `microsoftGraph` and `gmail` planned for v0.4.0, `sendgrid` reserved in the schema enum).
 - For `type: smtp`: an `endpoints` list (at least one entry), `authType`, and `credentialsRef` (required unless `authType: NONE`).
 - `endpoints` is an ordered failover list; sends use the first Ready endpoint.
 - The validating webhook checks the spec **statically**: it rejects types without a registered driver, missing `smtp` block, empty endpoints, `insecureSkipVerify: true`, a missing `credentialsRef` when auth is required, a missing `credentialsRef.namespace` on `ClusterMailBackend`, and a cross-namespace `credentialsRef` on `MailBackend`.
@@ -217,13 +217,31 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - The subject type (explicit ServiceAccount vs. selector) does **not** influence precedence today. Whether it should become a secondary key is open question Q-6 (§9.2).
 - A request no policy matches is rejected with `403 no-policy-matched` (default deny).
 
-#### US-2.7 — Daily limit **[planned v0.5.0]**
+#### US-2.7 — Daily limit **[planned v0.4.0]**
 **As a** platform engineer **I want** a per-day cap in addition to per-minute and per-hour limits, **so that** one workload cannot exhaust the upstream provider's daily sending quota for the whole organization.
 
 *Acceptance criteria:*
 - `rateLimits.messagesPerDay`, counted like the other windows (per policy, sliding window, US-2.2).
 - Motivation: hosted mailboxes enforce daily quotas (for example Microsoft 365 and Google Workspace cap recipients per day and mailbox); exceeding them blocks the sending account for everyone, not just the runaway workload.
 - A namespace-wide quota across policies (`MailQuota`, §4.3.3) stays in the backlog until users ask for it.
+
+#### US-2.8 — Sender allowlist on the backend **[planned v0.4.0]**
+**As a** platform engineer or an individual **I want** a backend to state which sender addresses it sends for, **so that** a backend that can send as many mailboxes never sends as one it was not meant for, and a personal account is used only with its own address.
+
+*Acceptance criteria:*
+- `MailBackend.spec.allowedSenders` and `ClusterMailBackend.spec.allowedSenders`: exact addresses and glob patterns with the syntax and matching rules of US-2.3 (for example `*@example.com`, or a single `me@outlook.com`).
+- Checked on every send in addition to the policy's `senderRestrictions`, against the same addresses (`From`, envelope sender, `Sender`). Both must match, so a policy can narrow the backend's list but never widen it. On violation: `403 sender-not-allowed`, audit and metric reason `sender_not_allowed`; the log line names the backend as the restriction that failed.
+- The mailbox an API backend sends as is the `From` address: Graph app-only posts to `/users/{From}/sendMail`, a Gmail service account impersonates `From`. The backend's list therefore bounds which mailboxes Sigillum can use.
+- Defaults per backend kind (the webhook enforces them):
+
+  | Backend | `allowedSenders` omitted | Why |
+  |---|---|---|
+  | `smtp` (company relay, provider SMTP) | No backend restriction; the relay forwards as `From` states, as today | Non-breaking; the relay and the policy already decide |
+  | `microsoftGraph` app-only, `gmail` service account | **Rejected by the webhook**; at least one entry is required | The grant can send as any mailbox in the tenant or domain |
+  | Delegated (`microsoftGraph`, `gmail`, `XOAUTH2`; US-6.3) | Only the signed-in account (`status.oauth.account`) | A personal account has one address; add its send-as aliases explicitly |
+
+- `allowedSenders: []` denies every sender, as in US-2.3. The webhook warns on it.
+- The platform owner of a `ClusterMailBackend` can pin its sender domains without an admission policy; the `sigillum.dev/sender-domain` recipe (US-5.7) stays for per-namespace domains.
 
 ---
 
@@ -306,11 +324,11 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - A namespace-scoped `MailCredential` (§4.3.4) binds a username to one ServiceAccount in its namespace. Authenticating with it gives exactly the identity of that ServiceAccount; policy matching, rate limits and audit are unchanged. Policies need no opt-in for credential callers.
 - Two mutually exclusive modes:
   - **Generated (default).** The controller generates a 256-bit random password, writes it to a Secret in the credential's namespace (`spec.secretName`), and records only a SHA-256 hash in `status`. Nothing secret is committed to Git; the team only commits the `MailCredential`.
-  - **Bring your own hash.** The user sets `spec.passwordHash` (argon2id) and delivers the Secret themselves (Vault, External Secrets, `kubectl sigillum credential create` from v0.4.0). The controller touches no Secret. For teams that do not want Sigillum to write Secrets in their namespace.
+  - **Bring your own hash.** The user sets `spec.passwordHash` (argon2id) and delivers the Secret themselves (Vault, External Secrets, `kubectl sigillum credential create` from v0.5.0). The controller touches no Secret. For teams that do not want Sigillum to write Secrets in their namespace.
 - Generated credentials are available in **all namespaces except excluded ones** (chart `credentials.excludeNamespaces`, default `kube-*`; the Sigillum release namespace is always excluded). Details and the guard that keeps this safe: §4.10.
-- The SMTP proxy offers `AUTH PLAIN` and `AUTH LOGIN` when mode `credential` is enabled (`--auth-modes`, chart `smtp.authModes`). Credential authentication **requires TLS** (STARTTLS, or implicit TLS from v0.4.0): on a plaintext connection PLAIN and LOGIN are not advertised and answer `538 5.7.11`. Plaintext is only possible with an explicit `smtp.allowInsecureAuth: true` (flag `--allow-insecure-credential-auth`), for example with mesh mTLS; the default `null` enables plaintext AUTH for tokens only. Unlike tokens, a static password can be replayed for months.
+- The SMTP proxy offers `AUTH PLAIN` and `AUTH LOGIN` when mode `credential` is enabled (`--auth-modes`, chart `smtp.authModes`). Credential authentication **requires TLS** (STARTTLS, or implicit TLS from v0.5.0): on a plaintext connection PLAIN and LOGIN are not advertised and answer `538 5.7.11`. Plaintext is only possible with an explicit `smtp.allowInsecureAuth: true` (flag `--allow-insecure-credential-auth`), for example with mesh mTLS; the default `null` enables plaintext AUTH for tokens only. Unlike tokens, a static password can be replayed for months.
 - The proxy verifies credentials from its informer cache of `MailCredential` objects and needs no Secret access. It only accepts a credential whose `Ready` condition is `True` and whose `status.serviceAccountName` (and, for bring-your-own hashes, `status.current.hash`) match the spec: a changed ServiceAccount or hash takes effect once the controller has accepted it, and the old one stops working at once. Other spec edits, such as the rotation interval, do not interrupt logins while the controller catches up. For a PLAIN authorization identity, only empty or the username itself is accepted.
-- **Rotation (generated mode):** on `spec.rotation.interval` (Go duration or days, for example `90d`; at least `1h`) or on demand (any new value of the annotation `sigillum.dev/rotate`, or `kubectl sigillum credential rotate` from v0.4.0), the controller writes a new password to the Secret and keeps the old hash valid for `spec.rotation.gracePeriod` (default 24 h). Apps that read the password only at startup are restarted by [Stakater Reloader](https://github.com/stakater/Reloader) (recipe in `examples/reloader/`). The audit record carries `credential_previous: true` when the previous password was used, and the proxy logs a warning, so stragglers can be found before the grace period ends.
+- **Rotation (generated mode):** on `spec.rotation.interval` (Go duration or days, for example `90d`; at least `1h`) or on demand (any new value of the annotation `sigillum.dev/rotate`, or `kubectl sigillum credential rotate` from v0.5.0), the controller writes a new password to the Secret and keeps the old hash valid for `spec.rotation.gracePeriod` (default 24 h). Apps that read the password only at startup are restarted by [Stakater Reloader](https://github.com/stakater/Reloader) (recipe in `examples/reloader/`). The audit record carries `credential_previous: true` when the previous password was used, and the proxy logs a warning, so stragglers can be found before the grace period ends.
 - **Revocation:** delete the `MailCredential` (the owned Secret is garbage-collected). Takes effect as soon as the proxy's informer sees the deletion; there is no additional cache. Open SMTP sessions are re-checked at every `MAIL FROM` and again before a message is relayed at the end of `DATA`, and answer `454 4.7.0` once the credential is gone or its password has been rotated out. The reply is temporary so that a message queued before a rotation is retried on a new connection with the new password rather than bounced; a deleted credential then fails `AUTH` with `535`. The session stays refused (no fallback to pod-IP identification). A failed lookup answers `454 4.7.0` and the session goes on. After a rotation, a session that logged in with the rotated-out password is audited with `credential_previous: true`.
 - Log and audit `auth_method`: `smtp_credential`, plus the credential's username (`credential`). Failed attempts answer `535 5.7.8`, are audited (reason `invalid_credentials`) and counted in `sigillum_auth_failures_total`. Only bring-your-own-hash credentials are throttled, per replica: after `--auth-failures-per-user-ip` (default 10) failures per username and source IP within `--auth-failure-window` (default 5 min), further attempts with that username from that IP answer `454 4.7.0` without checking the password (reason `auth_rate_limited`). Attempts with the same username from the same source IP are checked one at a time, so parallel connections cannot pass the limit while their checks wait for an argon2id slot, and parallel logins with the right password are not throttled (after the first, the success cache answers them). User-chosen passwords may be weak and every attempt costs an argon2id computation; generated 256-bit passwords cannot be guessed, so throttling them would only let anyone who reaches the proxy lock out the real app. Nothing is counted per username or per source IP alone: behind a mesh sidecar or SNAT all callers share one source IP, and one misbehaving client must not block the others. In that setup a client that can reach the proxy can still exhaust a bring-your-own credential's bucket for the shared IP; prefer generated credentials there, or set `--auth-failures-per-user-ip=0`. The failure tracker is an LRU of 100,000 keys, so a flood of new usernames or addresses cannot evict an active block. Bring-your-own argon2id verifications run at most two at a time per replica, and successes are cached for 5 min.
 - No privilege escalation: whoever can create a `MailCredential` for a ServiceAccount could already run a pod as that ServiceAccount (`edit` role).
@@ -343,6 +361,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
   | `sigillum_policy_denied_total` | Counter | `namespace`, `policy`, `reason` | Policy denials, plus `reason="backend_not_ready"` |
   | `sigillum_auth_failures_total` **[v0.3.0]** | Counter | `transport`, `auth_method`, `reason` (`invalid_token`, `invalid_credentials`, `auth_rate_limited`, `auth_unavailable`) | Failed authentication attempts |
   | `sigillum_credential_guard_ok` **[v0.3.0]** | Gauge (controller) | — | 1 while the credential Secret guard is verified (§4.10), 0 while the controller refuses to write credential Secrets |
+  | `sigillum_backend_authorized` **[planned v0.4.0]** | Gauge (controller) | `backend` | 1 while a delegated backend (US-6.3) holds a working refresh token, 0 while it needs a new sign-in |
 
 - Payload errors (before policy evaluation) are not counted in metrics; they appear in the audit stream. Authentication failures are counted in `sigillum_auth_failures_total` only; no namespace label, since the claimed identity is client-supplied.
 - `ServiceMonitor` in the Helm chart (`serviceMonitor.enabled`).
@@ -382,7 +401,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - `--cluster-name` flag on all three components (chart value `clusterName`, empty by default).
 - When set: audit field `cluster`, log field `cluster` (the controller's log lines too), and a `cluster` target label on the ServiceMonitor (a relabeling, not an extra label on every series, so single-cluster setups are unchanged).
 
-#### US-4.6 — Dashboards and alerts **[planned v0.4.0]**
+#### US-4.6 — Dashboards and alerts **[planned v0.5.0]**
 **As a** platform engineer **I want** a ready-made dashboard and alert rules, **so that** I notice problems without writing PromQL first.
 
 *Acceptance criteria:*
@@ -438,7 +457,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - Default resources in the chart, overridable.
 - Compatible with the Pod Security Standard `restricted`.
 
-#### US-5.6 — Install without cert-manager **[planned v0.4.0]**
+#### US-5.6 — Install without cert-manager **[planned v0.5.0]**
 **As a** platform engineer of a small cluster **I want** to install Sigillum without cert-manager, **so that** a single `helm install` is enough.
 
 *Acceptance criteria:*
@@ -461,41 +480,100 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 
 This epic describes *architectural constraints*, not features to build now. The current architecture must allow these extensions without breaking changes.
 
-#### US-6.1 — Microsoft 365 as upstream **[planned v0.5.0 / backlog]**
-**As a** platform engineer **I want** to send through Microsoft 365 without a password-based SMTP login, **so that** Sigillum keeps working once Microsoft retires Basic authentication for SMTP AUTH.
+#### US-6.1 — Microsoft 365 and Outlook.com as upstream **[planned v0.4.0]**
+**As a** platform engineer or an individual running a small cluster **I want** to send through Microsoft 365 or a personal Outlook.com account without a password, **so that** Sigillum keeps working once Microsoft switches off Basic authentication for SMTP AUTH.
 
-*Stage 1 — OAuth for the SMTP driver* **[planned v0.5.0]**:
-- New `authType: XOAUTH2` for SMTP backends. The driver obtains tokens with the OAuth2 client-credentials flow (tenant ID, client ID and client secret from the credentials Secret) and refreshes them itself.
-- Works for Microsoft 365 (`smtp.office365.com`) and Google Workspace (`smtp.gmail.com`) alike.
-- Timeline pressure (Exchange Online, January 2026): Basic authentication for SMTP AUTH is disabled by default for existing tenants at the end of December 2026 (admins can re-enable it), is unavailable to new tenants, and gets a final removal date in the second half of 2027.
-- Workarounds until then (recipes in `examples/providers/`): a Microsoft 365 inbound connector for SMTP relay (static egress IP, outbound port 25); Azure Communication Services Email over SMTP, authenticated with an Entra application's client secret; High Volume Email (`smtp-hve.office365.com`, Basic auth until September 2028, internal recipients only); or a mailbox with SMTP AUTH still enabled, as a bridge.
+*Why this comes first (§8.0 rule 1):*
+- Exchange Online (timeline of January 2026): Basic authentication for SMTP AUTH is disabled by default for existing tenants at the end of December 2026 (admins can re-enable it), is unavailable to new tenants, and gets a final removal date in the second half of 2027.
+- App passwords are no way out. They are Basic authentication too: personal Microsoft accounts (Outlook.com) no longer have them, and for work and school accounts they stop working with the December 2026 switch. Every password-based path into a Microsoft 365 mailbox ends; only OAuth remains.
+- Personal Outlook.com accounts cannot use Sigillum at all today: Microsoft already removed Basic authentication and app passwords for them, and the SMTP driver has no OAuth.
+- Microsoft 365 is the most common hosted mailbox among small organizations, and Outlook.com among individuals (§8.0).
 
-*Stage 2 — Graph driver* **[backlog]**:
-- `type: microsoftGraph` (`Mail.Send`), for tenants that disable SMTP AUTH entirely or need Graph's higher limits.
-- `MailBackend.spec.type` already accepts `microsoftGraph` in the schema enum; the webhook rejects it until a driver is registered. No CRD redesign when the driver lands.
+*Stage 1 — Graph driver* **[planned v0.4.0]**, the primary path:
+- `type: microsoftGraph`, send only. It does not depend on SMTP AUTH being enabled for tenant or mailbox.
+- Two ways to authenticate, chosen in the spec:
+  - **App-only** (work and school accounts): OAuth2 client-credentials flow against Entra ID, `POST /users/{mailbox}/sendMail` with the application permission `Mail.Send`. Tenant ID and client ID in the spec, `client_secret` in the credentials Secret. The driver caches the access token and refreshes it before expiry. Certificate credentials and workload identity federation stay in the backlog (§8.8, cloud workload identity).
+  - **Delegated** (personal Outlook.com accounts, and work accounts where an app-only grant is not wanted): a user signs in once, `POST /me/sendMail` with the delegated permissions `Mail.Send` and `offline_access`. Sign-in, token storage and refresh are described in US-6.3.
+- App-only `Mail.Send` can send as any mailbox in the tenant. The backend sends as the `From` mailbox and requires its own `allowedSenders` (US-2.8); the recipe (`examples/providers/`) additionally confines the Entra application to those mailboxes with Exchange Online RBAC for Applications. A delegated backend can only send as the signed-in account and the addresses it may send as.
+- Implements `RawSender`: the message the SMTP proxy relays goes to `sendMail` as Base64 MIME unchanged, and REST messages are assembled to MIME as for SMTP. Both transports therefore work with a Graph backend.
+- Graph limits one request to 4 MB, Base64 MIME included. Larger messages **[planned v0.4.0, opt-in]** go through a draft: the driver parses the MIME message, creates the draft with body, recipients and `X-` headers, uploads each large attachment through an upload session, and sends the draft. This path needs the additional permission `Mail.ReadWrite` (read access to the whole mailbox), so it is off unless `microsoftGraph.largeMessages: true`. It cannot keep the MIME structure byte for byte: headers other than the standard ones and `X-` headers are dropped, and signed or encrypted messages (S/MIME, PGP/MIME) above 4 MB are rejected with a permanent error. Without the opt-in, larger messages are rejected with a permanent error that names the limit. The mailbox's own send size limit still applies (Exchange Online default 35 MB).
+- Error mapping: `429`, `503` and other `5xx` are `ErrUpstreamTransient` (honoring `Retry-After`); `400`, `403` and `404` (unknown mailbox, missing permission) are `ErrUpstreamPermanent`.
+- The health check acquires a token, so a wrong tenant, client ID or secret shows up as `Ready=False` instead of on the first send. `status.endpointStatus` has a single entry for the Graph endpoint.
+- Exchange Online's daily limit (10,000 recipients per mailbox) applies to Graph as well, and personal Outlook.com accounts have far lower limits; the daily limit (US-2.7) ships in the same release.
+- `MailBackend.spec.type` already accepts `microsoftGraph` in the schema enum; the webhook rejects it until the driver is registered. No CRD redesign is needed.
 
-#### US-6.2 — API-based send backends **[backlog]**
-**As a** platform engineer **I want** to use SendGrid, Amazon SES, Mailgun or the Gmail API through their HTTP APIs.
+*Stage 2 — XOAUTH2 for the SMTP driver* **[planned v0.4.0]**:
+- New `authType: XOAUTH2` for SMTP backends, using the same token sources as the Graph driver: app-only for `smtp.office365.com` (permission `SMTP.SendAsApp`), delegated for `smtp-mail.outlook.com` and `smtp.office365.com` (permission `SMTP.Send`).
+- For setups that must stay on SMTP. It still needs SMTP AUTH enabled per mailbox, so the Graph driver is the recommended path.
+- The same `authType` serves Google (US-6.2 stage 2) with a Google token source.
 
-*Priority note:* every one of these providers also offers SMTP with an API key as password, which works with the SMTP driver today. API drivers become worth their cost mainly together with cloud workload identity (no static secret at all, for example SES with IRSA / EKS Pod Identity), which is a larger-organization concern.
+*Workarounds until v0.4.0* (recipes in `examples/providers/`): a Microsoft 365 inbound connector for SMTP relay (static egress IP, outbound port 25); Azure Communication Services Email over SMTP, authenticated with an Entra application's client secret; High Volume Email (`smtp-hve.office365.com`, Basic auth until September 2028, internal recipients only); or a mailbox with SMTP AUTH still enabled, as a bridge until the end of December 2026.
+
+#### US-6.2 — Gmail and Google Workspace as upstream **[planned v0.4.0]**
+**As a** platform engineer or an individual running a small cluster **I want** to send through Google Workspace or a personal Gmail account with OAuth instead of an app password, **so that** sending does not depend on a static secret that grants full mailbox access, 2-Step Verification settings and an admin setting that may disable app passwords.
+
+*Status quo:*
+- Google app passwords still work for SMTP (`smtp.gmail.com`, `smtp-relay.gmail.com`) as long as 2-Step Verification is active on the account and the Workspace admin has not disabled them. The existing recipe (`examples/providers/google-workspace.yaml`) relies on them, and no cut-off date is announced, so Gmail is less urgent than Microsoft 365.
+- An app password is still a static secret tied to a user: it is revoked when that user changes their Google password, it disappears with the user's account, and it grants full access to the mailbox rather than just sending.
+
+*Stage 1 — Gmail API driver* **[planned v0.4.0]**:
+- `type: gmail`, send only, through `users.messages.send` with the raw RFC 5322 message. Implements `RawSender` like the Graph driver, so REST and SMTP both work.
+- Two ways to authenticate, chosen in the spec, both limited to the scope `https://www.googleapis.com/auth/gmail.send`:
+  - **Service account** (Google Workspace): domain-wide delegation. The driver signs the JWT assertion (RFC 7523) with the key from `service_account.json` in the credentials Secret and impersonates the `From` mailbox, bounded by the backend's `allowedSenders` (US-2.8). It caches the access token and refreshes it before expiry.
+  - **Delegated** (personal Gmail accounts, and Workspace accounts without domain-wide delegation): a user signs in once with an OAuth client of their own Google Cloud project. Sign-in, token storage and refresh are described in US-6.3.
+- Gmail replaces a `From` that is neither the mailbox nor one of its verified send-as aliases, so a delegated backend's `allowedSenders` should list only the account and those aliases.
+- Messages up to 35 MB go through the upload endpoint; Gmail's own message size limit applies.
+- Error mapping: `429` and `5xx` are `ErrUpstreamTransient`; `400` and `403` (delegation missing, scope not granted) are `ErrUpstreamPermanent`.
+- The health check acquires a token, so a broken key or missing delegation shows up as `Ready=False`.
+- Workspace caps sending at 2,000 messages per user and day, a personal Gmail account at about 500 recipients per day; the daily limit (US-2.7) protects both.
+- `MailBackend.spec.type` already accepts `gmail`; no CRD redesign is needed.
+
+*Stage 2 — XOAUTH2 for SMTP with Google* **[planned v0.4.0]**: `authType: XOAUTH2` (US-6.1 stage 2) gets Google token sources, the service-account assertion and delegated sign-in, for `smtp.gmail.com`. Gmail's SMTP accepts only the scope `https://mail.google.com/` (full mailbox access), so the recipes recommend the Gmail API driver and keep XOAUTH2 for software that must stay on SMTP.
+
+*Until v0.4.0*, personal Gmail accounts use `smtp.gmail.com` with an app password (`examples/providers/gmail.yaml`).
+
+#### US-6.3 — Delegated sign-in for personal accounts **[planned v0.4.0]**
+**As an** individual running Sigillum on a home lab or small cluster **I want** to connect my personal Outlook.com or Gmail account once through the provider's sign-in page, **so that** Sigillum can send as me without a password and keeps working without further logins.
+
+Personal accounts have no app-only access: no client credentials for Outlook.com, no service accounts with domain-wide delegation for Gmail. A person has to sign in and consent once; Sigillum then works with the refresh token it receives.
+
+*Acceptance criteria:*
+- **Own OAuth client.** The user registers an OAuth client with the provider; Sigillum ships no shared client ID for now (Q-13). Its client ID goes into the backend spec; a client secret, where the provider requires one, into the credentials Secret. The recipes walk through the registration:
+  - Microsoft: an app registration for personal Microsoft accounts with public client flows enabled and the delegated permissions `Mail.Send` (or `SMTP.Send`) and `offline_access`.
+  - Google: a project with the Gmail API enabled, an OAuth client of type "Desktop app", and the consent screen set to **In production**. Google does not verify an app used only by its owner, so the owner clicks through the "unverified app" warning once. A consent screen left in **Testing** issues refresh tokens that expire after seven days; the controller warns about it when it can tell (a refresh token that stops working after seven days).
+- **Sign-in:**
+  - Microsoft uses the device authorization grant (RFC 8628), run by the controller. When a delegated backend has no valid refresh token, or on any new value of the annotation `sigillum.dev/authorize`, the controller requests a device code and sets `Authorized=False`, reason `AuthorizationPending`, with the verification URL and the user code in the condition message (`kubectl describe cmb <name>`). The controller polls until the user has signed in or the code expires (15 minutes; then reason `AuthorizationExpired` until the next annotation value).
+  - Google does not allow Gmail scopes in its device flow. A subcommand `sigillum oauth login --provider google|microsoft` runs the authorization code flow with PKCE and a loopback redirect (RFC 8252) on a workstation with a browser and prints the refresh token, or writes it into the credentials Secret with the user's own kubeconfig. It ships in the Sigillum binary and image; the `kubectl sigillum` plugin (US-7.2) gets the same command later. It also works for Microsoft, for users who prefer it.
+- **Token broker.** The controller is the only component that redeems the refresh token, so replicas never race and Microsoft's rotating refresh tokens are not lost:
+  - It keeps the newest refresh token and the current access token with its expiry in a Secret it owns (`sigillum-oauth-<backend>`, in the backend's credentials namespace, owner reference to the backend). On start it reads that Secret and the credentials Secret and uses the newer refresh token.
+  - It refreshes the access token at half its lifetime (Microsoft and Google issue access tokens for about an hour). The api-server and the SMTP proxy read the access token from the Secret through the Secret informer they already have and never see the refresh token's rotation.
+  - The periodic health check refreshes the tokens even when no mail is sent, so they do not lapse from inactivity (Microsoft: refresh tokens last 90 days and rotate on use; Google: a refresh token unused for six months expires).
+  - When a refresh fails permanently (revoked consent, a changed Google password, expiry), the backend goes `Ready=False` with reason `AuthorizationRequired` and the metric `sigillum_backend_authorized` drops to 0, so the alert rules (US-4.6) can page the owner; a Microsoft backend immediately starts a new device code (above).
+- **Secret guard.** Writing the token Secret extends the credential Secret guard (§4.10): the controller may `create` and `patch` only Opaque Secrets labelled `sigillum.dev/oauth-token`, with the backend's UID in an annotation, a controller owner reference to that backend, and only the keys `refresh_token`, `access_token` and `expires_at`. This is also allowed in the release namespace, for this label only. The chart grants the permission together with the guard.
+- **Identity in status.** `status.oauth.account` shows the signed-in account (from the ID token or the provider's profile call), so a sign-in with the wrong account is visible. Without `spec.allowedSenders` the backend sends only as that account (US-2.8).
+
+#### US-6.4 — API-based send backends **[backlog]**
+**As a** platform engineer **I want** to use SendGrid, Amazon SES or Mailgun through their HTTP APIs.
+
+*Priority note:* every one of these providers also offers SMTP with an API key as password, which works with the SMTP driver today. API drivers become worth their cost mainly together with cloud workload identity (no static secret at all, for example SES with IRSA / EKS Pod Identity), which is a larger-organization concern. Microsoft Graph and the Gmail API are the exception and are planned (US-6.1 to US-6.3), because their providers are retiring or discouraging password logins.
 
 *Architectural constraint:*
 - Different auth mechanisms per backend type (API key, service-account JSON, OAuth2 client credentials) must be expressible as type-specific Secret layouts without changing the central secret handling (§4.3.1).
 
-#### US-6.3 — Reading mail via REST **[future]**
+#### US-6.5 — Reading mail via REST **[future]**
 **As a** developer **I want** to read mailboxes via REST (list, fetch, search), **so that** workloads can process incoming mail without an IMAP library.
 
 *Architectural constraint:*
 - `Read()` and `Subscribe()` are added to the driver interface (or as optional interfaces, like `RawSender`) when the first read-capable driver lands.
 - The API is versioned; `/v1/messages` stays the send path and read endpoints are added under `/v1/mailboxes/...`.
 
-#### US-6.4 — IMAP proxy for legacy readers **[future]**
+#### US-6.6 — IMAP proxy for legacy readers **[future]**
 **As a** developer of a legacy application **I want** to read mailboxes over IMAP, even when the backend is Microsoft Graph.
 
 *Architectural constraint:*
 - Protocol adapters are separate, optionally enabled components (the SMTP proxy already runs as its own `--mode=smtp` deployment on the shared gateway pipeline).
 
-#### US-6.5 — Webhook push for backend events **[future]**
+#### US-6.7 — Webhook push for backend events **[future]**
 **As a** developer **I want** events such as bounces, delivery confirmations or incoming mail pushed to my workload.
 
 *Architectural constraint:*
@@ -515,7 +593,7 @@ This epic describes *architectural constraints*, not features to build now. The 
 - A recipe to call the API from the laptop as a given ServiceAccount: `kubectl create token <sa> --audience sigillum` plus `kubectl port-forward`.
 - A built-in capture driver is **not** planned: Mailpit already does this well (§8.0).
 
-#### US-7.2 — Preflight and kubectl plugin **[planned v0.4.0]**
+#### US-7.2 — Preflight and kubectl plugin **[planned v0.5.0]**
 **As a** developer or policy author **I want** to test and explain policy decisions from the command line, **so that** I understand a `403` without reading controller logs.
 
 *Acceptance criteria:*
@@ -527,7 +605,7 @@ This epic describes *architectural constraints*, not features to build now. The 
   - `credential create`: bring-your-own-hash mode; generate a password, then create the Secret and the `MailCredential` (US-3.7) with the user's own permissions.
   - `credential rotate`: trigger a rotation of a generated credential.
 
-#### US-7.3 — OpenAPI description **[planned v0.4.0]**
+#### US-7.3 — OpenAPI description **[planned v0.5.0]**
 **As a** developer **I want** a machine-readable API description, **so that** I can generate a client in my language.
 
 *Acceptance criteria:*
@@ -628,6 +706,8 @@ spec:
       namespace: sigillum-system
     connectionTimeoutSeconds: 10 # 1–120, default 10
     heloDomain: sigillum         # optional, default "sigillum"
+  allowedSenders:                # [planned v0.4.0] optional for smtp; the backend sends only for these (US-2.8)
+    - "*@example.com"
   healthCheck:
     enabled: true                # default true; false = assume Ready without probing
     intervalSeconds: 60          # minimum 10, default 60
@@ -658,9 +738,11 @@ With `healthCheck.enabled: false` the backend is reported Ready without probing,
 | Type | Keys |
 |---|---|
 | `smtp` | `username`, `password` |
-| `microsoftGraph` [future] | `client_secret` (plus tenant / client ID in the spec) |
-| `sendgrid` [future] | `api_key` |
-| `gmail` [future] | `service_account.json` |
+| `smtp` with `authType: XOAUTH2` [planned v0.4.0] | as the matching `microsoftGraph` or `gmail` mode below |
+| `microsoftGraph` app-only [planned v0.4.0] | `client_secret` (plus tenant / client ID in the spec) |
+| `gmail` service account [planned v0.4.0] | `service_account.json` |
+| Delegated, Microsoft or Google [planned v0.4.0] | optional `refresh_token` from `sigillum oauth login`; `client_secret` for Google's desktop client (client ID in the spec). The controller keeps the current tokens in its own Secret `sigillum-oauth-<backend>` (US-6.3). |
+| `sendgrid` [backlog] | `api_key` |
 
 #### 4.3.2 MailPolicy (namespace-scoped)
 
@@ -872,7 +954,7 @@ Error responses follow RFC 7807, with the Sigillum extension members `policy` an
 }
 ```
 
-#### 4.4.2 POST /v1/policies/preflight **[planned v0.4.0]**
+#### 4.4.2 POST /v1/policies/preflight **[planned v0.5.0]**
 
 Dry run before sending:
 - Request: identical to `POST /v1/messages`. (`POST`, not `GET`: the request carries a body.)
@@ -946,7 +1028,7 @@ type RawSender interface {
 
 Drivers register a factory per type in a process-wide registry. The webhook rejects backend types without a registered factory. The SMTP driver supports STARTTLS and implicit TLS, `PLAIN` / `LOGIN` / `CRAM-MD5`, and MIME multipart assembly.
 
-**Capability matrix** (target picture; only the `smtp` row is implemented):
+**Capability matrix** (target picture; only the `smtp` row is implemented, and `send` for `microsoftGraph` and `gmail` is planned for v0.4.0):
 
 | Backend type | send | read | subscribeEvents | folders |
 |---|---|---|---|---|
@@ -1055,6 +1137,7 @@ The api-server and SMTP proxy read backend credentials themselves on the send pa
 - The Secret must be of type `Opaque` and hold only the keys `username`, `password`, `host` and `port`. Otherwise a Secret of type `kubernetes.io/service-account-token` would make the token controller fill it with a token of any ServiceAccount in the namespace.
 - The namespace must not match `credentials.excludeNamespaces`, and must not be the release namespace (which holds the relay credentials).
 - `DELETE` is not needed: owned Secrets are garbage-collected with their `MailCredential`.
+- **[planned v0.4.0]** A second allowed shape for the OAuth token Secrets of delegated backends (US-6.3): label `sigillum.dev/oauth-token`, the backend's UID in an annotation, a controller owner reference to that backend, type `Opaque`, only the keys `refresh_token`, `access_token` and `expires_at`. It is allowed in the backend's credentials namespace, the release namespace included. Every other rule above stays unchanged.
 
 Without `get`, `list` or `watch`, the controller cannot read any Secret outside the backend-credential namespaces it already had. Worst case, a compromised controller can overwrite or create mail-credential Secrets; it cannot read or change anything else.
 
@@ -1154,7 +1237,7 @@ These targets are not yet verified by a benchmark in CI.
 ### 5.5 Observability
 
 - Metrics per US-4.1, logs per US-4.2 and US-4.3, traces per US-4.4.
-- Grafana dashboard and alert rules in the Helm chart (US-4.6) **[planned v0.4.0]**.
+- Grafana dashboard and alert rules in the Helm chart (US-4.6) **[planned v0.5.0]**.
 
 ### 5.6 Compliance
 
@@ -1167,7 +1250,7 @@ These targets are not yet verified by a benchmark in CI.
 - Installation via Helm in under 5 minutes.
 - Configuration fully GitOps-capable.
 - Rolling upgrades without mail loss via graceful shutdown with a readiness delay (US-5.3).
-- Runbooks for: upstream outage, rate-limit store outage, CRD upgrade / migration **[planned v0.4.0]**.
+- Runbooks for: upstream outage, rate-limit store outage, CRD upgrade / migration **[planned v0.5.0]**.
 
 ### 5.8 Maintainability
 
@@ -1234,7 +1317,7 @@ See also §1.4 (permanent non-goals) and §1.5 (anticipated, not before 1.0). Ad
 
 **Versioning.** Sigillum stays below 1.0 until it has run in production at independent installations and their feedback is in (exit criteria in §8.7). Minor versions (0.x.0) may still change CRDs in breaking ways, always with a documented migration; patch versions (0.x.y) never do.
 
-**Target users.** Small and medium organizations: one to a few clusters (typically staging and production), a small platform team or a single operator, a hosted mail provider (Microsoft 365, Google Workspace, Amazon SES, Mailgun, Postmark, …) or a company relay as upstream, and plenty of off-the-shelf software next to in-house services. Large fleets and very large enterprises are welcome, but their needs are not prioritized yet.
+**Target users.** Individuals running a home lab or a small cluster, sending through a personal mailbox (Outlook.com, Gmail); they are likely among the first users of a young project maintained by one person. Small and medium organizations: one to a few clusters (typically staging and production), a small platform team or a single operator, a hosted mail provider (Microsoft 365, Google Workspace, Amazon SES, Mailgun, Postmark, …) or a company relay as upstream, and plenty of off-the-shelf software next to in-house services. Large fleets and very large enterprises are welcome, but their needs are not prioritized yet.
 
 **Rules, applied in order:**
 
@@ -1268,9 +1351,25 @@ Goal: a small team can route *all* cluster mail through Sigillum, including thir
 | Provider recipes: Microsoft 365 (SMTP AUTH, relay connector, High Volume Email), Azure Communication Services, Google Workspace, Amazon SES, Mailgun, Postmark, Brevo via SMTP; Grafana, Alertmanager, Gitea, Nextcloud, Keycloak, Argo CD notifications as clients | Recipe | §8.0 rule 2 |
 | Restart apps on credential rotation with Stakater Reloader | Recipe | US-3.7 |
 
-### 8.3 v0.4.0 — Easy to run, easy to debug
+### 8.3 v0.4.0 — Microsoft 365 and Gmail
 
-Goal: one-command install on a small cluster, and developers can answer "why was my mail rejected?" themselves.
+Goal: keep sending through Microsoft 365 once password logins, app passwords included, are switched off at the end of December 2026; make personal Outlook.com accounts usable at all (they lost password logins already); send through Gmail and Google Workspace without an app password; protect the mailboxes' daily quotas. Target: released before the end of December 2026. The Microsoft items have a hard deadline and come first; the Gmail items follow in the same release.
+
+| Item | Type | Ref |
+|---|---|---|
+| Microsoft Graph driver (`type: microsoftGraph`, `Mail.Send`, app-only and delegated, `RawSender`) | Feature | US-6.1 stage 1 |
+| Sender allowlist on the backend (`spec.allowedSenders`) | Feature | US-2.8 |
+| Delegated sign-in: device code (Microsoft), `sigillum oauth login`, controller as token broker, token Secret guard | Feature | US-6.3 |
+| `authType: XOAUTH2` for the SMTP driver, Microsoft token sources | Feature | US-6.1 stage 2 |
+| Daily limit `rateLimits.messagesPerDay` | Feature | US-2.7 |
+| Graph messages above 4 MB via draft and upload sessions (opt-in, `Mail.ReadWrite`) | Feature | US-6.1 stage 1 |
+| Gmail API driver (`type: gmail`, `gmail.send`, service account and delegated, `RawSender`) | Feature | US-6.2 stage 1 |
+| `authType: XOAUTH2`, Google token sources | Feature | US-6.2 stage 2 |
+| Provider recipes: Graph app-only with RBAC for Applications, Outlook.com and Gmail with your own OAuth client, Gmail API with domain-wide delegation; migration notes from SMTP AUTH and app passwords | Recipe | US-6.1 to US-6.3 |
+
+### 8.4 v0.5.0 — Easy to run, easy to debug
+
+Goal: one-command install on a small cluster, and developers can answer "why was my mail rejected?" themselves. Planned as v0.4.0 until the Microsoft 365 deadline moved hosted mailboxes ahead of it.
 
 | Item | Type | Ref |
 |---|---|---|
@@ -1280,15 +1379,6 @@ Goal: one-command install on a small cluster, and developers can answer "why was
 | OpenAPI 3.1 description | Feature | US-7.3 |
 | Grafana dashboard and `PrometheusRule` alerts | Feature | US-4.6 |
 | Runbooks: upstream outage, Redis outage, CRD upgrade | Docs | §5.7 |
-
-### 8.4 v0.5.0 — Hosted mailboxes (Microsoft 365, Google Workspace)
-
-Goal: keep working when password-based SMTP login is switched off, and protect shared mailbox quotas.
-
-| Item | Type | Ref |
-|---|---|---|
-| `authType: XOAUTH2` (OAuth2 client credentials) for the SMTP driver | Feature | US-6.1 stage 1 |
-| Daily limit `rateLimits.messagesPerDay` | Feature | US-2.7 |
 
 ### 8.5 v0.6.0 — API stabilization
 
@@ -1330,18 +1420,22 @@ Every candidate that has been discussed, with its decision and the reason.
 | Gap fixes G-1, G-3, G-5 | Done (v0.3.0) | Small; G-5 is security-relevant. |
 | Local development | Recipe, Done (v0.3.0) | Mailpit as a `MailBackend` works today. A built-in capture driver is not planned. |
 | Provider support via SMTP (SES, Mailgun, Postmark, Brevo, Google Workspace relay) | Recipe, Done (v0.3.0) | All providers offer SMTP; the existing driver covers them. |
-| Webhook certificates without cert-manager | v0.4.0 | Workaround exists (cert-manager or own secret), but it is the biggest install hurdle on small clusters. |
-| Preflight and kubectl plugin | v0.4.0 | Main debugging aid for developers and policy authors. |
-| SMTPS on port 465 | v0.4.0 | Small; some apps offer nothing else. |
-| OpenAPI description | v0.4.0 | Small; enables generated clients. |
-| Dashboard and alert rules | v0.4.0 | Small teams rarely write their own. |
+| Microsoft Graph driver | v0.4.0 | Microsoft 365 is common among small and medium organizations, and password-based SMTP AUTH, app passwords included, is disabled by default from the end of December 2026. Graph needs no SMTP AUTH at all. Workarounds until then: relay connector (static egress IP), Azure Communication Services, High Volume Email (internal only). |
+| XOAUTH2 for the SMTP driver | v0.4.0 | Shares the token code with the Graph and Gmail drivers; for setups that must stay on SMTP. |
+| Gmail API driver | v0.4.0 | App passwords still work with 2-Step Verification, but they grant full mailbox access, are revoked with a password change and can be disabled by the admin. A service account (Workspace) or a delegated sign-in (personal accounts) needs only `gmail.send`. |
+| Personal Outlook.com and Gmail accounts (delegated sign-in) | v0.4.0 | Individuals are likely among the first users. Outlook.com has no password login left at all. |
+| Sender allowlist on the backend | v0.4.0 | API backends can send as many mailboxes; the backend must bound them, a company relay may stay open (Q-12). |
+| Daily limit per policy | v0.4.0 | Protects the provider's daily quota of a shared sending account. |
+| Graph messages above 4 MB | v0.4.0, opt-in | Reports and invoices with attachments exceed 4 MB quickly. Opt-in because drafts need `Mail.ReadWrite`. |
+| Webhook certificates without cert-manager | v0.5.0 | Workaround exists (cert-manager or own secret), but it is the biggest install hurdle on small clusters. |
+| Preflight and kubectl plugin | v0.5.0 | Main debugging aid for developers and policy authors. |
+| SMTPS on port 465 | v0.5.0 | Small; some apps offer nothing else. |
+| OpenAPI description | v0.5.0 | Small; enables generated clients. |
+| Dashboard and alert rules | v0.5.0 | Small teams rarely write their own. |
 | SBOM, signing, dependency scanning | Done (main, first release after v0.2.1) | Cheap in CI; lets security-minded users verify releases. |
-| XOAUTH2 for the SMTP driver | v0.5.0 | Microsoft 365 is common among small and medium organizations, and password-based SMTP AUTH is disabled by default from the end of December 2026. Workarounds: relay connector (static egress IP), Azure Communication Services, High Volume Email (internal only). |
-| Daily limit per policy | v0.5.0 | Protects the provider's daily quota of a shared sending account. |
 | Idempotency keys | v0.6.0 | Duplicate mail on retries is real, but rare enough to follow the basics. |
 | `v1beta1` CRDs | v0.6.0 | After the credential and limit fields have settled. |
-| Microsoft Graph driver | Backlog | XOAUTH2 covers most tenants; needed only where SMTP AUTH is disabled entirely. |
-| API drivers (SES, SendGrid, Mailgun, Gmail API) | Backlog | SMTP endpoints already work; worthwhile mainly with cloud workload identity. |
+| API drivers (SES, SendGrid, Mailgun) | Backlog | SMTP endpoints already work; worthwhile mainly with cloud workload identity. |
 | Cloud workload identity for upstream auth | Backlog | Larger-organization need; External Secrets plus rotation covers small setups. |
 | Istio mTLS auth | Backlog | Tokens already work inside meshes. |
 | `MailQuota` (namespace-wide) | Backlog | Per-policy daily limit covers most cases. |
@@ -1372,12 +1466,14 @@ Every candidate that has been discussed, with its decision and the reason.
 | Redis as single point of failure | Sentinel / Cluster; fail closed (`503`) by default, `failOpen` as explicit opt-in |
 | Rate limits multiplied by replica count | Documented (§4.7, US-5.2); Redis for multi-replica installs |
 | Pod-IP ambiguity for SMTP legacy auth | OAUTHBEARER default, credentials from v0.3.0; pod-IP is a double opt-in; ambiguous IPs rejected; `UsingLegacyAuth` condition |
-| Upstream provider disables password SMTP login | XOAUTH2 in v0.5.0; relay connector, Azure Communication Services and HVE recipes (`examples/providers/`) |
+| Upstream provider disables password SMTP login or app passwords | Graph and Gmail API drivers and XOAUTH2 in v0.4.0, targeted before the Microsoft 365 cut-off at the end of December 2026; relay connector, Azure Communication Services and HVE recipes (`examples/providers/`) until then |
+| Refresh token of a delegated backend revoked or expired (password change, revoked consent, Google OAuth client left in testing) | Health check keeps tokens in use; `Ready=False` with `AuthorizationRequired` and `sigillum_backend_authorized` for alerting; Microsoft backends start a new device code automatically (US-6.3) |
+| Controller outage stops access token refresh for delegated backends | Tokens are refreshed at half their lifetime, so sending continues for about 30 minutes; the controller is a restarted Deployment with leader election |
 | Dependence on upstream availability | Endpoint failover, health checks, clear error semantics (`502` / `451`, rate-limit refund) |
-| Overly permissive policies | Governance via RBAC and admission recipes (§4.9, US-5.7); preflight and `explain` (v0.4.0) |
+| Overly permissive policies | Governance via RBAC and admission recipes (§4.9, US-5.7); preflight and `explain` (v0.5.0) |
 | Unclear precedence between overlapping policies | Explicit `priority`, deterministic name tie-break (US-2.6) |
 | No mail queue → loss risk during upstream outage | Caller responsibility; idempotency keys (v0.6.0) make retries safe |
-| CRDs not upgraded by Helm | Documented upgrade procedure (US-5.1); components refuse to start on outdated CRDs (v0.3.0); runbook in v0.4.0 |
+| CRDs not upgraded by Helm | Documented upgrade procedure (US-5.1); components refuse to start on outdated CRDs (v0.3.0); runbook in v0.5.0 |
 | Too few users to validate the design | Stay below 1.0 until the exit criteria (§8.7) are met |
 
 ### 9.2 Open questions
@@ -1395,6 +1491,8 @@ Every candidate that has been discussed, with its decision and the reason.
 | Q-9 | What should `MailPolicy.status.matchedSubjects` count, or should it be removed? | See G-4; decide by v0.6.0. |
 | Q-10 | Should the webhook warn when `senderRestrictions` is present with an empty `allowedSenders` list? | That configuration denies every sender and is almost always a mistake (US-2.3). A warning does not change behavior. |
 | Q-11 | `MailCredential` design | **Decided:** controller-generated Secrets by default in all namespaces except `credentials.excludeNamespaces` (default `kube-*`, release namespace always), guarded as in §4.10; bring-your-own argon2id hash as alternative; SHA-256 for generated passwords; no per-policy opt-in; TLS required by default (US-3.7, §4.3.4). |
+| Q-12 | Should a Graph or Gmail backend send as whichever mailbox `From` names, or be pinned to one mailbox in its spec? | **Decided:** it depends on the upstream, so the backend states it. API backends send as `From`, bounded by the backend's own `allowedSenders` globs (US-2.8): a company relay can forward any address of its domains, a personal account only its own. |
+| Q-13 | Should Sigillum ship a shared OAuth client ID for personal accounts, so users need no app registration of their own? | Easier setup, but the project would own a registration, its verification with Microsoft and Google, and the consent screen users see. Until decided, every user brings their own client (US-6.3). |
 
 Settled: a backend can define several endpoints as a failover group (`spec.smtp.endpoints`).
 

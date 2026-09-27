@@ -5,7 +5,10 @@
 # "Less secure apps" are gone for all Workspace accounts, and smtp.gmail.com
 # rejects plain account passwords. Password logins only work with an app
 # password, which needs 2-Step Verification on the account and app
-# passwords not being disabled by the Workspace admin.
+# passwords not being disabled by the Workspace admin. App passwords still
+# work (no cut-off announced), but they belong to one user and are revoked
+# when that user changes their password. A Gmail API driver with a service
+# account (domain-wide delegation) is planned for v0.4.0.
 #
 # 1. SMTP authentication with an app password ("Require SMTP
 #    Authentication" in the relay setting).
