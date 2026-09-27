@@ -4,8 +4,10 @@
 # (Exchange Online timeline of January 2026): it is disabled by default for
 # existing tenants at the end of December 2026 (admins can still re-enable
 # it), new tenants no longer get it, and the final removal date is to be
-# announced in the second half of 2027. Sigillum's OAuth support for the SMTP
-# driver (authType XOAUTH2) is planned for v0.5.0. Until then, prefer one of:
+# announced in the second half of 2027. App passwords are Basic auth too and
+# stop working with it; personal Microsoft accounts no longer have them.
+# Sigillum's Microsoft Graph driver and OAuth for the SMTP driver (authType
+# XOAUTH2) are planned for v0.4.0. Until then, prefer one of:
 #   microsoft-365-connector.yaml          relay connector, no password
 #   azure-communication-services.yaml     Entra app client secret
 #   microsoft-365-hve.yaml                High Volume Email, internal recipients

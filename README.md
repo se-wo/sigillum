@@ -17,8 +17,9 @@ before forwarding through a `MailBackend` (SMTP) relay.
   address allowlists and domain denylists, size and recipient limits,
   sliding-window rate limits (in-memory or Redis for multi-replica
   deployments)
-- **Drivers:** SMTP (STARTTLS, PLAIN/LOGIN/CRAM-MD5). Microsoft
-  Graph / SendGrid / Gmail are reserved enum values, not implemented.
+- **Drivers:** SMTP (STARTTLS, PLAIN/LOGIN/CRAM-MD5). Microsoft Graph and
+  the Gmail API are planned for v0.4.0; SendGrid is a reserved enum value,
+  not implemented.
 - **Observability:** structured slog (JSON), separate audit stream,
   Prometheus metrics with optional `ServiceMonitor`, OpenTelemetry tracing
 
@@ -306,10 +307,13 @@ test/e2e/                      # kind + Mailpit end-to-end suite
 
 ## Not yet implemented
 
-Next up: install without cert-manager, preflight and a `kubectl` plugin
-(including `credential create` / `rotate`), SMTPS on port 465, an OpenAPI
-description, dashboards and alerts (v0.4.0); OAuth (XOAUTH2) upstream
-auth for Microsoft 365 and Google Workspace (v0.5.0). Sigillum stays below 1.0
+Next up: Microsoft 365 and Gmail without passwords (v0.4.0, before
+Microsoft switches off SMTP AUTH with passwords and app passwords at the
+end of December 2026): a Microsoft Graph driver, a Gmail API driver,
+OAuth (XOAUTH2) for the SMTP driver and a daily limit. Then install without
+cert-manager, preflight and a `kubectl` plugin (including
+`credential create` / `rotate`), SMTPS on port 465, an OpenAPI
+description, dashboards and alerts (v0.5.0). Sigillum stays below 1.0
 until it has production users. See the roadmap and feature decisions in
 [`docs/SPEC.md`](docs/SPEC.md#8-roadmap).
 
