@@ -42,14 +42,20 @@ func stripBcc(raw []byte) []byte {
 
 // headerEnd returns the offset of the blank line that ends the header
 // section (the blank line itself belongs to the body side), or -1.
+//
+// Like net/textproto, it takes the first line that is empty after removing
+// its CRLF or LF ending, so it also finds a blank first line (an empty header,
+// as left behind when every field was a Bcc) and CRLF and LF lines mixed.
 func headerEnd(raw []byte) int {
-	crlf := bytes.Index(raw, []byte("\r\n\r\n"))
-	lf := bytes.Index(raw, []byte("\n\n"))
-	switch {
-	case crlf >= 0 && (lf < 0 || crlf+1 <= lf):
-		return crlf + 2
-	case lf >= 0:
-		return lf + 1
+	for i := 0; i < len(raw); {
+		j := bytes.IndexByte(raw[i:], '\n')
+		if j < 0 {
+			break
+		}
+		if line := raw[i : i+j]; len(line) == 0 || (len(line) == 1 && line[0] == '\r') {
+			return i
+		}
+		i += j + 1
 	}
 	return -1
 }
