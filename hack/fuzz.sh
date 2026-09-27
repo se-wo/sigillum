@@ -35,8 +35,9 @@ run)
     if ! go test -run '^$' -fuzz "^${name}\$" -fuzztime "$fuzztime" "./$dir" 2>&1 | tee "$log"; then
       # The Go fuzzer can report its own -fuzztime deadline as a failure: it
       # sees the timeout context done before the child context it compares
-      # against is canceled (internal/fuzz, still in Go 1.26). That failure
-      # is the bare message with no failing input; anything else is real.
+      # against is canceled (go.dev/issue/75804, fixed in Go 1.27; drop this
+      # once go.mod requires it). That failure is the bare message with no
+      # failing input; anything else is real.
       if grep -qx '    context deadline exceeded' "$log" && ! grep -q 'Failing input written to' "$log"; then
         echo "::warning::$dir $name: Go fuzzer reported its own -fuzztime deadline as a failure; no failing input, ignored"
       else
