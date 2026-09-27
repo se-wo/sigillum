@@ -242,6 +242,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 
 - `allowedSenders: []` denies every sender, as in US-2.3. The webhook warns on it.
 - The platform owner of a `ClusterMailBackend` can pin its sender domains without an admission policy; the `sigillum.dev/sender-domain` recipe (US-5.7) stays for per-namespace domains.
+- Additive: a new optional field. The policy's `senderRestrictions.allowedSenders` keeps its name and semantics, and existing `smtp` backends are unaffected.
 
 ---
 
@@ -1366,6 +1367,14 @@ Goal: keep sending through Microsoft 365 once password logins, app passwords inc
 | Gmail API driver (`type: gmail`, `gmail.send`, service account and delegated, `RawSender`) | Feature | US-6.2 stage 1 |
 | `authType: XOAUTH2`, Google token sources | Feature | US-6.2 stage 2 |
 | Provider recipes: Graph app-only with RBAC for Applications, Outlook.com and Gmail with your own OAuth client, Gmail API with domain-wide delegation; migration notes from SMTP AUTH and app passwords | Recipe | US-6.1 to US-6.3 |
+
+**No breaking change.** Every v0.4.0 item is additive, so existing resources, clients and dashboards keep working unchanged after the upgrade:
+- CRDs only gain optional fields (`spec.allowedSenders`, the `microsoftGraph` and `gmail` blocks, `rateLimits.messagesPerDay`, `status.oauth`) and the enum value `XOAUTH2`. `microsoftGraph` and `gmail` are already in the `spec.type` enum. Fields that are required apply only to the new backend types, never to existing `smtp` backends.
+- An `smtp` backend without `allowedSenders` behaves exactly as before (US-2.8). The policy's `senderRestrictions` is unchanged.
+- REST and SMTP keep their status codes and problem types; a backend sender violation reuses `403 sender-not-allowed` and the reason `sender_not_allowed`. Metrics and audit fields are only added.
+- Large Graph messages and every new permission (`Mail.ReadWrite`, token Secret writes) are opt-in or apply only to new backend types.
+- The credential Secret guard only gains a second allowed Secret shape. While the Helm upgrade rolls out, a controller of the previous version sees the changed guard and pauses credential Secret writes (`GuardMissing`) until it is replaced; issued passwords keep working throughout.
+- As usual, apply the new CRDs before upgrading (US-5.1).
 
 ### 8.4 v0.5.0 — Easy to run, easy to debug
 
