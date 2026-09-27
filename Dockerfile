@@ -6,7 +6,7 @@
 # Base images are pinned by digest (the tag is kept for readability);
 # Dependabot bumps both. The golang image sets GOTOOLCHAIN=local, so released
 # binaries are built with this image's Go, not the go.mod toolchain line.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
