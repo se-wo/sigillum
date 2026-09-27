@@ -28,10 +28,20 @@ run)
   fuzztime=${2:?usage: $0 run <fuzztime> [dir...]}
   shift 2
   failed=()
+  log=$(mktemp)
+  trap 'rm -f "$log"' EXIT
   while read -r dir name; do
     echo "::group::$dir $name ($fuzztime)"
-    if ! go test -run '^$' -fuzz "^${name}\$" -fuzztime "$fuzztime" "./$dir"; then
-      failed+=("$dir $name")
+    if ! go test -run '^$' -fuzz "^${name}\$" -fuzztime "$fuzztime" "./$dir" 2>&1 | tee "$log"; then
+      # The Go fuzzer can report its own -fuzztime deadline as a failure: it
+      # sees the timeout context done before the child context it compares
+      # against is canceled (internal/fuzz, still in Go 1.26). That failure
+      # is the bare message with no failing input; anything else is real.
+      if grep -qx '    context deadline exceeded' "$log" && ! grep -q 'Failing input written to' "$log"; then
+        echo "::warning::$dir $name: Go fuzzer reported its own -fuzztime deadline as a failure; no failing input, ignored"
+      else
+        failed+=("$dir $name")
+      fi
     fi
     echo "::endgroup::"
   done < <(list "$@")
