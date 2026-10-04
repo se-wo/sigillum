@@ -1039,6 +1039,16 @@ type RawSender interface {
 // Subscribe(ctx, *SubscribeRequest) (<-chan *Event, error)
 ```
 
+**OAuth token sources [v0.4.0, internal].** Drivers whose upstream takes no password (US-6.1 to US-6.3) get their access tokens from `internal/oauth`. A `Source` fetches a new token; the first one is the client credentials grant (`ClientCredentials`, client ID and secret in the request body), and later rows add the Google service-account assertion and refresh tokens. A `Cache` in front of it is what a driver calls on every send:
+
+- Concurrent callers share one fetch, and a caller's cancellation does not end the fetch the others wait for.
+- A token is replaced 5 minutes before expiry (at half its lifetime if it lives less than 10 minutes). Meanwhile callers get the current token without waiting; if the refresh fails, the current token is used until 30 s before its expiry.
+- A failed fetch is answered from memory for 10 s, or the endpoint's `Retry-After` if longer, so a wrong secret does not hit the token endpoint on every send.
+- `Invalidate` drops a token the upstream rejected with `401`, but only if it is still the cached one.
+- Failures are classified for the drivers' error mapping: `429`, `408`, `5xx`, `temporarily_unavailable` and transport errors are transient; any other answer (`invalid_client`, `invalid_scope`, `404`, a redirect) is permanent, which makes the backend `Ready=False` through its health check.
+- The token endpoint must be `https`, redirects are never followed (the secret goes only to the configured endpoint), and a Microsoft tenant must be a tenant ID or domain before it becomes part of the URL. The answer is limited to 1 MiB, the access token must be an RFC 6750 `b64token` (it ends up in `Authorization` headers and SASL `XOAUTH2` strings), `expires_in` is capped at 24 hours (5 minutes if missing), and the provider's error text is reduced to printable ASCII. `Token` values print without the token.
+- `internal/oauth/oauthtest` is a fake token endpoint for the tests of the drivers that use it.
+
 Drivers register a factory per type in a process-wide registry. The webhook rejects backend types without a registered factory. The SMTP driver supports STARTTLS and implicit TLS, `PLAIN` / `LOGIN` / `CRAM-MD5`, and MIME multipart assembly.
 
 **Capability matrix** (target picture; only the `smtp` row is implemented, and `send` for `microsoftGraph` and `gmail` is planned for v0.4.0):
@@ -1376,7 +1386,7 @@ The release is built as a sequence of small pull requests (§8.0, `CONTRIBUTING.
 |---|---|---|---|---|
 | 1 | Daily limit `rateLimits.messagesPerDay` | — | Daily cap per policy | US-2.7 |
 | 2 | `spec.allowedSenders` on backends, for `smtp` | — | Pin a relay to its domains | US-2.8 |
-| 3 | OAuth token sources (`internal/oauth`): client credentials and cache, against a fake token endpoint; no user-visible change | — | — | US-6.1 |
+| 3 | OAuth token sources (`internal/oauth`): client credentials and cache, against a fake token endpoint; no user-visible change (done, §4.5) | — | — | US-6.1 |
 | 4 | Graph driver, app-only, messages up to 4 MB, recipients from the envelope; webhook accepts `microsoftGraph`; recipe | 2, 3 | Microsoft 365 work accounts | US-6.1 stage 1 |
 | 5 | Token Secret and broker in the controller, guard extension, `sigillum_backend_authorized`; no provider yet | 3 | — | US-6.3 |
 | 6 | `authType: XOAUTH2` on the SMTP driver with device code sign-in (`smtp-mail.outlook.com`); recipe `outlook-com.yaml` | 2, 5 | **Outlook.com** | US-6.1 stage 2, US-6.3 |
