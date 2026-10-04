@@ -142,10 +142,24 @@ func (v *MailBackendValidator[T]) validate(obj runtime.Object) (admission.Warnin
 		}
 	}
 
-	if len(allErrs) == 0 {
-		return nil, nil
+	// A backend's sender list bounds every policy that uses it, so its
+	// entries follow the stricter rules of allowedRecipients: a glob must
+	// be anchored on a bare domain.
+	var warnings admission.Warnings
+	for i, e := range spec.AllowedSenders {
+		if msg := addressEntryError(e); msg != "" {
+			allErrs = append(allErrs, field.Invalid(specPath.Child("allowedSenders").Index(i), e, msg))
+		}
 	}
-	return nil, apierrors.NewInvalid(gk, name, allErrs)
+	if spec.AllowedSenders != nil && len(spec.AllowedSenders) == 0 {
+		warnings = append(warnings, "spec.allowedSenders is empty: this backend denies every sender. "+
+			"Omit the field to leave senders to the policies.")
+	}
+
+	if len(allErrs) == 0 {
+		return warnings, nil
+	}
+	return warnings, apierrors.NewInvalid(gk, name, allErrs)
 }
 
 func asStringSlice(types []driver.Type) []string {

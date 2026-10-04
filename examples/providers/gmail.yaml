@@ -8,8 +8,9 @@
 # planned for v0.4.0 (SPEC US-6.2, US-6.3).
 #
 # Gmail rewrites a From that is neither the account nor one of its verified
-# send-as aliases, so list only those in the policy's allowedSenders. A
-# personal account may send to about 500 recipients per day.
+# send-as aliases, so the backend's allowedSenders lists only those; every
+# policy that uses the backend is bound by it. A personal account may send
+# to about 500 recipients per day.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -36,5 +37,6 @@ spec:
       name: gmail-smtp
       namespace: sigillum-system
     connectionTimeoutSeconds: 10
+  allowedSenders: ["you@gmail.com"]   # the account and its verified send-as aliases
   healthCheck:
     intervalSeconds: 300

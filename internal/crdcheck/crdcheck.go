@@ -45,6 +45,9 @@ var Required = []Field{
 	{Kind: "MailPolicy", Path: []string{"spec", "recipientRestrictions", "allowedRecipients"}},
 	// 0.3.0: new kind; the controller and SMTP proxy watch it.
 	{Kind: "MailCredential", Path: []string{"spec", "serviceAccountName"}},
+	// 0.4.0: without it a backend's sender bound is pruned to "no bound".
+	{Kind: "MailBackend", Path: []string{"spec", "allowedSenders"}},
+	{Kind: "ClusterMailBackend", Path: []string{"spec", "allowedSenders"}},
 }
 
 // UpgradeHint tells the operator how to fix an outdated schema.

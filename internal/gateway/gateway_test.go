@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -364,5 +365,63 @@ func TestSend_CredentialIdentityIsAudited(t *testing.T) {
 	ev := rec.last(t)
 	if ev.AuthMethod != AuthSMTPCredential || ev.Credential != "grafana.team" || !ev.CredentialPrevious {
 		t.Fatalf("credential identity missing from audit record: %+v", ev)
+	}
+}
+
+func TestSend_BackendAllowedSenders(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		backend  []string
+		policy   *sigv1.SenderRestrictions
+		from     string
+		envelope string
+		sender   string
+		denied   string // the address named in the detail; "" = accepted
+	}{
+		{name: "omitted: policy decides", backend: nil, from: "other@team.example"},
+		{name: "listed", backend: []string{"app@team.example"}, from: "APP@team.example"},
+		{name: "glob", backend: []string{"*@team.example"}, from: "x@team.example"},
+		{name: "narrower than the policy", backend: []string{"app@team.example"}, from: "other@team.example", denied: "other@team.example"},
+		{name: "policy without sender restriction", backend: []string{"app@team.example"}, from: "boss@evil.test", denied: "boss@evil.test"},
+		{name: "envelope sender", backend: []string{"app@team.example"}, from: "app@team.example", envelope: "x@team.example", denied: "x@team.example"},
+		{name: "sender header", backend: []string{"app@team.example"}, from: "app@team.example", sender: "x@team.example", denied: "x@team.example"},
+		{name: "empty denies every sender", backend: []string{}, from: "app@team.example", denied: "app@team.example"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := readyBackend("relay", true)
+			b.Spec.AllowedSenders = tc.backend
+			p := testPolicy()
+			p.Spec.SenderRestrictions = nil
+			if tc.name != "policy without sender restriction" {
+				p.Spec.SenderRestrictions = &sigv1.SenderRestrictions{AllowedSenders: []string{"*@team.example"}}
+			}
+			d := &fakeDriver{}
+			g, rec := newGateway(t, d, p, b)
+			lim := &countingLimiter{}
+			g.Limiter = lim
+			req := request(tc.from)
+			req.EnvelopeFrom, req.Sender = tc.envelope, tc.sender
+
+			res := g.Send(context.Background(), req)
+			ev := rec.last(t)
+			if tc.denied == "" {
+				if res.Status != StatusAccepted || len(d.sent) != 1 {
+					t.Fatalf("want accepted, got %+v", res)
+				}
+				return
+			}
+			if res.Status != StatusDenied || res.DenyReason != policy.DenySenderNotAllowed || res.Backend != "/relay" {
+				t.Fatalf("want sender_not_allowed by backend /relay, got %+v", res)
+			}
+			if !strings.Contains(res.Detail, "'"+tc.denied+"'") || !strings.Contains(res.Detail, "backend") {
+				t.Fatalf("detail must name %q and the backend: %q", tc.denied, res.Detail)
+			}
+			if ev.Reason != "sender_not_allowed" || ev.Backend != "/relay" {
+				t.Fatalf("audit: reason %q backend %q", ev.Reason, ev.Backend)
+			}
+			if len(d.sent) != 0 || lim.hits != 0 {
+				t.Fatalf("a denied message must neither be sent (%d) nor charged (%d)", len(d.sent), lim.hits)
+			}
+		})
 	}
 }

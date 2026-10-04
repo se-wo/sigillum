@@ -170,18 +170,9 @@ func Evaluate(p *sigv1.MailPolicy, msg MessageView) Decision {
 		}
 	}
 	if p.Spec.SenderRestrictions != nil {
-		senders := []string{msg.From}
-		if msg.EnvelopeFrom != "" {
-			senders = append(senders, msg.EnvelopeFrom)
-		}
-		if msg.Sender != "" {
-			senders = append(senders, msg.Sender)
-		}
-		for _, from := range senders {
-			if !senderAllowed(from, p.Spec.SenderRestrictions.AllowedSenders) {
-				return Decision{Policy: p, DenyReason: DenySenderNotAllowed,
-					DenyDetail: "sender '" + from + "' not in allowedSenders"}
-			}
+		if from, ok := SendersAllowed(msg, p.Spec.SenderRestrictions.AllowedSenders); !ok {
+			return Decision{Policy: p, DenyReason: DenySenderNotAllowed,
+				DenyDetail: "sender '" + from + "' not in allowedSenders"}
 		}
 	}
 	// Transports reject routing local parts at parse time already; checking
@@ -199,6 +190,26 @@ func Evaluate(p *sigv1.MailPolicy, msg MessageView) Decision {
 		}
 	}
 	return Decision{Allowed: true, Policy: p}
+}
+
+// SendersAllowed checks every sender address of msg (From, the envelope
+// sender and Sender) against an allowedSenders list, of a policy or of a
+// backend. It returns the first address that matches no entry. An empty
+// list denies every sender.
+func SendersAllowed(msg MessageView, allowed []string) (string, bool) {
+	senders := []string{msg.From}
+	if msg.EnvelopeFrom != "" {
+		senders = append(senders, msg.EnvelopeFrom)
+	}
+	if msg.Sender != "" {
+		senders = append(senders, msg.Sender)
+	}
+	for _, from := range senders {
+		if !senderAllowed(from, allowed) {
+			return from, false
+		}
+	}
+	return "", true
 }
 
 // senderAllowed handles exact-match and `*@suffix` glob patterns. An empty

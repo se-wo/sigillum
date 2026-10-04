@@ -58,18 +58,31 @@ const doc = `{"components":{"schemas":{
   "properties":{"spec":{"properties":{"recipientRestrictions":{"properties":{%s}}}}}},
  "dev.sigillum.v1alpha1.MailCredential":{
   "x-kubernetes-group-version-kind":[{"group":"sigillum.dev","version":"v1alpha1","kind":"MailCredential"}],
-  "properties":{"spec":{"properties":{"serviceAccountName":{}}}}}}}}`
+  "properties":{"spec":{"properties":{"serviceAccountName":{}}}}},
+ "dev.sigillum.v1alpha1.MailBackend":{
+  "x-kubernetes-group-version-kind":[{"group":"sigillum.dev","version":"v1alpha1","kind":"MailBackend"}],
+  "properties":{"spec":{"properties":{"type":{},%b}}}},
+ "dev.sigillum.v1alpha1.ClusterMailBackend":{
+  "x-kubernetes-group-version-kind":[{"group":"sigillum.dev","version":"v1alpha1","kind":"ClusterMailBackend"}],
+  "properties":{"spec":{"properties":{"type":{},"allowedSenders":{}}}}}}}}`
 
 func TestVerifyDoc(t *testing.T) {
-	current := strings.Replace(doc, "%s", `"allowedDomains":{},"allowedRecipients":{}`, 1)
+	withBackend := strings.Replace(doc, "%b", `"allowedSenders":{}`, 1)
+	current := strings.Replace(withBackend, "%s", `"allowedDomains":{},"allowedRecipients":{}`, 1)
 	if err := verifyDoc([]byte(current), Required); err != nil {
 		t.Fatalf("current schema: %v", err)
 	}
 
-	stale := strings.Replace(doc, "%s", `"allowedDomains":{}`, 1)
+	stale := strings.Replace(withBackend, "%s", `"allowedDomains":{}`, 1)
 	err := verifyDoc([]byte(stale), Required)
 	if err == nil || !strings.Contains(err.Error(), "MailPolicy CRD has no field spec.recipientRestrictions.allowedRecipients") {
 		t.Fatalf("stale MailPolicy: got %v", err)
+	}
+
+	v030 := strings.Replace(strings.Replace(doc, "%b", `"healthCheck":{}`, 1), "%s", `"allowedRecipients":{}`, 1)
+	err = verifyDoc([]byte(v030), Required)
+	if err == nil || !strings.Contains(err.Error(), "the MailBackend CRD has no field spec.allowedSenders") {
+		t.Fatalf("0.3.0 MailBackend: got %v", err)
 	}
 
 	noKind := strings.Replace(current, `"kind":"MailCredential"`, `"kind":"Other"`, 1)

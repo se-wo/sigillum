@@ -139,6 +139,20 @@ func validateRecipients(p *field.Path, entries []string) field.ErrorList {
 }
 
 func recipientEntryError(e string) string {
+	msg := addressEntryError(e)
+	if msg == errWildcardDomain {
+		msg += "; list whole domains in allowedDomains"
+	}
+	return msg
+}
+
+const errWildcardDomain = "the domain of a pattern must not contain wildcards"
+
+// addressEntryError validates an allowlist entry that bounds addresses
+// (allowedRecipients, a backend's allowedSenders): a plain address, or a
+// glob of the form <local-part pattern>@<bare domain>. It returns "" for a
+// valid entry.
+func addressEntryError(e string) string {
 	if !strings.ContainsAny(e, "*?[") {
 		if err := policy.ValidatePlainAddress(e); err != nil {
 			return err.Error() + " (must be a plain address such as alerts@example.com)"
@@ -150,7 +164,7 @@ func recipientEntryError(e string) string {
 	case !ok || strings.Contains(domain, "@"):
 		return "a pattern must have the form <local-part pattern>@<domain>, e.g. *@oncall.example.com"
 	case strings.ContainsAny(domain, "*?["):
-		return "the domain of a pattern must not contain wildcards; list whole domains in allowedDomains"
+		return errWildcardDomain
 	case len(validation.IsDNS1123Subdomain(strings.ToLower(domain))) > 0:
 		return "the domain of a pattern must be a bare domain"
 	case local == "":

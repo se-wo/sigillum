@@ -10,6 +10,29 @@ The section of a version becomes the notes of its GitHub Release
 (`hack/release-notes.sh`, run by the release workflow). Add entries under
 the version being prepared in the same pull request as the change.
 
+## [0.4.0] - unreleased
+
+### Upgrading
+
+- Apply the CRDs before upgrading:
+  `kubectl apply --server-side -f charts/sigillum/crds/`. The 0.4.0 pods
+  refuse to start on 0.3 CRDs, which would drop a backend's
+  `allowedSenders` without an error and leave it unbounded.
+
+### Added
+
+- `MailBackend.spec.allowedSenders` and
+  `ClusterMailBackend.spec.allowedSenders`: the senders a backend sends
+  for, checked on every send in addition to the policy's
+  `senderRestrictions` (`From`, envelope sender, `Sender`). A policy can
+  narrow the list but never widen it, so a personal account is used only
+  with its own address and a relay only for its domains (US-2.8).
+  Violations answer `403 sender-not-allowed` (reason
+  `sender_not_allowed`); the log names the backend. Entries must be plain
+  addresses or globs anchored on a domain; an empty list denies every
+  sender and draws a warning. The Gmail and Microsoft 365 recipes pin
+  their backend to the mailbox.
+
 ## [0.3.1] - unreleased
 
 ### Fixed

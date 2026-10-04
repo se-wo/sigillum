@@ -131,6 +131,20 @@ type BackendSpec struct {
 	// HealthCheck controls periodic probing.
 	// +optional
 	HealthCheck *HealthCheckSpec `json:"healthCheck,omitempty"`
+
+	// No omitempty on AllowedSenders: an empty list must survive a round
+	// trip through Go, since it denies every sender while an omitted list
+	// allows all. A nil list encodes as null, which the API server prunes.
+
+	// AllowedSenders lists the sender addresses this backend sends for:
+	// exact addresses or glob patterns anchored on a bare domain
+	// ("me@outlook.com", "*@example.com"), matched case-insensitively like
+	// a policy's allowedSenders. Checked on every send in addition to the
+	// policy's senderRestrictions, against From, the envelope sender and
+	// Sender, so a policy can narrow the list but never widen it. Omitted:
+	// no restriction by the backend. An empty list denies every sender.
+	// +optional
+	AllowedSenders []string `json:"allowedSenders"`
 }
 
 // BackendStatus is the shared status of MailBackend and ClusterMailBackend.

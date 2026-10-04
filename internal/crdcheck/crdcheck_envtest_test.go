@@ -19,8 +19,8 @@ import (
 )
 
 // TestWaitAgainstAPIServer runs the check against the schemas a real API
-// server publishes: first with a 0.2 MailPolicy CRD and no MailCredential
-// CRD, then after the CRDs of this release are applied.
+// server publishes: first with a 0.2 MailPolicy CRD, 0.3 backend CRDs and
+// no MailCredential CRD, then after the CRDs of this release are applied.
 func TestWaitAgainstAPIServer(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("KUBEBUILDER_ASSETS not set")
@@ -30,8 +30,14 @@ func TestWaitAgainstAPIServer(t *testing.T) {
 	rr := stale.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties["recipientRestrictions"]
 	delete(rr.Properties, "allowedRecipients")
 	stale.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties["recipientRestrictions"] = rr
+	staleCRDs := []*apiextensionsv1.CustomResourceDefinition{stale}
+	for _, kind := range []string{"MailBackend", "ClusterMailBackend"} {
+		b := crds[kind].DeepCopy()
+		delete(b.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties, "allowedSenders")
+		staleCRDs = append(staleCRDs, b)
+	}
 
-	env := &envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{stale}}
+	env := &envtest.Environment{CRDs: staleCRDs}
 	cfg, err := env.Start()
 	if err != nil {
 		t.Fatal(err)
@@ -43,6 +49,8 @@ func TestWaitAgainstAPIServer(t *testing.T) {
 	for _, want := range []string{
 		"the MailPolicy CRD has no field spec.recipientRestrictions.allowedRecipients",
 		"kind MailCredential is not installed",
+		"the MailBackend CRD has no field spec.allowedSenders",
+		"the ClusterMailBackend CRD has no field spec.allowedSenders",
 		"kubectl apply --server-side -f charts/sigillum/crds/",
 	} {
 		if err == nil || !strings.Contains(err.Error(), want) {
@@ -58,13 +66,16 @@ func TestWaitAgainstAPIServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cur := &apiextensionsv1.CustomResourceDefinition{}
-	if err := c.Get(ctx, client.ObjectKey{Name: stale.Name}, cur); err != nil {
-		t.Fatal(err)
-	}
-	crds["MailPolicy"].ResourceVersion = cur.ResourceVersion
-	if err := c.Update(ctx, crds["MailPolicy"]); err != nil {
-		t.Fatal(err)
+	for _, old := range staleCRDs {
+		cur := &apiextensionsv1.CustomResourceDefinition{}
+		if err := c.Get(ctx, client.ObjectKey{Name: old.Name}, cur); err != nil {
+			t.Fatal(err)
+		}
+		updated := crds[old.Spec.Names.Kind]
+		updated.ResourceVersion = cur.ResourceVersion
+		if err := c.Update(ctx, updated); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := c.Create(ctx, crds["MailCredential"]); err != nil {
 		t.Fatal(err)

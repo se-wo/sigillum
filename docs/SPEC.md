@@ -13,7 +13,7 @@
 
 **Status markers.** Every user story and major section is tagged:
 
-- **[v0.1.0]**, **[v0.2.0]**, **[v0.2.1]**, **[v0.3.0]**: implemented in that release.
+- **[v0.1.0]**, **[v0.2.0]**, **[v0.2.1]**, **[v0.3.0]**: implemented in that release. **[v0.4.0]**: implemented on `main` for the upcoming release.
 - **[planned vX]**: scheduled on the roadmap (§8).
 - **[backlog]**: candidate feature, not scheduled. Picked up when users ask for it (§8.8).
 - **[future]**: architecturally anticipated for after 1.0, not scheduled.
@@ -225,12 +225,14 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - Motivation: hosted mailboxes enforce daily quotas (for example Microsoft 365 and Google Workspace cap recipients per day and mailbox); exceeding them blocks the sending account for everyone, not just the runaway workload.
 - A namespace-wide quota across policies (`MailQuota`, §4.3.3) stays in the backlog until users ask for it.
 
-#### US-2.8 — Sender allowlist on the backend **[planned v0.4.0]**
+#### US-2.8 — Sender allowlist on the backend **[v0.4.0 for `smtp`; API backends planned v0.4.0]**
 **As a** platform engineer or an individual **I want** a backend to state which sender addresses it sends for, **so that** a backend that can send as many mailboxes never sends as one it was not meant for, and a personal account is used only with its own address.
 
 *Acceptance criteria:*
-- `MailBackend.spec.allowedSenders` and `ClusterMailBackend.spec.allowedSenders`: exact addresses and glob patterns with the syntax and matching rules of US-2.3 (for example `*@example.com`, or a single `me@outlook.com`).
-- Checked on every send in addition to the policy's `senderRestrictions`, against the same addresses (`From`, envelope sender, `Sender`). Both must match, so a policy can narrow the backend's list but never widen it. On violation: `403 sender-not-allowed`, audit and metric reason `sender_not_allowed`; the log line names the backend as the restriction that failed.
+- `MailBackend.spec.allowedSenders` and `ClusterMailBackend.spec.allowedSenders`: exact addresses and glob patterns with the matching rules of US-2.3 (for example `*@example.com`, or a single `me@outlook.com`). Since the list bounds every policy that uses the backend, the webhook validates entries like `allowedRecipients` (US-2.4): plain addresses, and globs anchored on a bare domain; `*`, `*example.com` and wildcard domains are rejected.
+- Checked on every send in addition to the policy's `senderRestrictions`, against the same addresses (`From`, envelope sender, `Sender`). Both must match, so a policy can narrow the backend's list but never widen it. On violation: `403 sender-not-allowed` (SMTP: the same reply as a policy's sender rejection), audit and metric reason `sender_not_allowed` with the backend in the audit record; the log line names the backend as the restriction that failed (`restriction=backend`). The answer to the caller says that the backend refused the sender, without naming it.
+- The check runs once the backend is resolved and before the rate limit, so a refused message is not charged. An unready backend answers `backend_not_ready` first.
+- An empty list and an omitted one differ (deny all, allow all), so the field has no `omitempty`: an empty list survives every round trip through the Go types, and a missing one is never stored as `null`. The startup CRD check (US-5.1) requires the field, so a 0.3 CRD cannot drop a backend's list silently.
 - The mailbox an API backend sends as is the `From` address: Graph app-only posts to `/users/{From}/sendMail`, a Gmail service account impersonates `From`. The backend's list therefore bounds which mailboxes Sigillum can use.
 - Defaults per backend kind (the webhook enforces them):
 
@@ -420,7 +422,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - Official Helm chart with sensible defaults; every setting available via `values.yaml`.
 - CRDs ship in the chart's `crds/` directory; the generated manifests also live in `config/crd/bases/` for separate installation.
 - **CRD upgrades:** Helm installs `crds/` on first install only and never upgrades or deletes them. Upgrades apply `config/crd/bases/` (or the chart's `crds/`) explicitly, for example with `kubectl apply --server-side` or an Argo CD application. The CRD-migration runbook (§5.7) documents this.
-- **CRD version check [v0.3.0]:** an outdated CRD makes the API server prune fields it does not know, which only warns a server-side apply. A MailPolicy restricted by `allowedRecipients` alone would then allow every recipient that is not blocked. Every component therefore reads the published OpenAPI v3 schemas at startup (readable by every authenticated client, no RBAC) and exits with an error naming the missing kinds and fields if a field the version relies on is absent. It retries for 30 s because the API server publishes a changed CRD a few seconds late. A failed rollout leaves the old pods serving. `--skip-crd-check` turns the check off for clusters that hide the OpenAPI endpoint.
+- **CRD version check [v0.3.0]:** an outdated CRD makes the API server prune fields it does not know, which only warns a server-side apply. A MailPolicy restricted by `allowedRecipients` alone would then allow every recipient that is not blocked, and a backend's `allowedSenders` **[v0.4.0]** would no longer bound its senders. Every component therefore reads the published OpenAPI v3 schemas at startup (readable by every authenticated client, no RBAC) and exits with an error naming the missing kinds and fields if a field the version relies on is absent. It retries for 30 s because the API server publishes a changed CRD a few seconds late. A failed rollout leaves the old pods serving. `--skip-crd-check` turns the check off for clusters that hide the OpenAPI endpoint.
 - No runtime configuration outside Kubernetes resources (no init scripts).
 - The admission webhook needs a serving certificate: either cert-manager (`webhook.certificate.useCertManager=true`) or an existing secret.
 
@@ -719,7 +721,7 @@ spec:
       namespace: sigillum-system
     connectionTimeoutSeconds: 10 # 1–120, default 10
     heloDomain: sigillum         # optional, default "sigillum"
-  allowedSenders:                # [planned v0.4.0] optional for smtp; the backend sends only for these (US-2.8)
+  allowedSenders:                # [v0.4.0] optional for smtp; the backend sends only for these (US-2.8)
     - "*@example.com"
   healthCheck:
     enabled: true                # default true; false = assume Ready without probing
@@ -1189,7 +1191,7 @@ policy.evaluate ── list MailPolicies in caller namespace, match subjects,
         │          pick priority / name winner, check size, recipients count,
         │          senders, recipients, Reply-To ── 403 / 413
         ▼
-backend resolve ── backendRef → Ready backend → credentials Secret ── 503
+backend resolve ── backendRef → Ready backend → backend allowedSenders → credentials Secret ── 503 / 403
         │
         ▼
 ratelimit.allow ── sliding window per policy (memory or Redis) ── 429 / 503
@@ -1375,7 +1377,7 @@ The release is built as a sequence of small pull requests (§8.0, `CONTRIBUTING.
 | # | Pull request | Depends on | Usable afterwards | Ref |
 |---|---|---|---|---|
 | 1 | Daily limit `rateLimits.messagesPerDay` | — | Daily cap per policy | US-2.7 |
-| 2 | `spec.allowedSenders` on backends, for `smtp` | — | Pin a relay to its domains | US-2.8 |
+| 2 | `spec.allowedSenders` on backends, for `smtp` (done) | — | Pin a relay to its domains | US-2.8 |
 | 3 | OAuth token sources (`internal/oauth`): client credentials and cache, against a fake token endpoint; no user-visible change | — | — | US-6.1 |
 | 4 | Graph driver, app-only, messages up to 4 MB, recipients from the envelope; webhook accepts `microsoftGraph`; recipe | 2, 3 | Microsoft 365 work accounts | US-6.1 stage 1 |
 | 5 | Token Secret and broker in the controller, guard extension, `sigillum_backend_authorized`; no provider yet | 3 | — | US-6.3 |
