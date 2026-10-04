@@ -51,6 +51,34 @@ make fuzz               # every fuzz target for 30s (FUZZTIME=5m, FUZZ_PKGS=inte
 - Record user-facing changes in [`CHANGELOG.md`](CHANGELOG.md) under the
   version being prepared (its heading says `unreleased` until the release).
 
+### Size of a pull request
+
+A pull request should be reviewable in one sitting, by a person and by an
+automated review. Large ones get skimmed, and their findings arrive after the
+merge.
+
+- **One concern per pull request.** A feature, a fix or a refactor, not
+  several. A refactor that a feature needs goes first, in its own pull
+  request, without behaviour changes.
+- **Aim for under 400 changed lines of hand-written, non-test code.** Tests,
+  generated files and recipes come on top. Above that, split it or explain in
+  the description why it cannot be split.
+- **Generated files in their own commit** (`make manifests generate`), so
+  the hand-written commits can be read alone. `.gitattributes` marks them as
+  generated, and GitHub collapses them in the diff.
+- **`main` stays releasable after every merge.** A new backend type,
+  `authType` or CRD field is accepted by the webhook only from the pull request
+  that makes it work. Unfinished code may be merged as long as nothing can
+  reach it.
+- **The roadmap lists the pull requests of a release** in order, with their
+  dependencies ([`docs/SPEC.md`](docs/SPEC.md#8-roadmap) §8). Open one per
+  row; when a row turns out too big, split it there first.
+- **Stacked pull requests** are fine when one row needs the previous one:
+  base the second on the first one's branch and retarget it to `main` after
+  the first is merged.
+- Review findings are fixed in the same pull request before it is merged,
+  not in a follow-up.
+
 ## Releases
 
 1. In a PR, bump `VERSION` in the `Makefile` and `version` / `appVersion`
