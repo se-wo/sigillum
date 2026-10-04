@@ -10,6 +10,27 @@ The section of a version becomes the notes of its GitHub Release
 (`hack/release-notes.sh`, run by the release workflow). Add entries under
 the version being prepared in the same pull request as the change.
 
+## [0.4.0] - unreleased
+
+### Upgrading
+
+- The credential Secret guard changes (it also admits the OAuth token
+  Secrets of delegated backends). Upgrade the chart and the controller
+  together with `helm upgrade`. While the old guard and a new
+  controller, or the new guard and an old controller, meet during the
+  rollout, that controller reports the guard as changed and writes no
+  generated credential Secrets (`SecretsManaged=False`) until the other
+  side is updated; it re-checks every 30 s.
+
+### Changed
+
+- Credential Secret guard: a second allowed shape for the OAuth token
+  Secrets of delegated backends (label `sigillum.dev/oauth-token`,
+  annotation `sigillum.dev/oauth-token-uid`, controlled by the
+  `MailBackend` or `ClusterMailBackend`, only the keys `refresh_token`,
+  `access_token` and `expires_at`), also in the release namespace. Nothing
+  writes such Secrets yet (US-6.3).
+
 ## [0.3.1] - unreleased
 
 ### Fixed
