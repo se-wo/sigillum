@@ -205,13 +205,18 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 		evalSpan.SetAttributes(attribute.String("sigillum.deny_reason", string(decision.DenyReason)))
 	}
 	evalSpan.End()
-	if !decision.Allowed {
-		ns, name := id.Namespace, nameOf(decision.Policy)
-		telemetry.PolicyDeniedTotal.WithLabelValues(ns, name, string(decision.DenyReason)).Inc()
-		logger.Info("request denied", "result", "denied", "reason", string(decision.DenyReason), "policy", name)
-		ev.Policy, ev.Decision, ev.Reason = name, audit.DecisionReject, string(decision.DenyReason)
+	// deny records a refusal by the policy or, with a backend, by the
+	// backend's allowedSenders. Result.Backend stays empty for a policy's
+	// refusal; the REST reply tells the two apart by it.
+	deny := func(policyName string, reason policy.DenyReason, detail, backend string, logAttrs ...any) Result {
+		telemetry.PolicyDeniedTotal.WithLabelValues(id.Namespace, policyName, string(reason)).Inc()
+		logger.Info("request denied", append([]any{"result", "denied", "reason", string(reason), "policy", policyName}, logAttrs...)...)
+		ev.Policy, ev.Backend, ev.Decision, ev.Reason = policyName, backend, audit.DecisionReject, string(reason)
 		g.Audit.Record(ev)
-		return Result{Status: StatusDenied, Policy: name, DenyReason: decision.DenyReason, Detail: decision.DenyDetail}
+		return Result{Status: StatusDenied, Policy: policyName, Backend: backend, DenyReason: reason, Detail: detail}
+	}
+	if !decision.Allowed {
+		return deny(nameOf(decision.Policy), decision.DenyReason, decision.DenyDetail, "")
 	}
 	p := decision.Policy
 	ev.Policy = p.Name
@@ -229,6 +234,7 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 	if err != nil {
 		return notReady(err)
 	}
+	ev.Backend = backendKey
 
 	// The backend bounds the senders of every policy that uses it (US-2.8);
 	// a policy can narrow that list but never widen it. nil: no bound.
@@ -236,15 +242,9 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 	// a permanent 403 even while the credentials Secret is broken.
 	if spec.AllowedSenders != nil {
 		if from, ok := policy.SendersAllowed(view, spec.AllowedSenders); !ok {
-			reason := string(policy.DenySenderNotAllowed)
-			telemetry.PolicyDeniedTotal.WithLabelValues(p.Namespace, p.Name, reason).Inc()
-			logger.Info("request denied", "result", "denied", "reason", reason, "policy", p.Name,
+			return deny(p.Name, policy.DenySenderNotAllowed,
+				"sender '"+from+"' not in the backend's allowedSenders", backendKey,
 				"backend", backendKey, "restriction", "backend")
-			ev.Backend, ev.Decision, ev.Reason = backendKey, audit.DecisionReject, reason
-			g.Audit.Record(ev)
-			return Result{Status: StatusDenied, Policy: p.Name, Backend: backendKey,
-				DenyReason: policy.DenySenderNotAllowed,
-				Detail:     "sender '" + from + "' not in the backend's allowedSenders"}
 		}
 	}
 
@@ -253,7 +253,6 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 		return notReady(err)
 	}
 	defer d.Close()
-	ev.Backend = backendKey
 
 	rlKey := p.Namespace + "/" + p.Name
 	charged := false
