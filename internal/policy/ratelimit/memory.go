@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 )
@@ -9,67 +10,68 @@ import (
 // MemoryLimiter is a simple sliding-window counter that keeps per-key
 // timestamps in memory. Suitable only for single-replica deployments.
 type MemoryLimiter struct {
-	mu      sync.Mutex
-	hits    map[string][]time.Time
-	now     func() time.Time
-	maxKeep time.Duration
+	mu   sync.Mutex
+	hits map[string][]time.Time
+	now  func() time.Time
 }
 
-// NewMemoryLimiter constructs a MemoryLimiter. Timestamps older than one hour
-// are dropped lazily on every Allow call.
+// NewMemoryLimiter constructs a MemoryLimiter. Timestamps older than the
+// longest capped window (one hour, or one day with a daily cap) are dropped
+// lazily on every Allow call.
 func NewMemoryLimiter() *MemoryLimiter {
 	return &MemoryLimiter{
-		hits:    map[string][]time.Time{},
-		now:     time.Now,
-		maxKeep: time.Hour,
+		hits: map[string][]time.Time{},
+		now:  time.Now,
 	}
 }
 
-// Allow implements Limiter.Allow with sliding-window semantics. perMinute /
-// perHour values of 0 mean "no cap on that window".
-func (l *MemoryLimiter) Allow(_ context.Context, key string, perMinute, perHour int32) (bool, time.Duration, error) {
-	if perMinute <= 0 && perHour <= 0 {
+// Allow implements Limiter.Allow with sliding-window semantics. Windows
+// with a limit of 0 are not capped.
+func (l *MemoryLimiter) Allow(_ context.Context, key string, limits Limits) (bool, time.Duration, error) {
+	if limits.None() {
 		return true, 0, nil
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	now := l.now()
-	cutoffHour := now.Add(-time.Hour)
-	cutoffMinute := now.Add(-time.Minute)
-
+	// hist is sorted oldest first, so every window is a suffix of it. A hit
+	// leaves a window the moment it is as old as the window, so a caller
+	// retrying exactly after Retry-After finds room.
+	since := func(hist []time.Time, cutoff time.Time) int {
+		return sort.Search(len(hist), func(i int) bool { return hist[i].After(cutoff) })
+	}
 	hist := l.hits[key]
-	// Drop anything older than 1h.
-	idx := 0
-	for idx < len(hist) && hist[idx].Before(cutoffHour) {
-		idx++
-	}
-	hist = hist[idx:]
+	hist = hist[since(hist, now.Add(-limits.keep())):]
 
-	// Count entries in last minute and last hour.
-	minuteCount, hourCount := int32(0), int32(len(hist))
-	for _, t := range hist {
-		if !t.Before(cutoffMinute) {
-			minuteCount++
+	full := false
+	var retry time.Duration
+	for _, w := range []struct {
+		limit int32
+		size  time.Duration
+	}{
+		{limits.PerMinute, time.Minute},
+		{limits.PerHour, time.Hour},
+		{limits.PerDay, 24 * time.Hour},
+	} {
+		if w.limit <= 0 {
+			continue
 		}
+		first := since(hist, now.Add(-w.size))
+		if int64(len(hist)-first) < int64(w.limit) {
+			continue
+		}
+		// The window has room again once enough of its hits have left it
+		// for the count to drop below the limit.
+		leave := hist[len(hist)-int(w.limit)].Add(w.size).Sub(now)
+		full, retry = true, max(retry, leave)
 	}
-
-	if perMinute > 0 && minuteCount >= perMinute {
-		// retry-after = oldest-in-minute + 1m - now
-		oldest := hist[len(hist)-int(minuteCount)]
-		retry := oldest.Add(time.Minute).Sub(now)
-		l.hits[key] = hist
-		return false, ceilToSecond(retry), nil
-	}
-	if perHour > 0 && hourCount >= perHour {
-		oldest := hist[0]
-		retry := oldest.Add(time.Hour).Sub(now)
+	if full {
 		l.hits[key] = hist
 		return false, ceilToSecond(retry), nil
 	}
 
-	hist = append(hist, now)
-	l.hits[key] = hist
+	l.hits[key] = append(hist, now)
 	return true, 0, nil
 }
 

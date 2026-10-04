@@ -13,7 +13,7 @@
 
 **Status markers.** Every user story and major section is tagged:
 
-- **[v0.1.0]**, **[v0.2.0]**, **[v0.2.1]**, **[v0.3.0]**: implemented in that release.
+- **[v0.1.0]**, **[v0.2.0]**, **[v0.2.1]**, **[v0.3.0]**: implemented in that release. **[v0.4.0]**: implemented on `main` for the upcoming release.
 - **[planned vX]**: scheduled on the roadmap (§8).
 - **[backlog]**: candidate feature, not scheduled. Picked up when users ask for it (§8.8).
 - **[future]**: architecturally anticipated for after 1.0, not scheduled.
@@ -163,11 +163,11 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 **As a** platform engineer **I want** to cap how much mail a workload can send, **so that** one broken workload cannot disrupt mail for everyone.
 
 *Acceptance criteria:*
-- Configured in `MailPolicy.spec.rateLimits` as `messagesPerMinute` and `messagesPerHour` (0 or unset = no cap on that window).
+- Configured in `MailPolicy.spec.rateLimits` as `messagesPerMinute`, `messagesPerHour` and `messagesPerDay` **[v0.4.0]** (0 or unset = no cap on that window).
 - **Counting unit is the policy** (`<namespace>/<policy-name>`), not the namespace or the ServiceAccount. All subjects matched by one policy share one budget.
-- True sliding-window counting (timestamp log per key; Redis uses a sorted set, trimmed and counted atomically in a Lua script with Redis server time).
+- True sliding-window counting (timestamp log per key; Redis uses a sorted set, trimmed and counted atomically in a Lua script with Redis server time). A message leaves a window the moment it is as old as the window. Hits are kept for the longest capped window: one hour, or one day when the policy has a daily cap.
 - A request is charged only after it passed policy evaluation and its backend resolved. A transient upstream failure refunds the charge, so callers retrying through an outage don't exhaust their budget. A permanent upstream rejection stays charged.
-- When exceeded: HTTP `429` with a `Retry-After` header (seconds until the oldest entry leaves the window). SMTP: `421 4.7.0`.
+- When exceeded: HTTP `429` with a `Retry-After` header: seconds until every full window has room again, so a caller that waits that long is not rejected by a longer window right after (before v0.4.0 it named the shortest full window). SMTP: `421 4.7.0`.
 - State store: see §4.7. With the in-memory store every replica counts on its own.
 
 #### US-2.3 — Sender address validation **[v0.1.0, hardened v0.2.1]**
@@ -217,11 +217,15 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - The subject type (explicit ServiceAccount vs. selector) does **not** influence precedence today. Whether it should become a secondary key is open question Q-6 (§9.2).
 - A request no policy matches is rejected with `403 no-policy-matched` (default deny).
 
-#### US-2.7 — Daily limit **[planned v0.4.0]**
+#### US-2.7 — Daily limit **[v0.4.0]**
 **As a** platform engineer **I want** a per-day cap in addition to per-minute and per-hour limits, **so that** one workload cannot exhaust the upstream provider's daily sending quota for the whole organization.
 
 *Acceptance criteria:*
-- `rateLimits.messagesPerDay`, counted like the other windows (per policy, sliding window, US-2.2).
+- `rateLimits.messagesPerDay`, counted like the other windows (per policy, sliding window over the last 24 hours, not a calendar day, US-2.2).
+- It counts messages, not recipients. Providers that cap recipients per day (Microsoft 365, personal Gmail) need a cap of their quota divided by the typical recipients per message, bounded by `messageLimits.maxRecipients`.
+- A daily cap added to an existing policy counts only the messages of the last hour before the change, because shorter windows keep no more history. It is fully in effect after one day.
+- Memory: the in-memory store keeps one timestamp per message for 24 hours (up to `messagesPerDay` per policy); Redis keeps the counter key for a day.
+- The startup CRD check (US-5.1) requires the field, so a 0.3 CRD cannot silently drop a daily cap.
 - Motivation: hosted mailboxes enforce daily quotas (for example Microsoft 365 and Google Workspace cap recipients per day and mailbox); exceeding them blocks the sending account for everyone, not just the runaway workload.
 - A namespace-wide quota across policies (`MailQuota`, §4.3.3) stays in the backlog until users ask for it.
 
@@ -420,7 +424,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - Official Helm chart with sensible defaults; every setting available via `values.yaml`.
 - CRDs ship in the chart's `crds/` directory; the generated manifests also live in `config/crd/bases/` for separate installation.
 - **CRD upgrades:** Helm installs `crds/` on first install only and never upgrades or deletes them. Upgrades apply `config/crd/bases/` (or the chart's `crds/`) explicitly, for example with `kubectl apply --server-side` or an Argo CD application. The CRD-migration runbook (§5.7) documents this.
-- **CRD version check [v0.3.0]:** an outdated CRD makes the API server prune fields it does not know, which only warns a server-side apply. A MailPolicy restricted by `allowedRecipients` alone would then allow every recipient that is not blocked. Every component therefore reads the published OpenAPI v3 schemas at startup (readable by every authenticated client, no RBAC) and exits with an error naming the missing kinds and fields if a field the version relies on is absent. It retries for 30 s because the API server publishes a changed CRD a few seconds late. A failed rollout leaves the old pods serving. `--skip-crd-check` turns the check off for clusters that hide the OpenAPI endpoint.
+- **CRD version check [v0.3.0]:** an outdated CRD makes the API server prune fields it does not know, which only warns a server-side apply. A MailPolicy restricted by `allowedRecipients` alone would then allow every recipient that is not blocked, and one with `messagesPerDay` **[v0.4.0]** would have no daily cap. Every component therefore reads the published OpenAPI v3 schemas at startup (readable by every authenticated client, no RBAC) and exits with an error naming the missing kinds and fields if a field the version relies on is absent. It retries for 30 s because the API server publishes a changed CRD a few seconds late. A failed rollout leaves the old pods serving. `--skip-crd-check` turns the check off for clusters that hide the OpenAPI endpoint.
 - No runtime configuration outside Kubernetes resources (no init scripts).
 - The admission webhook needs a serving certificate: either cert-manager (`webhook.certificate.useCertManager=true`) or an existing secret.
 
@@ -791,6 +795,7 @@ spec:
   rateLimits:                # counted per policy, sliding window
     messagesPerMinute: 60
     messagesPerHour: 1000
+    messagesPerDay: 5000     # below the mailbox's daily quota (v0.4.0)
   messageLimits:
     maxSizeBytes: 10485760   # 10 MiB (default)
     maxRecipients: 50        # default 50; counts to + cc + bcc (REST) or RCPT TO (SMTP)
@@ -1374,7 +1379,7 @@ The release is built as a sequence of small pull requests (§8.0, `CONTRIBUTING.
 
 | # | Pull request | Depends on | Usable afterwards | Ref |
 |---|---|---|---|---|
-| 1 | Daily limit `rateLimits.messagesPerDay` | — | Daily cap per policy | US-2.7 |
+| 1 | Daily limit `rateLimits.messagesPerDay` (done) | — | Daily cap per policy | US-2.7 |
 | 2 | `spec.allowedSenders` on backends, for `smtp` | — | Pin a relay to its domains | US-2.8 |
 | 3 | OAuth token sources (`internal/oauth`): client credentials and cache, against a fake token endpoint; no user-visible change | — | — | US-6.1 |
 | 4 | Graph driver, app-only, messages up to 4 MB, recipients from the envelope; webhook accepts `microsoftGraph`; recipe | 2, 3 | Microsoft 365 work accounts | US-6.1 stage 1 |

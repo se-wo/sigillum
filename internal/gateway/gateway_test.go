@@ -70,10 +70,14 @@ type denyLimiter struct{}
 func (denyLimiter) Refund(context.Context, string) error { return nil }
 
 // countingLimiter admits everything and counts hits minus refunds.
-type countingLimiter struct{ hits int }
+type countingLimiter struct {
+	hits   int
+	limits ratelimit.Limits
+}
 
-func (c *countingLimiter) Allow(context.Context, string, int32, int32) (bool, time.Duration, error) {
+func (c *countingLimiter) Allow(_ context.Context, _ string, limits ratelimit.Limits) (bool, time.Duration, error) {
 	c.hits++
+	c.limits = limits
 	return true, 0, nil
 }
 
@@ -82,7 +86,7 @@ func (c *countingLimiter) Refund(context.Context, string) error {
 	return nil
 }
 
-func (denyLimiter) Allow(context.Context, string, int32, int32) (bool, time.Duration, error) {
+func (denyLimiter) Allow(context.Context, string, ratelimit.Limits) (bool, time.Duration, error) {
 	return false, 42 * time.Second, nil
 }
 
@@ -90,7 +94,7 @@ type brokenLimiter struct{}
 
 func (brokenLimiter) Refund(context.Context, string) error { return nil }
 
-func (brokenLimiter) Allow(context.Context, string, int32, int32) (bool, time.Duration, error) {
+func (brokenLimiter) Allow(context.Context, string, ratelimit.Limits) (bool, time.Duration, error) {
 	return false, 0, ratelimit.ErrUnavailable
 }
 
@@ -322,6 +326,20 @@ func TestSend_TransientFailureRefundsRateLimit(t *testing.T) {
 	}
 	if lim.hits != 1 {
 		t.Fatalf("permanent rejection stays charged, want 1 hit, got %d", lim.hits)
+	}
+}
+
+func TestSend_DailyLimitAloneIsCharged(t *testing.T) {
+	p := testPolicy()
+	p.Spec.RateLimits = &sigv1.RateLimitsSpec{MessagesPerDay: 500}
+	g, _ := newGateway(t, &fakeDriver{}, p, readyBackend("relay", true))
+	lim := &countingLimiter{}
+	g.Limiter = lim
+	if res := g.Send(context.Background(), request("app@team.example")); res.Status != StatusAccepted {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	if lim.hits != 1 || lim.limits != (ratelimit.Limits{PerDay: 500}) {
+		t.Fatalf("a policy with only a daily limit must be charged against it, hits=%d limits=%+v", lim.hits, lim.limits)
 	}
 }
 

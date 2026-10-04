@@ -10,6 +10,35 @@ The section of a version becomes the notes of its GitHub Release
 (`hack/release-notes.sh`, run by the release workflow). Add entries under
 the version being prepared in the same pull request as the change.
 
+## [0.4.0] - unreleased
+
+### Upgrading
+
+- Apply the CRDs before upgrading:
+  `kubectl apply --server-side -f charts/sigillum/crds/`. The 0.4.0 pods
+  refuse to start on 0.3 CRDs, which would drop `messagesPerDay` without
+  an error and leave the policy without a daily cap.
+
+### Added
+
+- `MailPolicy.spec.rateLimits.messagesPerDay`: a sliding 24-hour cap per
+  policy, next to the per-minute and per-hour caps, to keep one workload
+  from using up the daily quota of the upstream mailbox (US-2.7). With a
+  daily cap, the in-memory store keeps a timestamp per message for a day
+  and Redis keeps the counter key for a day.
+
+### Changed
+
+- `Retry-After` (REST) is the wait until every full window has room
+  again, not only the shortest one; a caller retrying then is no longer
+  rejected by the hourly or daily window right after.
+
+### Fixed
+
+- A message now leaves a rate-limit window the moment it is as old as the
+  window. Before, a caller retrying exactly after `Retry-After` could be
+  rejected once more.
+
 ## [0.3.1] - unreleased
 
 ### Fixed
