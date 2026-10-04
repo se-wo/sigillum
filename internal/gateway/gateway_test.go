@@ -372,7 +372,7 @@ func TestSend_BackendAllowedSenders(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		backend  []string
-		policy   *sigv1.SenderRestrictions
+		noPolicy bool // the policy has no senderRestrictions
 		from     string
 		envelope string
 		sender   string
@@ -382,7 +382,7 @@ func TestSend_BackendAllowedSenders(t *testing.T) {
 		{name: "listed", backend: []string{"app@team.example"}, from: "APP@team.example"},
 		{name: "glob", backend: []string{"*@team.example"}, from: "x@team.example"},
 		{name: "narrower than the policy", backend: []string{"app@team.example"}, from: "other@team.example", denied: "other@team.example"},
-		{name: "policy without sender restriction", backend: []string{"app@team.example"}, from: "boss@evil.test", denied: "boss@evil.test"},
+		{name: "policy without sender restriction", backend: []string{"app@team.example"}, noPolicy: true, from: "boss@evil.test", denied: "boss@evil.test"},
 		{name: "envelope sender", backend: []string{"app@team.example"}, from: "app@team.example", envelope: "x@team.example", denied: "x@team.example"},
 		{name: "sender header", backend: []string{"app@team.example"}, from: "app@team.example", sender: "x@team.example", denied: "x@team.example"},
 		{name: "empty denies every sender", backend: []string{}, from: "app@team.example", denied: "app@team.example"},
@@ -392,7 +392,7 @@ func TestSend_BackendAllowedSenders(t *testing.T) {
 			b.Spec.AllowedSenders = tc.backend
 			p := testPolicy()
 			p.Spec.SenderRestrictions = nil
-			if tc.name != "policy without sender restriction" {
+			if !tc.noPolicy {
 				p.Spec.SenderRestrictions = &sigv1.SenderRestrictions{AllowedSenders: []string{"*@team.example"}}
 			}
 			d := &fakeDriver{}
