@@ -1,0 +1,8 @@
+# zizmor configuration (https://docs.zizmor.sh/configuration/), read by the
+# lint-actions workflow and by a local `make lint-actions`.
+rules:
+  # Suggests `uses: $/path` (self-repository syntax) instead of `./path` for
+  # local actions. actionlint does not know that syntax yet and rejects it,
+  # so the local actions stay on `./` until it does.
+  self-repository:
+    disable: true
