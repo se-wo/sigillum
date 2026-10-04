@@ -425,3 +425,21 @@ func TestSend_BackendAllowedSenders(t *testing.T) {
 		})
 	}
 }
+
+// A refused sender is a permanent 403 even while the backend's credentials
+// Secret is missing; the transient 503 would make SMTP clients retry.
+func TestSend_BackendAllowedSendersBeforeCredentials(t *testing.T) {
+	b := readyBackend("relay", true)
+	b.Spec.AllowedSenders = []string{"app@team.example"}
+	b.Spec.SMTP.AuthType = sigv1.SMTPAuthPlain
+	b.Spec.SMTP.CredentialsRef = &sigv1.SecretReference{Name: "missing", Namespace: "sigillum-system"}
+	g, _ := newGateway(t, &fakeDriver{}, testPolicy(), b)
+
+	if res := g.Send(context.Background(), request("other@team.example")); res.Status != StatusDenied ||
+		res.DenyReason != policy.DenySenderNotAllowed {
+		t.Fatalf("refused sender: want sender_not_allowed, got %+v", res)
+	}
+	if res := g.Send(context.Background(), request("app@team.example")); res.Status != StatusBackendNotReady {
+		t.Fatalf("allowed sender: want backend_not_ready, got %+v", res)
+	}
+}

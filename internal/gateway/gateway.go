@@ -218,32 +218,42 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 
 	// Resolve the backend before charging the rate limit, so an unavailable
 	// backend does not use up the budget of messages that were never sent.
-	d, backendKey, spec, err := g.backendForPolicy(ctx, p)
-	if err != nil {
+	notReady := func(err error) Result {
 		telemetry.PolicyDeniedTotal.WithLabelValues(p.Namespace, p.Name, "backend_not_ready").Inc()
 		logger.Warn("backend not ready", "policy", p.Name, "err", err)
 		ev.Decision, ev.Reason = audit.DecisionReject, "backend_not_ready"
 		g.Audit.Record(ev)
 		return Result{Status: StatusBackendNotReady, Policy: p.Name, Detail: err.Error()}
 	}
-	defer d.Close()
-	ev.Backend = backendKey
+	backendKey, spec, secretNs, err := g.backendForPolicy(ctx, p)
+	if err != nil {
+		return notReady(err)
+	}
 
 	// The backend bounds the senders of every policy that uses it (US-2.8);
 	// a policy can narrow that list but never widen it. nil: no bound.
+	// Checked before the credentials are resolved, so a refused sender gets
+	// a permanent 403 even while the credentials Secret is broken.
 	if spec.AllowedSenders != nil {
 		if from, ok := policy.SendersAllowed(view, spec.AllowedSenders); !ok {
 			reason := string(policy.DenySenderNotAllowed)
 			telemetry.PolicyDeniedTotal.WithLabelValues(p.Namespace, p.Name, reason).Inc()
 			logger.Info("request denied", "result", "denied", "reason", reason, "policy", p.Name,
 				"backend", backendKey, "restriction", "backend")
-			ev.Decision, ev.Reason = audit.DecisionReject, reason
+			ev.Backend, ev.Decision, ev.Reason = backendKey, audit.DecisionReject, reason
 			g.Audit.Record(ev)
 			return Result{Status: StatusDenied, Policy: p.Name, Backend: backendKey,
 				DenyReason: policy.DenySenderNotAllowed,
 				Detail:     "sender '" + from + "' not in the backend's allowedSenders"}
 		}
 	}
+
+	d, err := g.openDriver(ctx, backendKey, spec, secretNs)
+	if err != nil {
+		return notReady(err)
+	}
+	defer d.Close()
+	ev.Backend = backendKey
 
 	rlKey := p.Namespace + "/" + p.Name
 	charged := false
@@ -362,46 +372,45 @@ func (g *Gateway) serviceAccountLabels(ctx context.Context, namespace, name stri
 	return sa.Labels, true
 }
 
-// backendForPolicy resolves the policy's BackendRef into a live driver and
-// returns the backend's key and spec. Refuses to send if the referenced
-// backend has Ready=False.
-func (g *Gateway) backendForPolicy(ctx context.Context, p *sigv1.MailPolicy) (driver.Driver, string, *sigv1.BackendSpec, error) {
-	newDriver := g.NewDriver
-	if newDriver == nil {
-		newDriver = driver.New
-	}
+// backendForPolicy resolves the policy's BackendRef to a Ready backend and
+// returns its key, its spec and the namespace its credentials Secret
+// defaults to. Refuses to send if the referenced backend has Ready=False.
+func (g *Gateway) backendForPolicy(ctx context.Context, p *sigv1.MailPolicy) (string, *sigv1.BackendSpec, string, error) {
 	switch p.Spec.BackendRef.Kind {
 	case sigv1.KindMailBackend:
 		var mb sigv1.MailBackend
 		if err := g.Reader.Get(ctx, types.NamespacedName{Namespace: p.Namespace, Name: p.Spec.BackendRef.Name}, &mb); err != nil {
-			return nil, "", nil, fmt.Errorf("MailBackend %s/%s: %w", p.Namespace, p.Spec.BackendRef.Name, err)
+			return "", nil, "", fmt.Errorf("MailBackend %s/%s: %w", p.Namespace, p.Spec.BackendRef.Name, err)
 		}
 		if !backendIsReady(&mb.Status) {
-			return nil, "", nil, fmt.Errorf("MailBackend %s/%s is not Ready", p.Namespace, p.Spec.BackendRef.Name)
+			return "", nil, "", fmt.Errorf("MailBackend %s/%s is not Ready", p.Namespace, p.Spec.BackendRef.Name)
 		}
-		cfg, err := controller.ResolveBackendConfig(ctx, g.Reader, p.Namespace+"/"+mb.Name, &mb.Spec, mb.Namespace)
-		if err != nil {
-			return nil, "", nil, err
-		}
-		d, err := newDriver(cfg)
-		return d, p.Namespace + "/" + mb.Name, &mb.Spec, err
+		return p.Namespace + "/" + mb.Name, &mb.Spec, mb.Namespace, nil
 	case sigv1.KindClusterMailBackend, "":
 		var cmb sigv1.ClusterMailBackend
 		if err := g.Reader.Get(ctx, types.NamespacedName{Name: p.Spec.BackendRef.Name}, &cmb); err != nil {
-			return nil, "", nil, fmt.Errorf("ClusterMailBackend %s: %w", p.Spec.BackendRef.Name, err)
+			return "", nil, "", fmt.Errorf("ClusterMailBackend %s: %w", p.Spec.BackendRef.Name, err)
 		}
 		if !backendIsReady(&cmb.Status) {
-			return nil, "", nil, fmt.Errorf("ClusterMailBackend %s is not Ready", p.Spec.BackendRef.Name)
+			return "", nil, "", fmt.Errorf("ClusterMailBackend %s is not Ready", p.Spec.BackendRef.Name)
 		}
-		cfg, err := controller.ResolveBackendConfig(ctx, g.Reader, "/"+cmb.Name, &cmb.Spec, "")
-		if err != nil {
-			return nil, "", nil, err
-		}
-		d, err := newDriver(cfg)
-		return d, "/" + cmb.Name, &cmb.Spec, err
+		return "/" + cmb.Name, &cmb.Spec, "", nil
 	default:
-		return nil, "", nil, fmt.Errorf("unsupported backendRef.kind %q", p.Spec.BackendRef.Kind)
+		return "", nil, "", fmt.Errorf("unsupported backendRef.kind %q", p.Spec.BackendRef.Kind)
 	}
+}
+
+// openDriver resolves a backend's credentials and builds its driver.
+func (g *Gateway) openDriver(ctx context.Context, backendKey string, spec *sigv1.BackendSpec, secretNs string) (driver.Driver, error) {
+	cfg, err := controller.ResolveBackendConfig(ctx, g.Reader, backendKey, spec, secretNs)
+	if err != nil {
+		return nil, err
+	}
+	newDriver := g.NewDriver
+	if newDriver == nil {
+		newDriver = driver.New
+	}
+	return newDriver(cfg)
 }
 
 func backendIsReady(s *sigv1.BackendStatus) bool {

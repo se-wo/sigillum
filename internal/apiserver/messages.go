@@ -308,6 +308,9 @@ func writePolicyDeny(w http.ResponseWriter, msgID string, res gateway.Result) {
 		p.Type, p.Title = problem.TypeBase+problem.TypeNoPolicyMatched, "No matching policy"
 	case policy.DenySenderNotAllowed:
 		p.Type, p.Title = problem.TypeBase+problem.TypeSenderNotAllowed, "Sender address not allowed by policy"
+		if res.Backend != "" { // only a backend's allowedSenders refusal carries the backend (US-2.8)
+			p.Title = "Sender address not allowed by backend"
+		}
 	case policy.DenyRecipientBlocked:
 		p.Type, p.Title = problem.TypeBase+problem.TypeRecipientBlocked, "Recipient address not allowed by policy"
 	case policy.DenyMessageTooLarge:

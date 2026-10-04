@@ -722,7 +722,8 @@ spec:
     connectionTimeoutSeconds: 10 # 1–120, default 10
     heloDomain: sigillum         # optional, default "sigillum"
   allowedSenders:                # [v0.4.0] optional for smtp; the backend sends only for these (US-2.8)
-    - "*@example.com"
+    - "*@example.com"            # not subdomains: list each domain the policies use
+    - "*@billing.noreply.example.com"
   healthCheck:
     enabled: true                # default true; false = assume Ready without probing
     intervalSeconds: 60          # minimum 10, default 60
