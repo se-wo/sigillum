@@ -178,6 +178,23 @@ const (
 	ReasonReady                   = "Ready"
 )
 
+// Labels, annotations and keys of the Secret in which the controller keeps a
+// delegated backend's OAuth tokens (US-6.3). The credential Secret guard
+// (SPEC §4.10) lets the controller write such Secrets only with this label,
+// the backend's UID in the annotation, a controller owner reference to that
+// backend and these keys.
+const (
+	// OAuthTokenLabel's value is the name of the owning MailBackend or
+	// ClusterMailBackend.
+	OAuthTokenLabel = "sigillum.dev/oauth-token"
+	// OAuthTokenUIDAnnotation holds the owning backend's UID.
+	OAuthTokenUIDAnnotation = "sigillum.dev/oauth-token-uid"
+
+	OAuthSecretRefreshTokenKey = "refresh_token"
+	OAuthSecretAccessTokenKey  = "access_token"
+	OAuthSecretExpiresAtKey    = "expires_at"
+)
+
 // SecretKey is a structured reference for the credentials secret keys.
 // Standardised per SPEC §4.3.1: SMTP uses keys `username` and `password`.
 const (
