@@ -24,7 +24,19 @@ type Limits struct {
 // None reports whether no window is capped.
 func (l Limits) None() bool { return l.PerMinute <= 0 && l.PerHour <= 0 && l.PerDay <= 0 }
 
-// keep is how far back hits must be kept to count every capped window.
+// window is one sliding window and its cap (0 = no cap).
+type window struct {
+	limit int32
+	size  time.Duration
+}
+
+// windows lists every window, shortest first. The Redis script mirrors it.
+func (l Limits) windows() [3]window {
+	return [3]window{{l.PerMinute, time.Minute}, {l.PerHour, time.Hour}, {l.PerDay, 24 * time.Hour}}
+}
+
+// keep is how far back hits must be kept to count every capped window:
+// one hour, or one day with a daily cap.
 func (l Limits) keep() time.Duration {
 	if l.PerDay > 0 {
 		return 24 * time.Hour

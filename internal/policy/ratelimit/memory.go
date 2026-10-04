@@ -35,25 +35,13 @@ func (l *MemoryLimiter) Allow(_ context.Context, key string, limits Limits) (boo
 	defer l.mu.Unlock()
 
 	now := l.now()
-	// hist is sorted oldest first, so every window is a suffix of it. A hit
-	// leaves a window the moment it is as old as the window, so a caller
-	// retrying exactly after Retry-After finds room.
-	since := func(hist []time.Time, cutoff time.Time) int {
-		return sort.Search(len(hist), func(i int) bool { return hist[i].After(cutoff) })
-	}
 	hist := l.hits[key]
 	hist = hist[since(hist, now.Add(-limits.keep())):]
 
-	full := false
+	// Every hit in a window is younger than the window, so the wait for a
+	// full window is always positive and retry > 0 means "rejected".
 	var retry time.Duration
-	for _, w := range []struct {
-		limit int32
-		size  time.Duration
-	}{
-		{limits.PerMinute, time.Minute},
-		{limits.PerHour, time.Hour},
-		{limits.PerDay, 24 * time.Hour},
-	} {
+	for _, w := range limits.windows() {
 		if w.limit <= 0 {
 			continue
 		}
@@ -63,16 +51,23 @@ func (l *MemoryLimiter) Allow(_ context.Context, key string, limits Limits) (boo
 		}
 		// The window has room again once enough of its hits have left it
 		// for the count to drop below the limit.
-		leave := hist[len(hist)-int(w.limit)].Add(w.size).Sub(now)
-		full, retry = true, max(retry, leave)
+		retry = max(retry, hist[len(hist)-int(w.limit)].Add(w.size).Sub(now))
 	}
-	if full {
+	if retry > 0 {
 		l.hits[key] = hist
 		return false, ceilToSecond(retry), nil
 	}
 
 	l.hits[key] = append(hist, now)
 	return true, 0, nil
+}
+
+// since returns the index of the first hit in hist, sorted oldest first,
+// that is younger than cutoff, so every window is a suffix of hist. A hit
+// leaves a window the moment it is as old as the window, so a caller
+// retrying exactly after Retry-After finds room.
+func since(hist []time.Time, cutoff time.Time) int {
+	return sort.Search(len(hist), func(i int) bool { return hist[i].After(cutoff) })
 }
 
 func ceilToSecond(d time.Duration) time.Duration {
