@@ -223,8 +223,9 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 *Acceptance criteria:*
 - `rateLimits.messagesPerDay`, counted like the other windows (per policy, sliding window over the last 24 hours, not a calendar day, US-2.2).
 - It counts messages, not recipients. Providers that cap recipients per day (Microsoft 365, personal Gmail) need a cap of their quota divided by the typical recipients per message, bounded by `messageLimits.maxRecipients`.
-- A daily cap added to an existing policy counts only the messages of the last hour before the change, because shorter windows keep no more history. It is fully in effect after one day.
-- Memory: the in-memory store keeps one timestamp per message for 24 hours (up to `messagesPerDay` per policy). It drops old timestamps only when the policy sends again, so a policy that stops sending keeps its last day of timestamps until the process restarts. Redis keeps the counter key for a day.
+- A daily cap added to an existing policy counts only the messages of the last hour before the change, because shorter windows keep no more history. It is fully in effect after one day. The same holds after an upgrade from 0.3: 0.3 replicas keep only the last hour, so the cap is fully in effect one day after the last 0.3 replica is gone.
+- A replica that has not seen a daily cap yet, or a cap briefly set to 0, keeps the day of history a daily cap set up, so it does not reset the daily count. Once the cap is removed, the history shrinks back to an hour within a day.
+- Memory: the in-memory store keeps one timestamp per message for 24 hours (up to `messagesPerDay` per policy) and removes a policy's timestamps once they stop counting, also for idle and deleted policies. Redis keeps the counter key for a day.
 - The startup CRD check (US-5.1) requires the field, so a 0.3 CRD cannot silently drop a daily cap.
 - Motivation: hosted mailboxes enforce daily quotas (for example Microsoft 365 and Google Workspace cap recipients per day and mailbox); exceeding them blocks the sending account for everyone, not just the runaway workload.
 - A namespace-wide quota across policies (`MailQuota`, §4.3.3) stays in the backlog until users ask for it.

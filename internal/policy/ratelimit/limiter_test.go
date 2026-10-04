@@ -125,15 +125,83 @@ func TestMemoryLimiter_KeepsOnlyTheLongestCappedWindow(t *testing.T) {
 		{Limits{PerHour: 10}, 0},
 		{Limits{PerHour: 10, PerDay: 10}, 2},
 	} {
-		l.hits = map[string][]time.Time{}
+		l.hits = map[string]history{}
 		for _, at := range []time.Duration{0, 2 * time.Hour} {
 			now = base.Add(at)
-			l.Allow(ctx, "k", Limits{PerDay: 10})
+			l.Allow(ctx, "k", tc.limits)
 		}
 		now = base.Add(3 * time.Hour)
 		l.Allow(ctx, "k", tc.limits)
-		if got := len(l.hits["k"]) - 1; got != tc.want {
+		if got := len(l.hits["k"].hits) - 1; got != tc.want {
 			t.Errorf("%+v: kept %d earlier hits, want %d", tc.limits, got, tc.want)
 		}
 	}
+}
+
+// A call without the daily cap (a replica that has not seen it yet, or the
+// cap briefly set to 0) must not trim the history the daily cap counts.
+func TestLimiter_CallWithoutDailyCapKeepsDailyHistory(t *testing.T) {
+	limiters(t, func(t *testing.T, l clocked) {
+		daily := Limits{PerHour: 10, PerDay: 3}
+		mustAllow(t, l, 0, daily)
+		mustAllow(t, l, 2*time.Hour, daily)
+		mustAllow(t, l, 4*time.Hour, Limits{PerHour: 10})
+		mustReject(t, l, 6*time.Hour, daily, 18*time.Hour)
+	})
+}
+
+// A call without the daily cap neither shortens the day-long expiry nor
+// extends it, so a removed cap stops holding history after a day.
+func TestRedisLimiter_CallWithoutDailyCapKeepsExpiry(t *testing.T) {
+	l, mr := newRedisLimiter(t)
+	ctx := context.Background()
+	if ok, _, err := l.Allow(ctx, "ns/p", Limits{PerDay: 5}); !ok || err != nil {
+		t.Fatalf("want allowed, got ok=%v err=%v", ok, err)
+	}
+	mr.FastForward(5 * time.Hour)
+	if ok, _, err := l.Allow(ctx, "ns/p", Limits{PerHour: 5}); !ok || err != nil {
+		t.Fatalf("want allowed, got ok=%v err=%v", ok, err)
+	}
+	if ttl := mr.TTL("sigillum:rl:ns/p"); ttl != 19*time.Hour {
+		t.Fatalf("want the daily expiry left as is (19h), got %v", ttl)
+	}
+}
+
+func TestMemoryLimiter_SweepsIdleKeys(t *testing.T) {
+	l := NewMemoryLimiter()
+	var now time.Time
+	l.now = func() time.Time { return now }
+	ctx := context.Background()
+	send := func(at time.Duration, key string, limits Limits) {
+		now = base.Add(at)
+		l.Allow(ctx, key, limits)
+	}
+	send(0, "hourly", Limits{PerHour: 10})
+	send(0, "daily", Limits{PerDay: 10})
+	// Any call sweeps; an hour after its last hit the hourly key is gone.
+	send(time.Hour+time.Minute, "other", Limits{PerHour: 10})
+	if _, ok := l.hits["hourly"]; ok {
+		t.Fatal("idle hourly key still held after an hour")
+	}
+	if _, ok := l.hits["daily"]; !ok {
+		t.Fatal("daily key dropped before its day was over")
+	}
+	send(24*time.Hour+time.Minute, "other", Limits{PerHour: 10})
+	if _, ok := l.hits["daily"]; ok {
+		t.Fatal("idle daily key still held after a day")
+	}
+}
+
+// Hits that expired but are not swept yet no longer count, as with Redis.
+func TestMemoryLimiter_ExpiredHitsDoNotCount(t *testing.T) {
+	m := NewMemoryLimiter()
+	var now time.Time
+	m.now = func() time.Time { return now }
+	l := clocked{m, func(t time.Time) { now = t }}
+	mustAllow(t, l, 0, Limits{PerHour: 10})
+	mustAllow(t, l, 10*time.Minute, Limits{PerHour: 10}) // ns/p expires at +70m
+	now = base.Add(69*time.Minute + 30*time.Second)
+	m.Allow(context.Background(), "other", Limits{PerHour: 10}) // sweeps, ns/p still live
+	// Not swept again before +70m30s, but both hits expired at +70m.
+	mustAllow(t, l, 70*time.Minute, Limits{PerDay: 2})
 }

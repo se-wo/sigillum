@@ -38,8 +38,14 @@ local windows = {
 -- Keep hits for the longest capped window: a day only with a daily cap.
 local keep = 3600000
 if windows[3][1] > 0 then keep = 86400000 end
+-- While a call with a daily cap holds the key for longer, keep its day of
+-- history even without one (a replica that has not seen the cap yet), and
+-- never shorten its expiry. Mirrors Limits.retain.
+local ttl = redis.call('PTTL', KEYS[1])
+local trim = keep
+if ttl > keep then trim = 86400000 end
 
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - keep)
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - trim)
 
 -- A hit leaves a window the moment it is as old as the window, hence the
 -- exclusive lower bound: a caller retrying exactly after Retry-After finds
@@ -63,7 +69,7 @@ if retry >= 0 then
 end
 
 redis.call('ZADD', KEYS[1], now, ARGV[4])
-redis.call('PEXPIRE', KEYS[1], keep)
+if ttl < keep then redis.call('PEXPIRE', KEYS[1], keep) end
 return {1, 0}
 `)
 

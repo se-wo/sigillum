@@ -44,6 +44,20 @@ func (l Limits) keep() time.Duration {
 	return time.Hour
 }
 
+// retain is how far back a call trims the stored history, given how long
+// that history has left before it expires. It is the call's own keep, or a
+// full day while a call with a daily cap holds the history for longer, so a
+// replica that has not seen the cap yet, or a cap briefly set to 0, does not
+// wipe the daily count. Only keep extends the expiry, so after a daily cap
+// is removed the history shrinks back to an hour within a day. The Redis
+// script mirrors it.
+func (l Limits) retain(left time.Duration) time.Duration {
+	if left > l.keep() {
+		return 24 * time.Hour
+	}
+	return l.keep()
+}
+
 // Limiter is the interface implemented by every rate-limit backend.
 type Limiter interface {
 	// Allow returns true if the request fits within every capped window of
