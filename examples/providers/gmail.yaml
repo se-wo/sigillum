@@ -1,0 +1,40 @@
+# Personal Gmail account (@gmail.com) via smtp.gmail.com with an app password.
+#
+# App passwords still work for SMTP as long as 2-Step Verification is on for
+# the account (myaccount.google.com > Security > App passwords). They grant
+# full access to the mailbox and are revoked when the account's password
+# changes. Plain account passwords are rejected. Sigillum's Gmail API driver
+# with a one-time sign-in (only the gmail.send scope, no app password) is
+# planned for v0.4.0 (SPEC US-6.2, US-6.3).
+#
+# Gmail rewrites a From that is neither the account nor one of its verified
+# send-as aliases, so list only those in the policy's allowedSenders. A
+# personal account may send to about 500 recipients per day.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gmail-smtp
+  namespace: sigillum-system
+type: Opaque
+stringData:
+  username: "you@gmail.com"
+  password: "REPLACE-ME"   # the 16-character app password; set out of band
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: ClusterMailBackend
+metadata:
+  name: gmail
+spec:
+  type: smtp
+  smtp:
+    endpoints:
+      - host: smtp.gmail.com
+        port: 587
+        tls: starttls
+    authType: PLAIN
+    credentialsRef:
+      name: gmail-smtp
+      namespace: sigillum-system
+    connectionTimeoutSeconds: 10
+  healthCheck:
+    intervalSeconds: 300

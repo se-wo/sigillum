@@ -8,25 +8,33 @@ the Secret out of band (External Secrets, Sealed Secrets, `kubectl create
 secret`), never in Git.
 
 The SMTP driver authenticates with `PLAIN`, `LOGIN` or `CRAM-MD5`, i.e. with
-a static secret. OAuth (`XOAUTH2`) is planned for v0.5.0 (SPEC US-6.1). The
-table shows what still works with a static secret, as of September 2026.
+a static secret. A Microsoft Graph driver, a Gmail API driver and OAuth
+(`XOAUTH2`) for the SMTP driver are planned for v0.4.0 (SPEC US-6.1,
+US-6.2). The table shows what still works with a static secret, as of
+September 2026.
 
 | Provider | File | Endpoint | Auth | Password login still possible? |
 |---|---|---|---|---|
-| Microsoft 365, SMTP AUTH | [`microsoft-365.yaml`](microsoft-365.yaml) | `smtp.office365.com:587` | `LOGIN`, mailbox password | **Being retired.** Works while SMTP AUTH is enabled for tenant and mailbox. Disabled by default for existing tenants at the end of December 2026 (admins can re-enable), not available to new tenants, final removal date announced in H2 2027. Stopgap only. |
+| Microsoft 365, SMTP AUTH | [`microsoft-365.yaml`](microsoft-365.yaml) | `smtp.office365.com:587` | `LOGIN`, mailbox password | **Being retired.** Works while SMTP AUTH is enabled for tenant and mailbox. Disabled by default for existing tenants at the end of December 2026 (admins can re-enable), not available to new tenants, final removal date announced in H2 2027. App passwords are no way out: they are Basic auth too and stop with it (personal Microsoft accounts no longer have them). Stopgap only. |
 | Microsoft 365, relay connector | [`microsoft-365-connector.yaml`](microsoft-365-connector.yaml) | `<tenant>.mail.protection.outlook.com:25` | `NONE`, inbound connector by static egress IP | Not needed. Requires a static egress IP and outbound port 25. |
 | Azure Communication Services | [`azure-communication-services.yaml`](azure-communication-services.yaml) | `smtp.azurecomm.net:587` | `LOGIN`, Entra app + client secret | Yes: a client secret, not a mailbox password. Rotate before it expires (≤ 24 months). |
 | Microsoft 365 High Volume Email | [`microsoft-365-hve.yaml`](microsoft-365-hve.yaml) | `smtp-hve.office365.com:587` | `LOGIN`, HVE account | Yes, until September 2028, for **internal recipients only**. |
-| Google Workspace | [`google-workspace.yaml`](google-workspace.yaml) | `smtp-relay.gmail.com:587` | `PLAIN` with an app password, or `NONE` by static egress IP | Only app passwords (2-Step Verification, not disabled by the admin). "Less secure apps" are gone; plain account passwords are rejected. |
+| Outlook.com (personal Microsoft account) | none | `smtp-mail.outlook.com:587` | OAuth only | **No.** Basic auth and app passwords are already gone for personal accounts. Not usable until `XOAUTH2` with a one-time sign-in (v0.4.0). |
+| Gmail (personal account) | [`gmail.yaml`](gmail.yaml) | `smtp.gmail.com:587` | `PLAIN` with an app password | Only app passwords (2-Step Verification on); no cut-off announced. Gmail API driver with a one-time sign-in planned for v0.4.0. |
+| Google Workspace | [`google-workspace.yaml`](google-workspace.yaml) | `smtp-relay.gmail.com:587` | `PLAIN` with an app password, or `NONE` by static egress IP | Only app passwords (2-Step Verification, not disabled by the admin); no cut-off announced. "Less secure apps" are gone; plain account passwords are rejected. A Gmail API driver with a service account is planned for v0.4.0. |
 | Amazon SES | [`amazon-ses.yaml`](amazon-ses.yaml) | `email-smtp.<region>.amazonaws.com:587` | `PLAIN`, SES SMTP credentials | Yes. Derived from an IAM user (not the IAM access key). Verify the sender domain; leave the sandbox for production. |
 | Mailgun | [`mailgun.yaml`](mailgun.yaml) | `smtp.mailgun.org:587` (EU: `smtp.eu.mailgun.org`) | `PLAIN`, domain SMTP credential | Yes. |
 | Postmark | [`postmark.yaml`](postmark.yaml) | `smtp.postmarkapp.com:587` | `PLAIN`, Server API token or SMTP token | Yes. Add header `X-PM-Message-Stream` for broadcast streams. |
 | Brevo | [`brevo.yaml`](brevo.yaml) | `smtp-relay.brevo.com:587` | `LOGIN`, SMTP key | Yes: an SMTP key, not the account password. |
 
+For a personal Outlook.com account there is no way to send through
+Sigillum until v0.4.0; a personal Gmail account works with an app password.
+
 For Microsoft 365 today: use the relay connector if you have a static
 egress IP, Azure Communication Services if you do not, and HVE for purely
-internal mail. Keep SMTP AUTH with a mailbox password only as a bridge until
-`XOAUTH2` (v0.5.0).
+internal mail. Keep SMTP AUTH with a mailbox password or app password only
+as a bridge until the Graph driver and `XOAUTH2` (v0.4.0), and no later than
+the end of December 2026.
 
 Provider rules change; check the provider's current documentation before
 relying on a date above.
