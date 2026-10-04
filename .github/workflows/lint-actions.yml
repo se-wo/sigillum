@@ -1,0 +1,65 @@
+name: lint-actions
+
+# Static analysis of the workflows and local actions in .github/:
+#
+#   - actionlint: workflow syntax, expressions and their types, job and step
+#     references, and (through shellcheck) the scripts in run: steps
+#   - zizmor: security issues such as template injection, persisted
+#     credentials, over-broad permissions, cache poisoning, impostor commits
+#     and pinned actions with known vulnerabilities. Its configuration is
+#     .github/zizmor.yml; a finding that does not apply is ignored next to
+#     the code with `# zizmor: ignore[<audit>]` and a comment why.
+#
+# CodeQL's "actions" analysis (codeql.yml) overlaps with zizmor; both run.
+# The weekly run catches new advisories for actions that did not change.
+#
+# Third-party actions are not allowed by the repository's Actions policy
+# (CONTRIBUTING.md), so both tools are installed at pinned versions instead:
+# actionlint with `go install` (checked against the Go checksum database),
+# zizmor with pip from hash-pinned .github/zizmor/requirements.txt.
+# Actions are pinned to commit SHAs; tag comments track the release.
+# Dependabot bumps them and zizmor; ACTIONLINT_VERSION is in the Makefile.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 5 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  lint-actions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: install actionlint
+        run: make actionlint
+      # actionlint skips the run: scripts without a word if shellcheck is
+      # missing; ubuntu-latest ships it.
+      - name: check shellcheck
+        run: shellcheck --version
+      - name: install zizmor
+        run: |
+          python3 -m venv "$RUNNER_TEMP/zizmor"
+          "$RUNNER_TEMP/zizmor/bin/pip" install --quiet --require-hashes --only-binary :all: \
+            -r .github/zizmor/requirements.txt
+          "$RUNNER_TEMP/zizmor/bin/zizmor" --version
+      - name: actionlint
+        run: bin/actionlint
+      # Runs even when actionlint failed, so both report in one go.
+      - name: zizmor
+        if: ${{ !cancelled() }}
+        env:
+          # Online audits (impostor commits, known vulnerable actions) query
+          # the GitHub API; the job's token only reads.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          "$RUNNER_TEMP/zizmor/bin/zizmor" --format github .

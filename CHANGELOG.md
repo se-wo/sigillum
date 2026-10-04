@@ -23,6 +23,9 @@ the version being prepared in the same pull request as the change.
 
 - Continuous fuzzing of the SMTP, REST, address and credential parsers
   with Go's native fuzzer (`make fuzz`, `fuzz` workflow on PRs and daily).
+- Static analysis of the GitHub Actions workflows and local actions with
+  actionlint and zizmor (`make lint-actions`, `lint-actions` workflow on
+  PRs and weekly).
 
 ## [0.3.0] - 2026-09-26
 
