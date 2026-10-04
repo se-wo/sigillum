@@ -1239,7 +1239,7 @@ These targets are not yet verified by a benchmark in CI.
 | SMTP credentials | Generated: 256-bit random, only SHA-256 in status; bring your own: argon2id with bounded parameters. TLS required by default, failed logins throttled, revocation immediate (§4.3.4, US-3.7). Controller writes Secrets only through the credential Secret guard (§4.10). |
 | Pod Security Standard | Compatible with `restricted` |
 | SBOM / signing | Releases after v0.2.1: image and chart signed keyless with cosign, SLSA build provenance via GitHub artifact attestations, SPDX SBOM and BuildKit provenance per platform; base images pinned by digest, Actions by commit SHA (README, "Supply chain") |
-| Dependency scanning | CI: `govulncheck` (reachable vulnerabilities), dependency review on PRs (moderate and above), CodeQL for Go and workflows; Dependabot weekly updates with cooldown, security updates immediately |
+| Dependency scanning | CI: `govulncheck` (reachable vulnerabilities), dependency review on PRs (moderate and above), CodeQL for Go and workflows, actionlint and zizmor for workflows and local actions; Dependabot weekly updates with cooldown, security updates immediately |
 
 ### 5.4 Scalability
 

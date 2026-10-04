@@ -7,7 +7,7 @@
 
 You need Go (see the `go` / `toolchain` lines in [`go.mod`](go.mod)) and
 `make`. The Makefile installs its own tools (controller-gen, setup-envtest,
-govulncheck) into `bin/` at pinned versions.
+govulncheck, actionlint) into `bin/` at pinned versions.
 
 ```sh
 make build              # compile bin/sigillum
@@ -16,6 +16,7 @@ make test-unit          # fast unit tests (go test -short)
 make test               # regenerates manifests/deepcopy, then unit + envtest suite
 make vulncheck          # govulncheck
 make fuzz               # every fuzz target for 30s (FUZZTIME=5m, FUZZ_PKGS=internal/policy)
+make lint-actions       # actionlint + zizmor on .github/ (needs zizmor, see below)
 ```
 
 - After changing API types or kubebuilder markers, run
@@ -98,6 +99,16 @@ merge.
   repository's Actions policy; workflows that use anything else will fail.
 - Keep workflow `permissions:` minimal and pass untrusted values to `run:`
   steps through `env:` rather than `${{ }}` expressions.
+- The [`lint-actions`](.github/workflows/lint-actions.yml) workflow runs
+  [actionlint](https://github.com/rhysd/actionlint) (with shellcheck for
+  `run:` scripts) and [zizmor](https://docs.zizmor.sh/) on every PR. Run
+  them locally with `make lint-actions` after installing zizmor
+  (`pip install --require-hashes -r .github/zizmor/requirements.txt`) and,
+  for the checks of `run:` scripts, shellcheck. A zizmor
+  finding that does not apply is ignored on the flagged line with
+  `# zizmor: ignore[<audit>]` and a comment explaining why; rules that do
+  not fit the repository are disabled in
+  [`.github/zizmor.yml`](.github/zizmor.yml).
 
 ## Dependencies
 

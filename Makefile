@@ -14,6 +14,7 @@ LOCALBIN ?= $(CURDIR)/bin
 
 CONTROLLER_GEN_VERSION ?= v0.16.5
 GOVULNCHECK_VERSION    ?= v1.8.0
+ACTIONLINT_VERSION     ?= v1.7.12
 # setup-envtest has no tagged releases; this pseudo-version is the head of
 # controller-runtime's release-0.18 branch (commit 42f791873869), pinned so
 # the tool can't change underneath us.
@@ -24,6 +25,10 @@ ENVTEST_K8S_VERSION   ?= 1.36.2
 CONTROLLER_GEN := $(LOCALBIN)/controller-gen
 GOVULNCHECK    := $(LOCALBIN)/govulncheck
 ENVTEST        := $(LOCALBIN)/setup-envtest
+ACTIONLINT     := $(LOCALBIN)/actionlint
+# zizmor is a Python package; install it with
+# pip install --require-hashes -r .github/zizmor/requirements.txt
+ZIZMOR         ?= zizmor
 
 IMAGE_REPO ?= ghcr.io/se-wo/sigillum
 IMAGE_TAG  ?= $(VERSION)
@@ -95,6 +100,13 @@ kind-load:
 vulncheck: govulncheck
 	$(GOVULNCHECK) $(PKG)
 
+# Static analysis of the workflows and local actions in .github/.
+# actionlint checks run: scripts with shellcheck when it is on PATH.
+.PHONY: lint-actions
+lint-actions: actionlint
+	$(ACTIONLINT)
+	$(ZIZMOR) .
+
 .PHONY: e2e
 e2e:
 	$(GO) test -tags=e2e ./test/e2e/... -timeout=20m -v
@@ -113,6 +125,10 @@ envtest: $(LOCALBIN)
 .PHONY: govulncheck
 govulncheck: $(LOCALBIN)
 	@test -x $(GOVULNCHECK) || GOBIN=$(LOCALBIN) $(GO) install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+
+.PHONY: actionlint
+actionlint: $(LOCALBIN)
+	@test -x $(ACTIONLINT) || GOBIN=$(LOCALBIN) $(GO) install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 
 .PHONY: clean
 clean:
