@@ -1381,7 +1381,7 @@ The release is built as a sequence of small pull requests (§8.0, `CONTRIBUTING.
 | 12 | Graph messages above 4 MB via draft and upload sessions (opt-in) | 4 | Large Graph messages | US-6.1 stage 1 |
 | 13 | Release: real-account checks (`docs/RELEASE-CHECKS.md`), version bump | all | v0.4.0 | §8.0 |
 
-A backend type, `authType` or field is accepted by the webhook only from the pull request that makes it work, so `main` stays releasable after every merge. If the deadline gets tight, 11 and 12 move to v0.4.1 or v0.5.0; 1 to 7 are the minimum for Microsoft 365 and Outlook.com.
+A backend type, `authType` or field is accepted by the webhook only from the pull request that makes it work, so `main` stays releasable after every merge. If the deadline gets tight, 11 and 12 move to v0.4.1 or v0.5.0; 1 to 6 are the minimum for Microsoft 365 and Outlook.com, and 7 for software that must stay on SMTP.
 
 ### 8.4 v0.5.0 — Easy to run, easy to debug
 
