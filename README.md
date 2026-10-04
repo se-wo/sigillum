@@ -266,7 +266,9 @@ docker buildx imagetools inspect ghcr.io/se-wo/sigillum:0.3.0 \
 
 In CI, `govulncheck` fails the build on known vulnerabilities that the code
 actually reaches, dependency review blocks PRs that add vulnerable
-dependencies, and CodeQL scans the Go code and the workflows. Go's native
+dependencies, and CodeQL scans the Go code and the workflows. actionlint and
+zizmor check the workflows and local actions for mistakes and security issues
+([`lint-actions.yml`](.github/workflows/lint-actions.yml)). Go's native
 fuzzer exercises the parsers of SMTP and REST input on every PR and daily
 ([`fuzz.yml`](.github/workflows/fuzz.yml)). Dependabot
 opens weekly update PRs for Go modules, Actions and base images, after a
