@@ -1372,7 +1372,7 @@ The release is built as a sequence of small pull requests (§8.0, `CONTRIBUTING.
 | 3 | OAuth token sources (`internal/oauth`): client credentials and cache, against a fake token endpoint; no user-visible change | — | — | US-6.1 |
 | 4 | Graph driver, app-only, messages up to 4 MB, recipients from the envelope; webhook accepts `microsoftGraph`; recipe | 2, 3 | Microsoft 365 work accounts | US-6.1 stage 1 |
 | 5 | Token Secret and broker in the controller, guard extension, `sigillum_backend_authorized`; no provider yet | 3 | — | US-6.3 |
-| 6 | Device code sign-in and Graph delegated (`/me/sendMail`); recipe `outlook-com.yaml` | 4, 5, Q-13 | **Outlook.com** | US-6.1, US-6.3 |
+| 6 | Device code sign-in and Graph delegated (`/me/sendMail`); recipe `outlook-com.yaml` | 4, 5 | **Outlook.com** | US-6.1, US-6.3 |
 | 7 | `authType: XOAUTH2` for the SMTP driver, Microsoft token sources | 3, 5 | Microsoft 365 and Outlook.com over SMTP | US-6.1 stage 2 |
 | 8 | `sigillum oauth login` (authorization code, PKCE, loopback) | 5 | — | US-6.3 |
 | 9 | Gmail API driver, service account; webhook accepts `gmail`; recipe | 2, 3 | Google Workspace | US-6.2 stage 1 |
@@ -1452,6 +1452,7 @@ Every candidate that has been discussed, with its decision and the reason.
 | Idempotency keys | v0.6.0 | Duplicate mail on retries is real, but rare enough to follow the basics. |
 | `v1beta1` CRDs | v0.6.0 | After the credential and limit fields have settled. |
 | API drivers (SES, SendGrid, Mailgun) | Backlog | SMTP endpoints already work; worthwhile mainly with cloud workload identity. |
+| Sigillum-owned public app registration for personal Microsoft accounts | Backlog | Saves Outlook.com users the Entra tenant and app registration; the project would own the registration and its consent screen (Q-13). |
 | Cloud workload identity for upstream auth | Backlog | Larger-organization need; External Secrets plus rotation covers small setups. |
 | Istio mTLS auth | Backlog | Tokens already work inside meshes. |
 | `MailQuota` (namespace-wide) | Backlog | Per-policy daily limit covers most cases. |
@@ -1508,7 +1509,7 @@ Every candidate that has been discussed, with its decision and the reason.
 | Q-10 | Should the webhook warn when `senderRestrictions` is present with an empty `allowedSenders` list? | That configuration denies every sender and is almost always a mistake (US-2.3). A warning does not change behavior. |
 | Q-11 | `MailCredential` design | **Decided:** controller-generated Secrets by default in all namespaces except `credentials.excludeNamespaces` (default `kube-*`, release namespace always), guarded as in §4.10; bring-your-own argon2id hash as alternative; SHA-256 for generated passwords; no per-policy opt-in; TLS required by default (US-3.7, §4.3.4). |
 | Q-12 | Should a Graph or Gmail backend send as whichever mailbox `From` names, or be pinned to one mailbox in its spec? | **Decided:** it depends on the upstream, so the backend states it. API backends send as `From`, bounded by the backend's own `allowedSenders` globs (US-2.8): a company relay can forward any address of its domains, a personal account only its own. |
-| Q-13 | Should Sigillum ship a shared OAuth client ID for personal accounts, so users need no app registration of their own? | Matters most for Outlook.com: registering an app requires an Entra tenant, which a person with only an Outlook.com account must first get through an Azure sign-up. A Sigillum-owned public client (device code, no secret) would remove that step; the project would own the registration and the consent screen users see. Google is less affected: any Google account can create the project and client for free. Decide before the Outlook.com sign-in PR (§8.3); until then every user brings their own client (US-6.3). |
+| Q-13 | Should Sigillum ship a shared OAuth client ID for personal accounts, so users need no app registration of their own? | **Decided for v0.4.0:** every user brings their own client (US-6.3). A Sigillum-owned public registration for personal Microsoft accounts (device code, no secret) may follow later (§8.8); it would remove the Entra tenant an Outlook.com user must otherwise get through an Azure sign-up, but the project would own the registration and the consent screen users see. Google is less affected: any Google account can create the project and client for free. The client ID stays a spec field, so a later default does not change existing backends. |
 
 Settled: a backend can define several endpoints as a failover group (`spec.smtp.endpoints`).
 
