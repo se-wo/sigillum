@@ -22,10 +22,11 @@ const (
 	// maxRetryAfter caps the endpoint's Retry-After.
 	maxRetryAfter = 10 * time.Minute
 
-	maxResponseBytes = 1 << 20
-	maxCodeLen       = 64
-	maxDescLen       = 300
-	requestTimeout   = 30 * time.Second
+	maxResponseBytes     = 1 << 20
+	maxRefreshTokenBytes = 16 << 10
+	maxCodeLen           = 64
+	maxDescLen           = 300
+	requestTimeout       = 30 * time.Second
 )
 
 // ClientCredentials is a Source for the client credentials grant (RFC 6749
@@ -48,9 +49,6 @@ type ClientCredentials struct {
 
 // Token implements Source.
 func (c *ClientCredentials) Token(ctx context.Context) (Token, error) {
-	if u, err := url.Parse(c.TokenURL); err != nil || u.Scheme != "https" || u.Host == "" {
-		return Token{}, &Error{Permanent: true, Description: "the token URL must be an https URL"}
-	}
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {c.ClientID},
@@ -59,44 +57,54 @@ func (c *ClientCredentials) Token(ctx context.Context) (Token, error) {
 	if len(c.Scopes) > 0 {
 		form.Set("scope", strings.Join(c.Scopes, " "))
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.TokenURL, strings.NewReader(form.Encode()))
+	tok, _, err := post(ctx, c.TokenURL, c.HTTPClient, form, c.now)
+	return tok, err
+}
+
+// post sends a token request and parses the answer. The client is copied
+// so that redirects are never followed: the form carries a secret.
+func post(ctx context.Context, tokenURL string, hc *http.Client, form url.Values, now func() time.Time) (Token, string, error) {
+	if u, err := url.Parse(tokenURL); err != nil || u.Scheme != "https" || u.Host == "" {
+		return Token{}, "", &Error{Permanent: true, Description: "the token URL must be an https URL"}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return Token{}, &Error{Permanent: true, Err: err}
+		return Token{}, "", &Error{Permanent: true, Err: err}
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
 	client := &http.Client{Timeout: requestTimeout}
-	if c.HTTPClient != nil {
-		cp := *c.HTTPClient
+	if hc != nil {
+		cp := *hc
 		client = &cp
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
-	now := time.Now
-	if c.now != nil {
-		now = c.now
+	if now == nil {
+		now = time.Now
 	}
 	// The token's lifetime counts from before the request, so the cached
 	// expiry is never later than the provider's.
 	start := now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return Token{}, &Error{Err: err}
+		return Token{}, "", &Error{Err: err}
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		return Token{}, &Error{Status: resp.StatusCode, Err: err}
+		return Token{}, "", &Error{Status: resp.StatusCode, Err: err}
 	}
 	return parseResponse(resp.StatusCode, resp.Header.Get("Retry-After"), body, start)
 }
 
-// parseResponse turns a token endpoint answer into a Token or an *Error.
-// now is the time the request was sent.
-func parseResponse(status int, retryAfter string, body []byte, now time.Time) (Token, error) {
+// parseResponse turns a token endpoint answer into a Token and the
+// refresh_token it carries (empty if none), or an *Error. now is the time
+// the request was sent.
+func parseResponse(status int, retryAfter string, body []byte, now time.Time) (Token, string, error) {
 	if len(body) > maxResponseBytes {
-		return Token{}, &Error{Status: status, Description: "response larger than 1 MiB"}
+		return Token{}, "", &Error{Status: status, Description: "response larger than 1 MiB"}
 	}
 	if status != http.StatusOK {
 		var r struct {
@@ -114,24 +122,30 @@ func parseResponse(status int, retryAfter string, body []byte, now time.Time) (T
 			// redirect or an unknown path: a configuration problem.
 			e.Permanent = true
 		}
-		return Token{}, e
+		return Token{}, "", e
 	}
 
 	var r struct {
-		AccessToken string    `json:"access_token"`
-		TokenType   string    `json:"token_type"`
-		ExpiresIn   expiresIn `json:"expires_in"`
+		AccessToken  string    `json:"access_token"`
+		TokenType    string    `json:"token_type"`
+		ExpiresIn    expiresIn `json:"expires_in"`
+		RefreshToken string    `json:"refresh_token"`
 	}
 	if err := json.Unmarshal(body, &r); err != nil {
-		return Token{}, &Error{Status: status, Description: "malformed token response"}
+		return Token{}, "", &Error{Status: status, Description: "malformed token response"}
 	}
 	if !strings.EqualFold(r.TokenType, "bearer") {
-		return Token{}, &Error{Status: status, Description: "token_type " + strconv.Quote(printable(r.TokenType, maxCodeLen)) + " is not Bearer"}
+		return Token{}, "", &Error{Status: status, Description: "token_type " + strconv.Quote(printable(r.TokenType, maxCodeLen)) + " is not Bearer"}
 	}
 	// The token ends up in an Authorization header and in SASL XOAUTH2
 	// strings, which use control characters as separators.
 	if !isB64Token(r.AccessToken) {
-		return Token{}, &Error{Status: status, Description: "access_token is missing or not a valid bearer token"}
+		return Token{}, "", &Error{Status: status, Description: "access_token is missing or not a valid bearer token"}
+	}
+	// Refresh tokens are opaque and longer; they only travel in form
+	// bodies and Secrets, but a control character has no place there.
+	if r.RefreshToken != "" && !isVisibleASCII(r.RefreshToken, maxRefreshTokenBytes) {
+		return Token{}, "", &Error{Status: status, Description: "refresh_token is not printable ASCII or too long"}
 	}
 	lifetime := time.Duration(r.ExpiresIn) * time.Second
 	switch {
@@ -140,7 +154,20 @@ func parseResponse(status int, retryAfter string, body []byte, now time.Time) (T
 	case r.ExpiresIn > expiresIn(maxLifetime/time.Second):
 		lifetime = maxLifetime
 	}
-	return Token{AccessToken: r.AccessToken, Expiry: now.Add(lifetime)}, nil
+	return Token{AccessToken: r.AccessToken, Expiry: now.Add(lifetime)}, r.RefreshToken, nil
+}
+
+// isVisibleASCII reports whether s is 1 to max bytes of 0x21-0x7e.
+func isVisibleASCII(s string, max int) bool {
+	if s == "" || len(s) > max {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x21 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // expiresIn accepts a number or a quoted number, as some endpoints send.

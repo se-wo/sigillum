@@ -18,10 +18,13 @@ func FuzzParseResponse(f *testing.F) {
 	f.Add(503, "Wed, 21 Oct 2026 07:28:00 GMT", []byte(`{"error":"temporarily_unavailable"}`))
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	f.Fuzz(func(t *testing.T, status int, retryAfter string, body []byte) {
-		tok, err := parseResponse(status, retryAfter, body, now)
+		tok, refresh, err := parseResponse(status, retryAfter, body, now)
 		if err == nil {
 			if status != 200 || !isB64Token(tok.AccessToken) || strings.ContainsAny(tok.AccessToken, "\x00\x01\r\n ") {
 				t.Fatalf("accepted %q with status %d", tok.AccessToken, status)
+			}
+			if refresh != "" && !isVisibleASCII(refresh, maxRefreshTokenBytes) {
+				t.Fatalf("accepted refresh token %q", refresh)
 			}
 			if !tok.Expiry.After(now) || tok.Expiry.After(now.Add(maxLifetime)) {
 				t.Fatalf("expiry %v out of bounds", tok.Expiry.Sub(now))

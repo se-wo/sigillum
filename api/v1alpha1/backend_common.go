@@ -193,6 +193,30 @@ const (
 	OAuthSecretRefreshTokenKey = "refresh_token"
 	OAuthSecretAccessTokenKey  = "access_token"
 	OAuthSecretExpiresAtKey    = "expires_at"
+
+	// OAuthSeedAnnotation on the token Secret identifies the refresh token
+	// from the credentials Secret the stored one descends from (a hash),
+	// so a new sign-in there replaces the stored chain.
+	OAuthSeedAnnotation = "sigillum.dev/oauth-seed"
+	// OAuthRefreshAtAnnotation is when the controller next refreshes the
+	// access token (RFC 3339): at half its lifetime.
+	OAuthRefreshAtAnnotation = "sigillum.dev/oauth-refresh-at"
+)
+
+// ConditionAuthorized is set on delegated backends (US-6.3): True while the
+// controller holds a refresh token the provider accepts.
+const ConditionAuthorized = "Authorized"
+
+// Condition reasons of delegated backends.
+const (
+	ReasonAuthorized = "Authorized"
+	// ReasonAuthorizationRequired: there is no refresh token, or the
+	// provider rejected it (revoked consent, expiry); a person has to sign
+	// in again.
+	ReasonAuthorizationRequired = "AuthorizationRequired"
+	// ReasonTokenRefreshFailed: the provider could not be reached or
+	// answered with a temporary error; the controller retries.
+	ReasonTokenRefreshFailed = "TokenRefreshFailed"
 )
 
 // SecretKey is a structured reference for the credentials secret keys.

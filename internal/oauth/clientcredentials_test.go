@@ -114,12 +114,12 @@ func TestClientCredentials_Lifetime(t *testing.T) {
 		{`-5`, DefaultLifetime},
 		{`999999999`, maxLifetime},
 	} {
-		tok, err := parseResponse(200, "", []byte(`{"access_token":"a.b-c_d~e+f/g==","token_type":"bearer","expires_in":`+tc.expiresIn+`}`), now)
+		tok, _, err := parseResponse(200, "", []byte(`{"access_token":"a.b-c_d~e+f/g==","token_type":"bearer","expires_in":`+tc.expiresIn+`}`), now)
 		if err != nil || tok.Expiry != now.Add(tc.want) {
 			t.Errorf("expires_in %s: got %v %v, want %v", tc.expiresIn, tok.Expiry.Sub(now), err, tc.want)
 		}
 	}
-	tok, err := parseResponse(200, "", []byte(`{"access_token":"a","token_type":"Bearer"}`), now)
+	tok, _, err := parseResponse(200, "", []byte(`{"access_token":"a","token_type":"Bearer"}`), now)
 	if err != nil || tok.Expiry != now.Add(DefaultLifetime) {
 		t.Errorf("missing expires_in: got %v %v", tok.Expiry.Sub(now), err)
 	}
