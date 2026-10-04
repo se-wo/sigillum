@@ -309,10 +309,10 @@ test/e2e/                      # kind + Mailpit end-to-end suite
 
 Next up: Microsoft 365, Outlook.com and Gmail without passwords (v0.4.0,
 before Microsoft switches off SMTP AUTH with passwords and app passwords at
-the end of December 2026): a Microsoft Graph driver and a Gmail API driver
-for company and personal accounts (one-time sign-in for personal
-accounts), OAuth (XOAUTH2) for the SMTP driver, a sender allowlist per
-backend and a daily limit. Then install without
+the end of December 2026): a Microsoft Graph driver for Microsoft 365, OAuth
+(XOAUTH2) for the SMTP driver with a one-time sign-in for Outlook.com, a
+Gmail API driver for Google Workspace and personal Gmail, a sender
+allowlist per backend and a daily limit. Then install without
 cert-manager, preflight and a `kubectl` plugin (including
 `credential create` / `rotate`), SMTPS on port 465, an OpenAPI
 description, dashboards and alerts (v0.5.0). Sigillum stays below 1.0
