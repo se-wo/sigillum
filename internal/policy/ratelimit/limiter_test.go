@@ -205,3 +205,31 @@ func TestMemoryLimiter_ExpiredHitsDoNotCount(t *testing.T) {
 	// Not swept again before +70m30s, but both hits expired at +70m.
 	mustAllow(t, l, 70*time.Minute, Limits{PerDay: 2})
 }
+
+// A trim that empties the key deletes it with its expiry; the hit that
+// recreates it must set an expiry again, even under a day-long one read
+// before the trim.
+func TestRedisLimiter_RecreatedKeyGetsExpiry(t *testing.T) {
+	l, mr := newRedisLimiter(t)
+	ctx := context.Background()
+	for _, step := range []time.Duration{0, 20 * time.Hour} {
+		mr.FastForward(step)
+		mr.SetTime(base.Add(step))
+		if ok, _, err := l.Allow(ctx, "ns/p", Limits{PerDay: 5}); !ok || err != nil {
+			t.Fatalf("want allowed, got ok=%v err=%v", ok, err)
+		}
+	}
+	// Refunding the newest hit leaves the one at +0h under the expiry the
+	// refunded hit set (+44h).
+	if err := l.Refund(ctx, "ns/p"); err != nil {
+		t.Fatal(err)
+	}
+	mr.FastForward(5 * time.Hour)
+	mr.SetTime(base.Add(25 * time.Hour))
+	if ok, _, err := l.Allow(ctx, "ns/p", Limits{PerHour: 5}); !ok || err != nil {
+		t.Fatalf("want allowed, got ok=%v err=%v", ok, err)
+	}
+	if ttl := mr.TTL("sigillum:rl:ns/p"); ttl <= 0 || ttl > time.Hour {
+		t.Fatalf("recreated key must expire within an hour, ttl=%v", ttl)
+	}
+}

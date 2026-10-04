@@ -57,8 +57,10 @@ for _, w in ipairs(windows) do
     local from = string.format('(%d', now - size)
     local n = redis.call('ZCOUNT', KEYS[1], from, '+inf')
     if n >= limit then
-      -- The window has room again once its hit at rank n - limit has left.
-      local hit = redis.call('ZRANGEBYSCORE', KEYS[1], from, '+inf', 'WITHSCORES', 'LIMIT', n - limit, 1)
+      -- The window has room again once its limit-th newest hit has left.
+      -- Every window is a suffix of the set, so that hit is the one at
+      -- rank -limit (O(log N), unlike an offset into the window).
+      local hit = redis.call('ZRANGE', KEYS[1], -limit, -limit, 'WITHSCORES')
       local wait = tonumber(hit[2]) + size - now
       if wait > retry then retry = wait end
     end
@@ -69,7 +71,9 @@ if retry >= 0 then
 end
 
 redis.call('ZADD', KEYS[1], now, ARGV[4])
-if ttl < keep then redis.call('PEXPIRE', KEYS[1], keep) end
+-- Read the expiry again: if the trim emptied the key, Redis deleted it with
+-- its expiry and ZADD created it without one.
+if redis.call('PTTL', KEYS[1]) < keep then redis.call('PEXPIRE', KEYS[1], keep) end
 return {1, 0}
 `)
 
