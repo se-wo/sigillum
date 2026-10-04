@@ -375,3 +375,112 @@ func TestIntegration_ServiceAccountWatchIsMetadataOnly(t *testing.T) {
 	}
 	waitReason(sigv1.ReasonBringYourOwnHash)
 }
+
+// The guard's second shape: the OAuth token Secret of a delegated backend
+// (US-6.3), owned by the backend, also in the release namespace.
+func TestIntegration_OAuthTokenSecretGuard(t *testing.T) {
+	ctx := context.Background()
+	cc := controllerClient(t)
+	ensureNamespace(t, testReleaseNamespace)
+	guard := credential.Guard{Name: "sigillum-credential-guard", ControllerUsername: testControllerUsername, Exclusions: testExclusions}
+	installGuard(t, guard, cc)
+
+	ns := "oauth-guard-it"
+	ensureNamespace(t, ns)
+	ensureNamespace(t, "kube-oauth-guard-it")
+	smtp := &sigv1.SMTPBackendSpec{Endpoints: []sigv1.SMTPEndpoint{{Host: "mx", Port: 587, TLS: sigv1.SMTPTLSStartTLS}}, AuthType: sigv1.SMTPAuthNone}
+	mb := &sigv1.MailBackend{ObjectMeta: metav1.ObjectMeta{Name: "outlook", Namespace: ns},
+		Spec: sigv1.BackendSpec{Type: sigv1.BackendSMTP, SMTP: smtp}}
+	cmb := &sigv1.ClusterMailBackend{ObjectMeta: metav1.ObjectMeta{Name: "oauth-guard-it"},
+		Spec: sigv1.BackendSpec{Type: sigv1.BackendSMTP, SMTP: smtp}}
+	for _, o := range []client.Object{mb, cmb} {
+		if err := testClient.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tokenSecret := func(name, namespace string, owner client.Object, kind string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: namespace,
+				Labels:      map[string]string{sigv1.OAuthTokenLabel: owner.GetName()},
+				Annotations: map[string]string{sigv1.OAuthTokenUIDAnnotation: string(owner.GetUID())},
+				OwnerReferences: []metav1.OwnerReference{{APIVersion: sigv1.GroupVersion.String(), Kind: kind,
+					Name: owner.GetName(), UID: owner.GetUID(), Controller: ptr.To(true)}},
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				sigv1.OAuthSecretRefreshTokenKey: []byte("r"),
+				sigv1.OAuthSecretAccessTokenKey:  []byte("a"),
+				sigv1.OAuthSecretExpiresAtKey:    []byte("2026-01-01T00:00:00Z"),
+			},
+		}
+	}
+
+	// Allowed: a MailBackend's token Secret in its namespace, a
+	// ClusterMailBackend's in the release namespace, and updating them.
+	own := tokenSecret("sigillum-oauth-outlook", ns, mb, "MailBackend")
+	if err := cc.Create(ctx, own); err != nil {
+		t.Fatalf("guard must allow a backend's token Secret: %v", err)
+	}
+	own.Data[sigv1.OAuthSecretAccessTokenKey] = []byte("b")
+	if err := cc.Update(ctx, own); err != nil {
+		t.Fatalf("guard must allow updating the token Secret: %v", err)
+	}
+	if err := cc.Create(ctx, tokenSecret("sigillum-oauth-cluster", testReleaseNamespace, cmb, "ClusterMailBackend")); err != nil {
+		t.Fatalf("guard must allow a token Secret in the release namespace: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		secret func() *corev1.Secret
+		want   string
+	}{
+		{"excluded namespace", func() *corev1.Secret {
+			return tokenSecret("x", "kube-oauth-guard-it", mb, "MailBackend")
+		}, "excluded"},
+		{"credential keys", func() *corev1.Secret {
+			s := tokenSecret("x", ns, mb, "MailBackend")
+			s.Data[sigv1.CredentialSecretPasswordKey] = []byte("p")
+			return s
+		}, "only write the keys"},
+		{"owned by a MailCredential", func() *corev1.Secret {
+			s := tokenSecret("x", ns, mb, "MailBackend")
+			s.OwnerReferences[0].Kind = "MailCredential"
+			return s
+		}, "controlled by"},
+		{"other UID", func() *corev1.Secret {
+			s := tokenSecret("x", ns, mb, "MailBackend")
+			s.Annotations[sigv1.OAuthTokenUIDAnnotation] = string(cmb.UID)
+			return s
+		}, "controlled by"},
+		{"both shapes", func() *corev1.Secret {
+			s := tokenSecret("x", ns, mb, "MailBackend")
+			s.Labels[sigv1.CredentialLabel] = "app"
+			s.Annotations[sigv1.CredentialUIDAnnotation] = "uid"
+			return s
+		}, "may only write Secrets labelled"},
+		{"service account token", func() *corev1.Secret {
+			s := tokenSecret("x", ns, mb, "MailBackend")
+			s.Type = corev1.SecretTypeServiceAccountToken
+			s.Annotations[corev1.ServiceAccountNameKey] = "default"
+			s.Data = nil
+			return s
+		}, "type Opaque"},
+	} {
+		if err := cc.Create(ctx, tc.secret()); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: want denial containing %q, got %v", tc.name, tc.want, err)
+		}
+	}
+
+	// Denied: taking over the relay credentials in the release namespace,
+	// or a generated credential Secret, by relabelling it as a token Secret.
+	relay := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "relay-credentials", Namespace: testReleaseNamespace}}
+	if err := testClient.Create(ctx, relay); err != nil {
+		t.Fatal(err)
+	}
+	takeover := tokenSecret("relay-credentials", testReleaseNamespace, cmb, "ClusterMailBackend")
+	takeover.ResourceVersion = relay.ResourceVersion
+	if err := cc.Update(ctx, takeover); err == nil || !strings.Contains(err.Error(), "same MailCredential or backend") {
+		t.Fatalf("guard must deny taking over the relay credentials, got %v", err)
+	}
+}

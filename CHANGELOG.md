@@ -18,6 +18,13 @@ the version being prepared in the same pull request as the change.
   `kubectl apply --server-side -f charts/sigillum/crds/`. The 0.4.0 pods
   refuse to start on 0.3 CRDs, which would drop `messagesPerDay` without
   an error and leave the policy without a daily cap.
+- The credential Secret guard changes (it also admits the OAuth token
+  Secrets of delegated backends). Upgrade the chart and the controller
+  together with `helm upgrade`. While the old guard and a new
+  controller, or the new guard and an old controller, meet during the
+  rollout, that controller reports the guard as changed and writes no
+  generated credential Secrets (`SecretsManaged=False`) until the other
+  side is updated; it re-checks every 30 s.
 
 ### Added
 
@@ -32,6 +39,12 @@ the version being prepared in the same pull request as the change.
 - `Retry-After` (REST) is the wait until every full window has room
   again, not only the shortest one; a caller retrying then is no longer
   rejected by the hourly or daily window right after.
+- Credential Secret guard: a second allowed shape for the OAuth token
+  Secrets of delegated backends (label `sigillum.dev/oauth-token`,
+  annotation `sigillum.dev/oauth-token-uid`, controlled by the
+  `MailBackend` or `ClusterMailBackend`, only the keys `refresh_token`,
+  `access_token` and `expires_at`), also in the release namespace. Nothing
+  writes such Secrets yet (US-6.3).
 
 ### Fixed
 
