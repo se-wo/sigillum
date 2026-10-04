@@ -23,7 +23,8 @@ runs:
       env:
         COSIGN_VERSION: ${{ inputs.version }}
         COSIGN_SHA256: ${{ inputs.sha256 }}
-      run: |
+      # Writes GITHUB_PATH, but only a fixed directory under RUNNER_TEMP.
+      run: | # zizmor: ignore[github-env]
         set -euo pipefail
         dir="$RUNNER_TEMP/cosign-bin"
         mkdir -p "$dir"

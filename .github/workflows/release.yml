@@ -78,9 +78,11 @@ jobs:
           if [[ "$version" != *-* ]]; then
             tags="$tags,$IMAGE:${version%.*},$IMAGE:latest"
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tags=$tags" >> "$GITHUB_OUTPUT"
-          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$version"
+            echo "tags=$tags"
+            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
           echo "version=$version tags=$tags"
 
       - name: set up buildx
