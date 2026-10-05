@@ -81,3 +81,23 @@ func FuzzWriteQuotedPrintable(f *testing.F) {
 		}
 	})
 }
+
+// FuzzDescribeXOAUTH2Error checks that whatever the relay sends as its
+// XOAUTH2 error challenge ends up in the error message as printable ASCII
+// only, so it cannot break a log line or the SMTP reply to the client.
+func FuzzDescribeXOAUTH2Error(f *testing.F) {
+	f.Add([]byte(`{"status":"401","schemes":"bearer","scope":"https://outlook.office.com/SMTP.Send"}`))
+	f.Add([]byte(`{"status":"401\r\n550 x","scope":"\u0000ä"}`))
+	f.Add([]byte(`{"status":400}`))
+	f.Fuzz(func(t *testing.T, challenge []byte) {
+		s := describeXOAUTH2Error(challenge)
+		for i := 0; i < len(s); i++ {
+			if s[i] < 0x20 || s[i] > 0x7e {
+				t.Fatalf("non-printable byte %#x in %q", s[i], s)
+			}
+		}
+		if len(s) > 300 {
+			t.Fatalf("description of %d bytes", len(s))
+		}
+	})
+}

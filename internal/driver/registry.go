@@ -3,6 +3,8 @@ package driver
 import (
 	"fmt"
 	"sync"
+
+	"github.com/se-wo/sigillum/internal/oauth"
 )
 
 // Config is the parameter bundle every Factory accepts. Backend-type-specific
@@ -28,11 +30,15 @@ type GraphConfig struct {
 // the referenced credentials secret.
 type SMTPConfig struct {
 	Endpoints []SMTPEndpoint
-	AuthType  string // PLAIN | LOGIN | CRAM-MD5 | NONE
-	Username  string
-	Password  string
-	Timeout   int32
-	Helo      string
+	AuthType  string // PLAIN | LOGIN | CRAM-MD5 | XOAUTH2 | NONE
+	// Username is the SASL user; for XOAUTH2 the mailbox address.
+	Username string
+	Password string
+	// Tokens supplies the access token for XOAUTH2. The driver asks it
+	// once per send and per health check, so it should cache.
+	Tokens  oauth.Source
+	Timeout int32
+	Helo    string
 }
 
 // SMTPEndpoint mirrors the API type but is local to driver to avoid a hard
