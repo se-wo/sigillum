@@ -199,9 +199,19 @@ spec:
                           permissions SMTP.Send and offline_access.
                         minLength: 1
                         type: string
+                      flow:
+                        default: delegated
+                        description: |-
+                          Flow is delegated (default) or clientCredentials (app-only; needs
+                          the tenant and a client_secret in the credentials Secret).
+                        enum:
+                        - delegated
+                        - clientCredentials
+                        type: string
                       mailbox:
                         description: |-
-                          Mailbox is the address that signed in; it is the SASL user. Without
+                          Mailbox is the address that signed in, or with clientCredentials the
+                          mailbox the application sends as; it is the SASL user. Without
                           spec.allowedSenders the backend sends only as this address.
                         maxLength: 320
                         minLength: 3
