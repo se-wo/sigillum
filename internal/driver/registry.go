@@ -12,6 +12,16 @@ type Config struct {
 	Type       Type
 	BackendKey string // namespace/name or /name (for cluster-scoped) — used in metric labels
 	SMTP       *SMTPConfig
+	Graph      *GraphConfig
+}
+
+// GraphConfig is the parsed shape of a microsoftGraph backend: an Entra ID
+// application with the Mail.Send application permission (app-only, client
+// credentials).
+type GraphConfig struct {
+	TenantID     string
+	ClientID     string
+	ClientSecret string
 }
 
 // SMTPConfig is the parsed shape of MailBackend.spec.smtp resolved against

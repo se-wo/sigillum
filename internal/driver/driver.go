@@ -115,4 +115,11 @@ var (
 
 	// ErrUpstreamPermanent maps to HTTP 502 with non-retryable semantics.
 	ErrUpstreamPermanent = errors.New("upstream permanent error")
+
+	// ErrRecipientNotInEnvelope marks a message whose To or Cc header names
+	// an address that is not an envelope recipient. API backends (Graph,
+	// Gmail) deliver to the header addresses, while the policy checked the
+	// envelope, so such a message is refused (SPEC US-6.1). It is always
+	// wrapped together with ErrUpstreamPermanent.
+	ErrRecipientNotInEnvelope = errors.New("header recipient is not an envelope recipient")
 )
