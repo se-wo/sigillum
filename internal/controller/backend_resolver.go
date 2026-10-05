@@ -60,34 +60,59 @@ func ResolveBackendConfig(
 			if spec.SMTP.CredentialsRef == nil {
 				return cfg, fmt.Errorf("spec.smtp.credentialsRef is required when authType != NONE")
 			}
-			ns := spec.SMTP.CredentialsRef.Namespace
-			if secretFallbackNs != "" {
-				// A namespaced MailBackend may only use Secrets of its own
-				// namespace. The webhook enforces this too, but it can be
-				// disabled; without this check a tenant could point a
-				// MailBackend at the relay credentials in the release
-				// namespace and send them to an endpoint of its choice.
-				if ns != "" && ns != secretFallbackNs {
-					return cfg, fmt.Errorf("spec.smtp.credentialsRef.namespace %q must be empty or the backend's own namespace %q", ns, secretFallbackNs)
-				}
-				ns = secretFallbackNs
-			}
-			if ns == "" {
-				return cfg, fmt.Errorf("spec.smtp.credentialsRef.namespace must be set on cluster-scoped backends")
-			}
-			var sec corev1.Secret
-			if err := c.Get(ctx, types.NamespacedName{Name: spec.SMTP.CredentialsRef.Name, Namespace: ns}, &sec); err != nil {
-				if apierrors.IsNotFound(err) {
-					return cfg, fmt.Errorf("credentials secret %s/%s not found", ns, spec.SMTP.CredentialsRef.Name)
-				}
-				return cfg, fmt.Errorf("failed to load credentials secret %s/%s: %w", ns, spec.SMTP.CredentialsRef.Name, err)
+			sec, err := credentialsSecret(ctx, c, "spec.smtp", *spec.SMTP.CredentialsRef, secretFallbackNs)
+			if err != nil {
+				return cfg, err
 			}
 			smtpCfg.Username = string(sec.Data[sigv1.SMTPSecretUsernameKey])
 			smtpCfg.Password = string(sec.Data[sigv1.SMTPSecretPasswordKey])
 		}
 		cfg.SMTP = smtpCfg
+	case sigv1.BackendMicrosoftGraph:
+		g := spec.MicrosoftGraph
+		if g == nil {
+			return cfg, fmt.Errorf("spec.microsoftGraph is required when type=microsoftGraph")
+		}
+		sec, err := credentialsSecret(ctx, c, "spec.microsoftGraph", g.CredentialsRef, secretFallbackNs)
+		if err != nil {
+			return cfg, err
+		}
+		secret := string(sec.Data[sigv1.GraphSecretClientSecretKey])
+		if secret == "" {
+			return cfg, fmt.Errorf("credentials secret %s/%s has no key %s", sec.Namespace, sec.Name, sigv1.GraphSecretClientSecretKey)
+		}
+		cfg.Graph = &driver.GraphConfig{TenantID: g.TenantID, ClientID: g.ClientID, ClientSecret: secret}
 	default:
 		return cfg, fmt.Errorf("backend type %q is not implemented", spec.Type)
 	}
 	return cfg, nil
+}
+
+// credentialsSecret loads a backend's credentials Secret. secretFallbackNs
+// is the namespace of a namespaced MailBackend, empty for a
+// ClusterMailBackend; field names the spec block in errors.
+func credentialsSecret(ctx context.Context, c client.Reader, field string, ref sigv1.SecretReference, secretFallbackNs string) (*corev1.Secret, error) {
+	ns := ref.Namespace
+	if secretFallbackNs != "" {
+		// A namespaced MailBackend may only use Secrets of its own
+		// namespace. The webhook enforces this too, but it can be
+		// disabled; without this check a tenant could point a
+		// MailBackend at the relay credentials in the release
+		// namespace and send them to an endpoint of its choice.
+		if ns != "" && ns != secretFallbackNs {
+			return nil, fmt.Errorf("%s.credentialsRef.namespace %q must be empty or the backend's own namespace %q", field, ns, secretFallbackNs)
+		}
+		ns = secretFallbackNs
+	}
+	if ns == "" {
+		return nil, fmt.Errorf("%s.credentialsRef.namespace must be set on cluster-scoped backends", field)
+	}
+	var sec corev1.Secret
+	if err := c.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: ns}, &sec); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("credentials secret %s/%s not found", ns, ref.Name)
+		}
+		return nil, fmt.Errorf("failed to load credentials secret %s/%s: %w", ns, ref.Name, err)
+	}
+	return &sec, nil
 }

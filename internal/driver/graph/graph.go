@@ -43,9 +43,13 @@ type environment struct {
 	httpClient *http.Client
 }
 
-// production is the environment of the registered factory (wired up with
-// the microsoftGraph backend type, roadmap row 4b).
 var production = environment{baseURL: BaseURL, tokenURL: oauth.MicrosoftTokenURL}
+
+func init() {
+	driver.Register(driver.TypeMicrosoftGraph, func(cfg driver.Config) (driver.Driver, error) {
+		return newDriver(cfg, production)
+	})
+}
 
 // Driver sends through Microsoft Graph. Drivers are built per send; the
 // access token lives in a cache shared by every Driver of the same

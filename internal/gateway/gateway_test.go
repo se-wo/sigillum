@@ -461,3 +461,23 @@ func TestSend_BackendAllowedSendersBeforeCredentials(t *testing.T) {
 		t.Fatalf("allowed sender: want backend_not_ready, got %+v", res)
 	}
 }
+
+// An API backend refuses a header recipient outside the envelope; that is a
+// policy refusal, not an upstream failure (SPEC US-6.1).
+func TestSend_HeaderRecipientOutsideEnvelope(t *testing.T) {
+	d := &fakeDriver{err: fmt.Errorf("%w: %w: To evil@example.net", driver.ErrUpstreamPermanent, driver.ErrRecipientNotInEnvelope)}
+	g, rec := newGateway(t, d, testPolicy(), readyBackend("relay", true))
+	lim := &countingLimiter{}
+	g.Limiter = lim
+	res := g.Send(context.Background(), request("app@team.example"))
+	if res.Status != StatusDenied || res.DenyReason != policy.DenyRecipientBlocked || res.Backend != "/relay" ||
+		!strings.Contains(res.Detail, "evil@example.net") || strings.Contains(res.Detail, "upstream permanent") {
+		t.Fatalf("want recipient_not_allowed naming the address, got %+v", res)
+	}
+	if ev := rec.last(t); ev.Reason != "recipient_not_allowed" {
+		t.Fatalf("audit reason %q", ev.Reason)
+	}
+	if lim.hits != 0 {
+		t.Fatal("a refused message must not use up the rate limit")
+	}
+}

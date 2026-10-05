@@ -17,9 +17,10 @@ before forwarding through a `MailBackend` (SMTP) relay.
   address allowlists and domain denylists, size and recipient limits,
   sliding-window rate limits per minute, hour and day (in-memory or Redis
   for multi-replica deployments)
-- **Drivers:** SMTP (STARTTLS, PLAIN/LOGIN/CRAM-MD5). Microsoft Graph and
-  the Gmail API are planned for v0.4.0; SendGrid is a reserved enum value,
-  not implemented.
+- **Drivers:** SMTP (STARTTLS, PLAIN/LOGIN/CRAM-MD5); Microsoft Graph
+  (app-only `sendMail`, v0.4.0) for Microsoft 365 without SMTP AUTH. The
+  Gmail API is planned for v0.4.0; SendGrid is a reserved enum value, not
+  implemented.
 - **Observability:** structured slog (JSON), separate audit stream,
   Prometheus metrics with optional `ServiceMonitor`, OpenTelemetry tracing
 
@@ -295,7 +296,7 @@ cmd/sigillum/                  # single entrypoint, --mode=api|controller|smtp
 api/v1alpha1/                  # CRD types + generated deepcopy
 internal/driver/               # Driver interface + registry
 internal/driver/smtp/          # SMTP driver (STARTTLS, PLAIN/LOGIN/CRAM-MD5, MIME)
-internal/driver/graph/         # Microsoft Graph driver, app-only sendMail (v0.4.0, not registered yet)
+internal/driver/graph/         # Microsoft Graph driver, app-only sendMail (v0.4.0)
 internal/oauth/                # OAuth 2.0 token sources and cache for API backends (v0.4.0, not wired yet)
 internal/policy/               # priority+tiebreak engine, sliding-window rate limit (memory, Redis)
 internal/credential/           # MailCredential usernames, hashing, verification, Secret guard
@@ -317,10 +318,10 @@ test/e2e/                      # kind + Mailpit end-to-end suite
 
 Next up: Microsoft 365, Outlook.com and Gmail without passwords (v0.4.0,
 before Microsoft switches off SMTP AUTH with passwords and app passwords at
-the end of December 2026): a Microsoft Graph driver for Microsoft 365, OAuth
-(XOAUTH2) for the SMTP driver with a one-time sign-in for Outlook.com, a
-Gmail API driver for Google Workspace and personal Gmail, a sender
-allowlist per backend and a daily limit. Then install without
+the end of December 2026): OAuth (XOAUTH2) for the SMTP driver with a
+one-time sign-in for Outlook.com and a Gmail API driver for Google
+Workspace and personal Gmail. The daily limit, the sender allowlist per
+backend and the Microsoft Graph driver for Microsoft 365 are done. Then install without
 cert-manager, preflight and a `kubectl` plugin (including
 `credential create` / `rotate`), SMTPS on port 465, an OpenAPI
 description, dashboards and alerts (v0.5.0). Sigillum stays below 1.0

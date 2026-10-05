@@ -8,14 +8,16 @@ the Secret out of band (External Secrets, Sealed Secrets, `kubectl create
 secret`), never in Git.
 
 The SMTP driver authenticates with `PLAIN`, `LOGIN` or `CRAM-MD5`, i.e. with
-a static secret. A Microsoft Graph driver, a Gmail API driver and OAuth
-(`XOAUTH2`) for the SMTP driver are planned for v0.4.0 (SPEC US-6.1,
-US-6.2). The table shows what still works with a static secret, as of
+a static secret. Microsoft 365 work accounts can use the Microsoft Graph
+driver instead (v0.4.0, [`microsoft-365-graph.yaml`](microsoft-365-graph.yaml)).
+A Gmail API driver and OAuth (`XOAUTH2`) for the SMTP driver are planned for
+v0.4.0 (SPEC US-6.1, US-6.2). The table shows what still works with a static secret, as of
 September 2026.
 
 | Provider | File | Endpoint | Auth | Password login still possible? |
 |---|---|---|---|---|
 | Microsoft 365, SMTP AUTH | [`microsoft-365.yaml`](microsoft-365.yaml) | `smtp.office365.com:587` | `LOGIN`, mailbox password | **Being retired.** Works while SMTP AUTH is enabled for tenant and mailbox. Disabled by default for existing tenants at the end of December 2026 (admins can re-enable), not available to new tenants, final removal date announced in H2 2027. App passwords are no way out: they are Basic auth too and stop with it (personal Microsoft accounts no longer have them). Stopgap only. |
+| Microsoft 365, Microsoft Graph (v0.4.0) | [`microsoft-365-graph.yaml`](microsoft-365-graph.yaml) | `graph.microsoft.com` (`sendMail`) | Entra app, client secret, `Mail.Send` scoped with RBAC for Applications | Not needed: no SMTP AUTH, no mailbox password. **Recommended for work accounts.** Up to 4 MB per message. Rotate the client secret before it expires (≤ 24 months). |
 | Microsoft 365, relay connector | [`microsoft-365-connector.yaml`](microsoft-365-connector.yaml) | `<tenant>.mail.protection.outlook.com:25` | `NONE`, inbound connector by static egress IP | Not needed. Requires a static egress IP and outbound port 25. |
 | Azure Communication Services | [`azure-communication-services.yaml`](azure-communication-services.yaml) | `smtp.azurecomm.net:587` | `LOGIN`, Entra app + client secret | Yes: a client secret, not a mailbox password. Rotate before it expires (≤ 24 months). |
 | Microsoft 365 High Volume Email | [`microsoft-365-hve.yaml`](microsoft-365-hve.yaml) | `smtp-hve.office365.com:587` | `LOGIN`, HVE account | Yes, until September 2028, for **internal recipients only**. |
@@ -30,11 +32,11 @@ September 2026.
 For a personal Outlook.com account there is no way to send through
 Sigillum until v0.4.0; a personal Gmail account works with an app password.
 
-For Microsoft 365 today: use the relay connector if you have a static
-egress IP, Azure Communication Services if you do not, and HVE for purely
-internal mail. Keep SMTP AUTH with a mailbox password or app password only
-as a bridge until the Graph driver and `XOAUTH2` (v0.4.0), and no later than
-the end of December 2026.
+For Microsoft 365: use the Graph driver (v0.4.0). Without it, use the relay
+connector if you have a static egress IP, Azure Communication Services if
+you do not, and HVE for purely internal mail. Keep SMTP AUTH with a mailbox
+password or app password only as a bridge, and no later than the end of
+December 2026.
 
 Provider rules change; check the provider's current documentation before
 relying on a date above.

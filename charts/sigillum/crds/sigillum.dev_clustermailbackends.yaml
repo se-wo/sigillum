@@ -79,6 +79,39 @@ spec:
                     minimum: 10
                     type: integer
                 type: object
+              microsoftGraph:
+                description: MicrosoftGraph is required when type == microsoftGraph.
+                properties:
+                  clientID:
+                    description: ClientID is the application (client) ID of the app
+                      registration.
+                    minLength: 1
+                    type: string
+                  credentialsRef:
+                    description: |-
+                      CredentialsRef points at the Secret holding the client secret under
+                      the key client_secret.
+                    properties:
+                      name:
+                        minLength: 1
+                        type: string
+                      namespace:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  tenantID:
+                    description: |-
+                      TenantID is the directory (tenant) ID or a verified domain of the
+                      tenant, in lower case.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - clientID
+                - credentialsRef
+                - tenantID
+                type: object
               smtp:
                 description: SMTP is required when type == smtp.
                 properties:
