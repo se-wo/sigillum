@@ -337,6 +337,61 @@ func TestChartRequiresKubernetes132(t *testing.T) {
 	}
 }
 
+// #40: without cert-manager the chart refuses to install a webhook whose
+// serving Secret is missing, but only with a cluster connection (lookup).
+// helm template, and GitOps tools that render with it, must keep working,
+// and the controller must wait for the Secret instead of crash-looping.
+func TestChartWebhookCertificate(t *testing.T) {
+	objs := render(t) // defaults: webhook on, no cert-manager, no cluster
+	if find(objs, "ValidatingWebhookConfiguration", "") == nil {
+		t.Fatal("ValidatingWebhookConfiguration not rendered")
+	}
+	var d appsv1.Deployment
+	into(t, find(objs, "Deployment", "t-sigillum-controller"), &d)
+	found := false
+	for _, v := range d.Spec.Template.Spec.Volumes {
+		if v.Name == "webhook-tls" {
+			found = true
+			if v.Secret == nil || (v.Secret.Optional != nil && *v.Secret.Optional) {
+				t.Fatalf("webhook-tls must be a required Secret volume, got %+v", v.VolumeSource)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("webhook-tls volume missing")
+	}
+
+	// The API server must trust the serving certificate's issuer.
+	caBundles := func(objs []unstructured.Unstructured) []string {
+		var vwc admv1.ValidatingWebhookConfiguration
+		into(t, find(objs, "ValidatingWebhookConfiguration", ""), &vwc)
+		var out []string
+		for _, w := range vwc.Webhooks {
+			out = append(out, string(w.ClientConfig.CABundle))
+		}
+		return out
+	}
+	for _, ca := range caBundles(render(t, "--set", "webhook.certificate.caBundle=Zm9v")) {
+		if ca != "foo" {
+			t.Fatalf("webhook.certificate.caBundle must be set on every webhook, got %q", ca)
+		}
+	}
+
+	objs = render(t, "--set", "webhook.certificate.useCertManager=true", "--set", "webhook.certificate.caBundle=Zm9v")
+	if find(objs, "Certificate", "") == nil {
+		t.Fatal("useCertManager=true must render a Certificate")
+	}
+	vwc := find(objs, "ValidatingWebhookConfiguration", "")
+	if vwc.GetAnnotations()["cert-manager.io/inject-ca-from"] == "" {
+		t.Fatal("useCertManager=true must annotate the webhook for CA injection")
+	}
+	for _, ca := range caBundles(objs) {
+		if ca != "" {
+			t.Fatalf("with cert-manager the caBundle is injected, not rendered; got %q", ca)
+		}
+	}
+}
+
 // Review of #20: values the controller would refuse, or silently misread,
 // fail the render instead.
 func TestChartRejectsInvalidCredentialValues(t *testing.T) {

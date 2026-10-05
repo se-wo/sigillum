@@ -69,6 +69,19 @@ the version being prepared in the same pull request as the change.
 
 ### Changed
 
+- Chart: `helm install` and `helm upgrade` fail with an explanation when
+  the admission webhook is enabled (the default) without cert-manager
+  (`webhook.certificate.useCertManager=false`, the default) and the
+  serving-certificate Secret does not exist, or nothing names the CA that
+  issued it. Before, the release installed "successfully", the controller
+  crash-looped, and the webhook (`failurePolicy: Fail`) rejected every
+  Sigillum resource in the cluster. Without cert-manager the chart now sets
+  the webhook's `caBundle` from the new `webhook.certificate.caBundle`, else
+  from `ca.crt` in the Secret, else keeps the one already on the object.
+  The checks need a cluster connection, so `helm template` skips them
+  (GitOps renders without cert-manager set `webhook.certificate.caBundle`);
+  the NOTES warn whenever cert-manager is off, and the controller waits for
+  a missing Secret instead of crash-looping (#40).
 - REST: unknown fields in the JSON body (or the multipart `data` part)
   answer `400 invalid-payload` naming the field, with a hint for common
   slips (`did you mean body.text?`), and a message needs a non-blank

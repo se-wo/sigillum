@@ -37,6 +37,14 @@ without STARTTLS and may cross the cluster network unencrypted. Only do this
 behind mesh mTLS.
 {{- end }}
 {{- end }}
+{{- if and .Values.controller.enabled .Values.webhook.enabled (not .Values.webhook.certificate.useCertManager) }}
+
+WARNING: webhook.certificate.useCertManager=false: the controller serves the
+admission webhook with Secret {{ .Release.Namespace }}/{{ include "sigillum.webhook.secretName" . }} (tls.crt, tls.key), and
+the API server trusts the CA from webhook.certificate.caBundle or the
+Secret's ca.crt. Renew the certificate before it expires, or the webhook
+(failurePolicy {{ .Values.webhook.failurePolicy }}) rejects changes to every Sigillum resource.
+{{- end }}
 {{- if and (eq .Values.rateLimit.backend "redis") .Values.rateLimit.failOpen }}
 
 WARNING: rateLimit.failOpen=true admits every message while Redis is

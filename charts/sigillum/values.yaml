@@ -179,7 +179,13 @@ credentials:
 
 ## Validating webhook ##
 # The chart can either rely on cert-manager to provision the serving cert
-# (recommended) or accept an externally-provided secret with tls.crt/tls.key.
+# (recommended) or accept an externally-provided secret with tls.crt/tls.key
+# plus the issuing CA (ca.crt in the secret, or certificate.caBundle).
+# Without either, helm install/upgrade fails: the webhook (failurePolicy
+# Fail) would reject every Sigillum resource. Clusters without cert-manager
+# can set enabled=false; the controller and the gateway apply the same rules
+# then. (The check needs a cluster connection; helm template skips it, so
+# GitOps renders without cert-manager must set certificate.caBundle.)
 webhook:
   enabled: true
   failurePolicy: Fail
@@ -190,6 +196,10 @@ webhook:
     useCertManager: false
     issuerName: sigillum-selfsigned
     secretName: sigillum-webhook-tls
+    # useCertManager=false only: base64-encoded PEM of the CA that issued the
+    # serving certificate (for a self-signed one, tls.crt itself), so the API
+    # server can trust the webhook. Empty: ca.crt of the secret is used.
+    caBundle: ""
     duration: 8760h
     renewBefore: 720h
 
