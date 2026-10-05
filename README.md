@@ -295,6 +295,7 @@ cmd/sigillum/                  # single entrypoint, --mode=api|controller|smtp
 api/v1alpha1/                  # CRD types + generated deepcopy
 internal/driver/               # Driver interface + registry
 internal/driver/smtp/          # SMTP driver (STARTTLS, PLAIN/LOGIN/CRAM-MD5, MIME)
+internal/driver/graph/         # Microsoft Graph driver, app-only sendMail (v0.4.0, not registered yet)
 internal/oauth/                # OAuth 2.0 token sources and cache for API backends (v0.4.0, not wired yet)
 internal/policy/               # priority+tiebreak engine, sliding-window rate limit (memory, Redis)
 internal/credential/           # MailCredential usernames, hashing, verification, Secret guard
