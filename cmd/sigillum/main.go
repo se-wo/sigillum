@@ -18,6 +18,9 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "oauth" {
+		os.Exit(runOAuth(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	mode, showVersion := parseEntrypointArgs(os.Args[1:])
 
 	if showVersion {

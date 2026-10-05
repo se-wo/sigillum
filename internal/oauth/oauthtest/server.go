@@ -4,6 +4,8 @@
 package oauthtest
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -33,6 +35,18 @@ type Server struct {
 	failure  *failure
 	requests int
 	last     url.Values
+
+	authCode, challenge, redirectURI string
+}
+
+// ExpectAuthCode makes the server redeem code once for the authorization
+// code grant, if the code_verifier matches challenge (S256) and the
+// redirect_uri matches. The answer carries a refresh token "refresh-code-<n>"
+// that the server then accepts, rotating.
+func (s *Server) ExpectAuthCode(code, challenge, redirectURI string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.authCode, s.challenge, s.redirectURI = code, challenge, redirectURI
 }
 
 type failure struct {
@@ -115,6 +129,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	n, lifetime, fail := s.requests, s.lifetime, s.failure
 	s.last = r.PostForm
 	grant := r.PostForm.Get("grant_type")
+	codeOK := false
+	if grant == "authorization_code" {
+		sum := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
+		codeOK = s.authCode != "" && r.PostForm.Get("code") == s.authCode &&
+			base64.RawURLEncoding.EncodeToString(sum[:]) == s.challenge && r.PostForm.Get("redirect_uri") == s.redirectURI
+		if codeOK {
+			s.authCode = ""
+			s.refresh, s.rotate = fmt.Sprintf("refresh-code-%d", n), true
+		}
+	}
 	refreshOK := grant == "refresh_token" && s.refresh != "" && r.PostForm.Get("refresh_token") == s.refresh
 	var rotated string
 	if refreshOK && fail == nil && s.rotate {
@@ -136,7 +160,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	// a secret.
 	secretOK := r.PostForm.Get("client_secret") == s.ClientSecret
 	switch {
-	case grant != "client_credentials" && grant != "refresh_token":
+	case grant != "client_credentials" && grant != "refresh_token" && grant != "authorization_code":
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "unsupported_grant_type"})
 	case r.PostForm.Get("client_id") != s.ClientID || !secretOK:
@@ -145,6 +169,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			"error":             "invalid_client",
 			"error_description": "AADSTS7000215: Invalid client secret provided.",
 		})
+	case grant == "authorization_code" && !codeOK:
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
 	case grant == "refresh_token" && !refreshOK:
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -159,6 +186,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if rotated != "" {
 			answer["refresh_token"] = rotated
+		}
+		if codeOK {
+			answer["refresh_token"] = s.RefreshToken()
 		}
 		_ = json.NewEncoder(w).Encode(answer)
 	}

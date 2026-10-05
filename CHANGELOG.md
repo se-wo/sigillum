@@ -57,6 +57,14 @@ the version being prepared in the same pull request as the change.
   The health check acquires a token, so a wrong secret shows as not ready.
   Recipe `examples/providers/microsoft-365-graph.yaml`, with RBAC for
   Applications to confine the app to its mailboxes.
+- `sigillum oauth login --provider microsoft|google --client-id <id>`:
+  signs in once in a browser on your workstation (authorization code with
+  PKCE and a loopback redirect) and prints the refresh token, or stores it
+  in a backend's credentials Secret with your kubeconfig (`--secret
+  <namespace>/<name>`). Google's client secret comes from
+  `--client-secret-file` or `SIGILLUM_OAUTH_CLIENT_SECRET`, never from the
+  command line. This is the sign-in for delegated backends where the
+  controller's device code sign-in is not available (Gmail, US-6.3).
 
 ### Changed
 
