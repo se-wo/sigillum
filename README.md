@@ -15,8 +15,8 @@ before forwarding through a `MailBackend` (SMTP) relay.
   `LOGIN`); opt-in pod-IP fallback for SMTP clients that cannot authenticate
 - **Policy:** sender allowlists (envelope and header), recipient domain and
   address allowlists and domain denylists, size and recipient limits,
-  sliding-window rate limits (in-memory or Redis for multi-replica
-  deployments)
+  sliding-window rate limits per minute, hour and day (in-memory or Redis
+  for multi-replica deployments)
 - **Drivers:** SMTP (STARTTLS, PLAIN/LOGIN/CRAM-MD5). Microsoft Graph and
   the Gmail API are planned for v0.4.0; SendGrid is a reserved enum value,
   not implemented.
@@ -91,6 +91,7 @@ spec:
   rateLimits:
     messagesPerMinute: 60
     messagesPerHour: 1000
+    messagesPerDay: 5000          # stay below the upstream mailbox's daily quota
 ```
 
 Mount a projected token with audience `sigillum` in the workload pod, then:

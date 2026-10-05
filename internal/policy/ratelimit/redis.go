@@ -18,9 +18,11 @@ import (
 // KEYS[1] = counter key
 // ARGV[1] = perMinute (0 = no cap)
 // ARGV[2] = perHour   (0 = no cap)
-// ARGV[3] = unique member for this hit
+// ARGV[3] = perDay    (0 = no cap)
+// ARGV[4] = unique member for this hit
 //
-// Returns {1, 0} when allowed, {0, retryAfterMs} when rejected.
+// Returns {1, 0} when allowed, {0, retryAfterMs} when rejected, where
+// retryAfterMs is the wait until every full window has room again.
 var slidingWindow = redis.NewScript(`
 -- Redis < 5 replicates scripts verbatim and refuses writes after the
 -- non-deterministic TIME; effects replication fixes that. Redis >= 5 does
@@ -28,28 +30,50 @@ var slidingWindow = redis.NewScript(`
 if redis.replicate_commands then redis.replicate_commands() end
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-local perMinute = tonumber(ARGV[1])
-local perHour = tonumber(ARGV[2])
+local windows = {
+  {tonumber(ARGV[1]), 60000},
+  {tonumber(ARGV[2]), 3600000},
+  {tonumber(ARGV[3]), 86400000},
+}
+-- Keep hits for the longest capped window: a day only with a daily cap.
+local keep = 3600000
+if windows[3][1] > 0 then keep = 86400000 end
+-- While a call with a daily cap holds the key for longer, keep its day of
+-- history even without one (a replica that has not seen the cap yet), and
+-- never shorten its expiry. Mirrors Limits.retain.
+local ttl = redis.call('PTTL', KEYS[1])
+local trim = keep
+if ttl > keep then trim = 86400000 end
 
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - 3600000)
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - trim)
 
-if perMinute > 0 then
-  local inMinute = redis.call('ZCOUNT', KEYS[1], now - 60000, '+inf')
-  if inMinute >= perMinute then
-    local oldest = redis.call('ZRANGEBYSCORE', KEYS[1], now - 60000, '+inf', 'WITHSCORES', 'LIMIT', 0, 1)
-    return {0, tonumber(oldest[2]) + 60000 - now}
+-- A hit leaves a window the moment it is as old as the window, hence the
+-- exclusive lower bound: a caller retrying exactly after Retry-After finds
+-- room.
+local retry = -1
+for _, w in ipairs(windows) do
+  local limit, size = w[1], w[2]
+  if limit > 0 then
+    local from = string.format('(%d', now - size)
+    local n = redis.call('ZCOUNT', KEYS[1], from, '+inf')
+    if n >= limit then
+      -- The window has room again once its limit-th newest hit has left.
+      -- Every window is a suffix of the set, so that hit is the one at
+      -- rank -limit (O(log N), unlike an offset into the window).
+      local hit = redis.call('ZRANGE', KEYS[1], -limit, -limit, 'WITHSCORES')
+      local wait = tonumber(hit[2]) + size - now
+      if wait > retry then retry = wait end
+    end
   end
 end
-if perHour > 0 then
-  local inHour = redis.call('ZCARD', KEYS[1])
-  if inHour >= perHour then
-    local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
-    return {0, tonumber(oldest[2]) + 3600000 - now}
-  end
+if retry >= 0 then
+  return {0, retry}
 end
 
-redis.call('ZADD', KEYS[1], now, ARGV[3])
-redis.call('PEXPIRE', KEYS[1], 3600000)
+redis.call('ZADD', KEYS[1], now, ARGV[4])
+-- Read the expiry again: if the trim emptied the key, Redis deleted it with
+-- its expiry and ZADD created it without one.
+if redis.call('PTTL', KEYS[1]) < keep then redis.call('PEXPIRE', KEYS[1], keep) end
 return {1, 0}
 `)
 
@@ -87,11 +111,12 @@ func NewRedisLimiter(opts RedisOptions) *RedisLimiter {
 }
 
 // Allow implements Limiter.
-func (l *RedisLimiter) Allow(ctx context.Context, key string, perMinute, perHour int32) (bool, time.Duration, error) {
-	if perMinute <= 0 && perHour <= 0 {
+func (l *RedisLimiter) Allow(ctx context.Context, key string, limits Limits) (bool, time.Duration, error) {
+	if limits.None() {
 		return true, 0, nil
 	}
-	res, err := slidingWindow.Run(ctx, l.client, []string{l.prefix + key}, perMinute, perHour, member()).Int64Slice()
+	res, err := slidingWindow.Run(ctx, l.client, []string{l.prefix + key},
+		limits.PerMinute, limits.PerHour, limits.PerDay, member()).Int64Slice()
 	if err != nil || len(res) != 2 {
 		if err == nil {
 			err = fmt.Errorf("unexpected script reply %v", res)

@@ -55,21 +55,29 @@ func TestRequiredFieldsExistInCRDs(t *testing.T) {
 const doc = `{"components":{"schemas":{
  "dev.sigillum.v1alpha1.MailPolicy":{
   "x-kubernetes-group-version-kind":[{"group":"sigillum.dev","version":"v1alpha1","kind":"MailPolicy"}],
-  "properties":{"spec":{"properties":{"recipientRestrictions":{"properties":{%s}}}}}},
+  "properties":{"spec":{"properties":{"recipientRestrictions":{"properties":{%s}},"rateLimits":{"properties":{%r}}}}}},
  "dev.sigillum.v1alpha1.MailCredential":{
   "x-kubernetes-group-version-kind":[{"group":"sigillum.dev","version":"v1alpha1","kind":"MailCredential"}],
   "properties":{"spec":{"properties":{"serviceAccountName":{}}}}}}}}`
 
 func TestVerifyDoc(t *testing.T) {
-	current := strings.Replace(doc, "%s", `"allowedDomains":{},"allowedRecipients":{}`, 1)
+	rateLimits := `"messagesPerMinute":{},"messagesPerHour":{}`
+	withRateLimits := strings.Replace(doc, "%r", rateLimits+`,"messagesPerDay":{}`, 1)
+	current := strings.Replace(withRateLimits, "%s", `"allowedDomains":{},"allowedRecipients":{}`, 1)
 	if err := verifyDoc([]byte(current), Required); err != nil {
 		t.Fatalf("current schema: %v", err)
 	}
 
-	stale := strings.Replace(doc, "%s", `"allowedDomains":{}`, 1)
+	stale := strings.Replace(withRateLimits, "%s", `"allowedDomains":{}`, 1)
 	err := verifyDoc([]byte(stale), Required)
 	if err == nil || !strings.Contains(err.Error(), "MailPolicy CRD has no field spec.recipientRestrictions.allowedRecipients") {
 		t.Fatalf("stale MailPolicy: got %v", err)
+	}
+
+	v030 := strings.Replace(strings.Replace(doc, "%r", rateLimits, 1), "%s", `"allowedRecipients":{}`, 1)
+	err = verifyDoc([]byte(v030), Required)
+	if err == nil || !strings.Contains(err.Error(), "MailPolicy CRD has no field spec.rateLimits.messagesPerDay") {
+		t.Fatalf("0.3.0 MailPolicy: got %v", err)
 	}
 
 	noKind := strings.Replace(current, `"kind":"MailCredential"`, `"kind":"Other"`, 1)

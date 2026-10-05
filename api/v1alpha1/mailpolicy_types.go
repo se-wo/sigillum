@@ -82,7 +82,9 @@ type RecipientRestrictions struct {
 	BlockedDomains []string `json:"blockedDomains,omitempty"`
 }
 
-// RateLimitsSpec configures the sliding-window rate limiter.
+// RateLimitsSpec configures the sliding-window rate limiter. Every window
+// counts the messages of all subjects of the policy; 0 or unset means no cap
+// on that window.
 type RateLimitsSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
@@ -90,6 +92,12 @@ type RateLimitsSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MessagesPerHour int32 `json:"messagesPerHour,omitempty"`
+	// MessagesPerDay caps the messages in any 24 hours, for example below
+	// the daily sending quota of the upstream mailbox, so one workload
+	// cannot block the account for everyone.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MessagesPerDay int32 `json:"messagesPerDay,omitempty"`
 }
 
 // MessageLimitsSpec bounds individual message dimensions.

@@ -117,8 +117,19 @@ spec:
                 format: int32
                 type: integer
               rateLimits:
-                description: RateLimitsSpec configures the sliding-window rate limiter.
+                description: |-
+                  RateLimitsSpec configures the sliding-window rate limiter. Every window
+                  counts the messages of all subjects of the policy; 0 or unset means no cap
+                  on that window.
                 properties:
+                  messagesPerDay:
+                    description: |-
+                      MessagesPerDay caps the messages in any 24 hours, for example below
+                      the daily sending quota of the upstream mailbox, so one workload
+                      cannot block the account for everyone.
+                    format: int32
+                    minimum: 0
+                    type: integer
                   messagesPerHour:
                     format: int32
                     minimum: 0

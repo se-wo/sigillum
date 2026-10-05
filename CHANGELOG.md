@@ -14,6 +14,10 @@ the version being prepared in the same pull request as the change.
 
 ### Upgrading
 
+- Apply the CRDs before upgrading:
+  `kubectl apply --server-side -f charts/sigillum/crds/`. The 0.4.0 pods
+  refuse to start on 0.3 CRDs, which would drop `messagesPerDay` without
+  an error and leave the policy without a daily cap.
 - The credential Secret guard changes (it also admits the OAuth token
   Secrets of delegated backends). Upgrade the chart and the controller
   together with `helm upgrade`. While the old guard and a new
@@ -22,14 +26,31 @@ the version being prepared in the same pull request as the change.
   generated credential Secrets (`SecretsManaged=False`) until the other
   side is updated; it re-checks every 30 s.
 
+### Added
+
+- `MailPolicy.spec.rateLimits.messagesPerDay`: a sliding 24-hour cap per
+  policy, next to the per-minute and per-hour caps, to keep one workload
+  from using up the daily quota of the upstream mailbox (US-2.7). With a
+  daily cap, the in-memory store keeps a timestamp per message for a day
+  and Redis keeps the counter key for a day.
+
 ### Changed
 
+- `Retry-After` (REST) is the wait until every full window has room
+  again, not only the shortest one; a caller retrying then is no longer
+  rejected by the hourly or daily window right after.
 - Credential Secret guard: a second allowed shape for the OAuth token
   Secrets of delegated backends (label `sigillum.dev/oauth-token`,
   annotation `sigillum.dev/oauth-token-uid`, controlled by the
   `MailBackend` or `ClusterMailBackend`, only the keys `refresh_token`,
   `access_token` and `expires_at`), also in the release namespace. Nothing
   writes such Secrets yet (US-6.3).
+
+### Fixed
+
+- A message now leaves a rate-limit window the moment it is as old as the
+  window. Before, a caller retrying exactly after `Retry-After` could be
+  rejected once more.
 
 ## [0.3.1] - unreleased
 
