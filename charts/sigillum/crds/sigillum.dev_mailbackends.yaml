@@ -138,9 +138,10 @@ spec:
                   credentialsRef:
                     description: |-
                       CredentialsRef points at the secret holding upstream credentials.
-                      Required unless AuthType is NONE. For XOAUTH2 it holds the
-                      refresh_token of the sign-in (and client_secret for a confidential
-                      client); the controller keeps its token Secret in the same namespace.
+                      Required unless AuthType is NONE. For XOAUTH2 the Secret is optional:
+                      its namespace holds the controller's token Secret, and it may hold
+                      the refresh_token of a sign-in done elsewhere (and client_secret for
+                      a confidential client).
                     properties:
                       name:
                         minLength: 1

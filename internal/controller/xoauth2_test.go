@@ -68,6 +68,7 @@ type xoauth2Fixture struct {
 	server *oauthtest.Server
 	broker *TokenBroker
 	rec    *MailBackendReconciler
+	offset time.Duration // the broker's clock runs ahead by this
 }
 
 func newXOAUTH2Fixture(t *testing.T, seed string) *xoauth2Fixture {
@@ -88,22 +89,33 @@ func newXOAUTH2Fixture(t *testing.T, seed string) *xoauth2Fixture {
 			OAuth:          &sigv1.SMTPOAuthSpec{Provider: sigv1.OAuthProviderMicrosoft, ClientID: testClientID, Mailbox: "me@outlook.com"},
 		}},
 	}
-	signin := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "outlook-signin", Namespace: "team"}, Data: map[string][]byte{}}
+	objs := []client.Object{mb}
+	// Without a seed there is no credentials Secret at all: the device
+	// code sign-in needs none.
 	if seed != "" {
-		signin.Data[sigv1.OAuthSecretRefreshTokenKey] = []byte(seed)
+		objs = append(objs, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "outlook-signin", Namespace: "team"},
+			Data: map[string][]byte{sigv1.OAuthSecretRefreshTokenKey: []byte(seed)}})
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mb, signin).WithStatusSubresource(mb).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).WithStatusSubresource(mb).Build()
 	s := oauthtest.New(t, testClientID, "")
 	s.SetRefreshToken("seed", true)
-	b := &TokenBroker{Reader: c, Writer: c, Guard: &GuardChecker{checked: true}, HTTPClient: s.Client(),
-		TokenURL: func(tenant string) (string, error) {
+	f := &xoauth2Fixture{client: c, server: s}
+	f.broker = f.newBroker(t)
+	f.rec = &MailBackendReconciler{Client: c, Broker: f.broker}
+	t.Cleanup(func() { backendAuthorized.DeleteLabelValues("team/outlook") })
+	return f
+}
+
+// newBroker is a broker as after a controller restart.
+func (f *xoauth2Fixture) newBroker(t *testing.T) *TokenBroker {
+	return &TokenBroker{Reader: f.client, Writer: f.client, Guard: &GuardChecker{checked: true}, HTTPClient: f.server.Client(),
+		Now: func() time.Time { return time.Now().Add(f.offset) },
+		Endpoints: func(tenant string) (string, string, error) {
 			if tenant != "consumers" {
 				t.Errorf("tenant %q, want the default consumers", tenant)
 			}
-			return s.TokenURL(), nil
+			return f.server.TokenURL(), f.server.DeviceURL(), nil
 		}}
-	t.Cleanup(func() { backendAuthorized.DeleteLabelValues("team/outlook") })
-	return &xoauth2Fixture{client: c, server: s, broker: b, rec: &MailBackendReconciler{Client: c, Broker: b}}
 }
 
 func (f *xoauth2Fixture) reconcile(t *testing.T) *sigv1.MailBackend {
@@ -175,21 +187,16 @@ func TestReconcile_XOAUTH2Authorized(t *testing.T) {
 }
 
 func TestReconcile_XOAUTH2NotReadyWithoutToken(t *testing.T) {
-	t.Run("no sign-in yet", func(t *testing.T) {
-		f := newXOAUTH2Fixture(t, "")
-		mb := f.reconcile(t)
-		wantCondition(t, mb, sigv1.ConditionAuthorized, metav1.ConditionFalse, sigv1.ReasonAuthorizationRequired)
-		wantCondition(t, mb, sigv1.ConditionReady, metav1.ConditionFalse, sigv1.ReasonAuthorizationRequired)
-	})
-	t.Run("revoked sign-in", func(t *testing.T) {
-		f := newXOAUTH2Fixture(t, "revoked")
-		mb := f.reconcile(t)
-		wantCondition(t, mb, sigv1.ConditionAuthorized, metav1.ConditionFalse, sigv1.ReasonAuthorizationRequired)
-		wantCondition(t, mb, sigv1.ConditionReady, metav1.ConditionFalse, sigv1.ReasonAuthorizationRequired)
-		if c := meta.FindStatusCondition(mb.Status.Conditions, sigv1.ConditionReady); !strings.Contains(c.Message, "invalid_grant") {
-			t.Fatalf("the message should name the provider's answer: %q", c.Message)
-		}
-	})
+	// Without a usable refresh token the controller starts a device code
+	// sign-in (TestReconcile_XOAUTH2DeviceSignIn).
+	for name, seed := range map[string]string{"no sign-in yet": "", "revoked sign-in": "revoked"} {
+		t.Run(name, func(t *testing.T) {
+			f := newXOAUTH2Fixture(t, seed)
+			mb := f.reconcile(t)
+			wantCondition(t, mb, sigv1.ConditionAuthorized, metav1.ConditionFalse, sigv1.ReasonAuthorizationPending)
+			wantCondition(t, mb, sigv1.ConditionReady, metav1.ConditionFalse, sigv1.ReasonAuthorizationPending)
+		})
+	}
 	t.Run("no guard", func(t *testing.T) {
 		f := newXOAUTH2Fixture(t, "seed")
 		f.broker.Guard = nil
@@ -237,5 +244,157 @@ func TestBackendKindName(t *testing.T) {
 	// The resolver and the broker agree on the token Secret's name.
 	if TokenSecretName("ClusterMailBackend", "outlook") != "sigillum-oauth-cmb-outlook" {
 		t.Fatal("unexpected token Secret name")
+	}
+}
+
+func (f *xoauth2Fixture) annotate(t *testing.T, value string) {
+	t.Helper()
+	var mb sigv1.MailBackend
+	if err := f.client.Get(context.Background(), types.NamespacedName{Namespace: "team", Name: "outlook"}, &mb); err != nil {
+		t.Fatal(err)
+	}
+	mb.Annotations = map[string]string{sigv1.AuthorizeAnnotation: value}
+	if err := f.client.Update(context.Background(), &mb); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func authorizedMessage(mb *sigv1.MailBackend) string {
+	return meta.FindStatusCondition(mb.Status.Conditions, sigv1.ConditionAuthorized).Message
+}
+
+func TestReconcile_XOAUTH2DeviceSignIn(t *testing.T) {
+	f := newXOAUTH2Fixture(t, "")
+
+	mb := f.reconcile(t)
+	wantCondition(t, mb, sigv1.ConditionAuthorized, metav1.ConditionFalse, sigv1.ReasonAuthorizationPending)
+	if m := authorizedMessage(mb); !strings.Contains(m, "https://login.example.test/link") || !strings.Contains(m, "CODE-1") ||
+		!strings.Contains(m, "me@outlook.com") {
+		t.Fatalf("the message must tell the person where to go, with which code and account: %q", m)
+	}
+	// Within the poll interval nothing is asked.
+	f.reconcile(t)
+	if n := f.server.Requests(); n != 0 {
+		t.Fatalf("polled %d times before the interval", n)
+	}
+	f.offset += 6 * time.Second
+	mb = f.reconcile(t)
+	wantCondition(t, mb, sigv1.ConditionAuthorized, metav1.ConditionFalse, sigv1.ReasonAuthorizationPending)
+	if f.server.Requests() != 1 || f.server.DeviceStarts() != 1 {
+		t.Fatalf("want one poll and one start, got %d and %d", f.server.Requests(), f.server.DeviceStarts())
+	}
+
+	f.server.SetDevice(oauthtest.DeviceApproved, "Me@Outlook.com")
+	f.offset += 6 * time.Second
+	mb = f.reconcile(t)
+	wantCondition(t, mb, sigv1.ConditionAuthorized, metav1.ConditionTrue, sigv1.ReasonAuthorized)
+	wantCondition(t, mb, sigv1.ConditionReady, metav1.ConditionTrue, sigv1.ReasonAtLeastOneEndpointReady)
+	if scope := f.server.LastForm(); scope.Get("grant_type") != "urn:ietf:params:oauth:grant-type:device_code" {
+		t.Fatalf("last request %v", scope)
+	}
+	var sec corev1.Secret
+	if err := f.client.Get(context.Background(), types.NamespacedName{Namespace: "team", Name: "sigillum-oauth-mb-outlook"}, &sec); err != nil {
+		t.Fatal(err)
+	}
+	if rt := string(sec.Data[sigv1.OAuthSecretRefreshTokenKey]); !strings.HasPrefix(rt, "refresh-device-") {
+		t.Fatalf("the sign-in's refresh token must be stored, got %q", rt)
+	}
+
+	// After a restart the stored sign-in is used; no new code.
+	f.broker = f.newBroker(t)
+	f.rec.Broker = f.broker
+	mb = f.reconcile(t)
+	wantCondition(t, mb, sigv1.ConditionAuthorized, metav1.ConditionTrue, sigv1.ReasonAuthorized)
+	if f.server.DeviceStarts() != 1 {
+		t.Fatal("a restart must not start another sign-in")
+	}
+}
+
+func TestReconcile_XOAUTH2DeviceSignInWrongAccountOrExpired(t *testing.T) {
+	f := newXOAUTH2Fixture(t, "")
+	f.reconcile(t)
+	f.server.SetDevice(oauthtest.DeviceApproved, "someone-else@outlook.com")
+	f.offset += 6 * time.Second
+	mb := f.reconcile(t)
+	wantCondition(t, mb, sigv1.ConditionAuthorized, metav1.ConditionFalse, sigv1.ReasonAuthorizationExpired)
+	if m := authorizedMessage(mb); !strings.Contains(m, "someone-else@outlook.com") || !strings.Contains(m, sigv1.AuthorizeAnnotation) {
+		t.Fatalf("the message must name the account and the way out: %q", m)
+	}
+	var sec corev1.Secret
+	if err := f.client.Get(context.Background(), types.NamespacedName{Namespace: "team", Name: "sigillum-oauth-mb-outlook"}, &sec); err == nil {
+		t.Fatal("another account's sign-in must not be stored")
+	}
+
+	// It stays expired, without new codes, until the annotation changes.
+	f.offset += time.Hour
+	f.reconcile(t)
+	if f.server.DeviceStarts() != 1 {
+		t.Fatal("no new code without a new request")
+	}
+	f.annotate(t, "1")
+	mb = f.reconcile(t)
+	wantCondition(t, mb, sigv1.ConditionAuthorized, metav1.ConditionFalse, sigv1.ReasonAuthorizationPending)
+	if f.server.DeviceStarts() != 2 || !strings.Contains(authorizedMessage(mb), "CODE-2") {
+		t.Fatalf("a new annotation value must start a new sign-in: %q", authorizedMessage(mb))
+	}
+
+	// Nobody signs in within the code's lifetime.
+	f.offset += 16 * time.Minute
+	mb = f.reconcile(t)
+	wantCondition(t, mb, sigv1.ConditionAuthorized, metav1.ConditionFalse, sigv1.ReasonAuthorizationExpired)
+	if !strings.Contains(authorizedMessage(mb), "expired") {
+		t.Fatalf("message %q", authorizedMessage(mb))
+	}
+}
+
+// A new sign-in asked for while the backend works keeps it sending until
+// the new one is done.
+func TestReconcile_XOAUTH2ReSignInKeepsSending(t *testing.T) {
+	f := newXOAUTH2Fixture(t, "seed")
+	f.reconcile(t)
+	f.annotate(t, "switch-account")
+	mb := f.reconcile(t)
+	wantCondition(t, mb, sigv1.ConditionAuthorized, metav1.ConditionTrue, sigv1.ReasonAuthorizationPending)
+	wantCondition(t, mb, sigv1.ConditionReady, metav1.ConditionTrue, sigv1.ReasonAtLeastOneEndpointReady)
+
+	f.server.SetDevice(oauthtest.DeviceApproved, "me@outlook.com")
+	f.offset += 6 * time.Second
+	mb = f.reconcile(t)
+	wantCondition(t, mb, sigv1.ConditionAuthorized, metav1.ConditionTrue, sigv1.ReasonAuthorized)
+	var sec corev1.Secret
+	if err := f.client.Get(context.Background(), types.NamespacedName{Namespace: "team", Name: "sigillum-oauth-mb-outlook"}, &sec); err != nil {
+		t.Fatal(err)
+	}
+	if rt := string(sec.Data[sigv1.OAuthSecretRefreshTokenKey]); !strings.HasPrefix(rt, "refresh-device-") {
+		t.Fatalf("the new sign-in must replace the old chain, got %q", rt)
+	}
+}
+
+// A new sign-in that fails while the old one works leaves the old one in
+// use, refreshed as before, and the failure visible.
+func TestReconcile_XOAUTH2FailedReSignInKeepsTheOldOne(t *testing.T) {
+	f := newXOAUTH2Fixture(t, "seed")
+	f.reconcile(t)
+	f.annotate(t, "switch-account")
+	f.reconcile(t)
+	f.server.SetDevice(oauthtest.DeviceApproved, "someone-else@outlook.com")
+	f.offset += 6 * time.Second
+	mb := f.reconcile(t)
+	wantCondition(t, mb, sigv1.ConditionAuthorized, metav1.ConditionTrue, sigv1.ReasonAuthorizationExpired)
+	wantCondition(t, mb, sigv1.ConditionReady, metav1.ConditionTrue, sigv1.ReasonAtLeastOneEndpointReady)
+
+	// Past the old token's half life it is refreshed, and the notice stays.
+	before := f.server.Requests()
+	f.offset += 40 * time.Minute
+	mb = f.reconcile(t)
+	if f.server.Requests() != before+1 || f.server.LastForm().Get("grant_type") != "refresh_token" {
+		t.Fatalf("the old sign-in must be refreshed: %d requests, last %v", f.server.Requests()-before, f.server.LastForm())
+	}
+	wantCondition(t, mb, sigv1.ConditionAuthorized, metav1.ConditionTrue, sigv1.ReasonAuthorizationExpired)
+	if !strings.Contains(authorizedMessage(mb), "someone-else@outlook.com") {
+		t.Fatalf("message %q", authorizedMessage(mb))
+	}
+	if f.server.DeviceStarts() != 1 {
+		t.Fatal("no new code without a new request")
 	}
 }

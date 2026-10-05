@@ -321,10 +321,9 @@ before Microsoft switches off SMTP AUTH with passwords and app passwords at
 the end of December 2026): OAuth (XOAUTH2) for the SMTP driver with a
 one-time sign-in for Outlook.com and a Gmail API driver for Google
 Workspace and personal Gmail. The daily limit, the sender allowlist per
-backend and the Microsoft Graph driver for Microsoft 365 are done, and
-Outlook.com works with XOAUTH2 once you have signed in with the device
-code flow yourself (`examples/providers/outlook-com.yaml`); the controller
-will run that sign-in next. Then install without
+backend, the Microsoft Graph driver for Microsoft 365 and Outlook.com with
+XOAUTH2 and a one-time sign-in (`examples/providers/outlook-com.yaml`) are
+done. Then install without
 cert-manager, preflight and a `kubectl` plugin (including
 `credential create` / `rotate`), SMTPS on port 465, an OpenAPI
 description, dashboards and alerts (v0.5.0). Sigillum stays below 1.0
