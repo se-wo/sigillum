@@ -76,7 +76,7 @@ func post(s *Server, body string) *httptest.ResponseRecorder {
 
 func TestHandleSendMessage_NoPolicyIs403AndAudited(t *testing.T) {
 	s, sink := newTestServer()
-	w := post(s, `{"from":"a@team.example","to":["b@x.example"],"subject":"secret subject"}`)
+	w := post(s, `{"from":"a@team.example","to":["b@x.example"],"subject":"secret subject","body":{"text":"x"}}`)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("want 403, got %d: %s", w.Code, w.Body.String())
 	}
@@ -232,6 +232,50 @@ func TestHandleSendMessage_AddressSpoofingIsRejected(t *testing.T) {
 	}
 }
 
+// #42: an ignored field or a message without content would be delivered
+// empty or incomplete with 202.
+func TestHandleSendMessage_RejectsUnknownFieldsAndEmptyMessages(t *testing.T) {
+	for name, tc := range map[string]struct{ body, detail, not string }{
+		"top-level text": {body: `{"from":"a@team.example","to":["b@x.example"],"text":"hi"}`,
+			detail: `unknown field \"text\"; did you mean body.text?`},
+		"other case": {body: `{"from":"a@team.example","to":["b@x.example"],"Text":"hi"}`,
+			detail: `unknown field \"Text\"; did you mean body.text?`},
+		// encoding/json names a nested key without its path; the
+		// top-level hint must not be given for it.
+		"text in attachment": {body: `{"from":"a@team.example","to":["b@x.example"],"attachments":[{"filename":"a.txt","contentBase64":"eA==","text":"x"}]}`,
+			detail: `unknown field \"text\"`, not: "did you mean"},
+		"null": {body: `null`, detail: "must be a JSON object"},
+		"replyTo": {body: `{"from":"a@team.example","to":["b@x.example"],"body":{"text":"x"},"replyTo":"r@x.example"}`,
+			detail: `unknown field \"replyTo\"; did you mean headers[\"Reply-To\"]?`},
+		"nested typo": {body: `{"from":"a@team.example","to":["b@x.example"],"body":{"plain":"x"}}`,
+			detail: `unknown field \"plain\"`},
+		"trailing data": {body: `{"from":"a@team.example","to":["b@x.example"],"body":{"text":"x"}} {}`,
+			detail: "unexpected data after the JSON object"},
+		"no body":         {body: `{"from":"a@team.example","to":["b@x.example"],"subject":"s"}`, detail: "set body.text or body.html"},
+		"whitespace body": {body: `{"from":"a@team.example","to":["b@x.example"],"body":{"text":" \n","html":"\t"}}`, detail: "set body.text or body.html"},
+		"empty attachment": {body: `{"from":"a@team.example","to":["b@x.example"],"attachments":[{"filename":"x","contentBase64":""}]}`,
+			detail: "non-empty attachment"},
+	} {
+		s, sink := newTestServer()
+		w := post(s, tc.body)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.detail) ||
+			(tc.not != "" && strings.Contains(w.Body.String(), tc.not)) {
+			t.Errorf("%s: want 400 mentioning %q, got %d %s", name, tc.detail, w.Code, w.Body.String())
+			continue
+		}
+		if len(sink.events) != 1 || sink.events[0].Reason != "invalid_payload" {
+			t.Errorf("%s: want one invalid_payload audit event, got %+v", name, sink.events)
+		}
+	}
+
+	// An attachment alone is content: the request reaches the policy.
+	s, _ := newTestServer()
+	w := post(s, `{"from":"a@team.example","to":["b@x.example"],"attachments":[{"filename":"r.txt","contentBase64":"eA=="}]}`)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("attachment-only message: want 403 no-policy-matched, got %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestAddressHeaders(t *testing.T) {
 	sender, replyTo, err := addressHeaders(map[string]string{
 		"sender":   "Billing <noreply@team.example>",
@@ -290,7 +334,7 @@ func TestHandleSendMessage_AllowedRecipients(t *testing.T) {
 	}
 	s, sink := newTestServer(pol)
 
-	w := post(s, `{"from":"a@team.example","to":["alerts@contoso.com"],"cc":["ceo@contoso.com"]}`)
+	w := post(s, `{"from":"a@team.example","to":["alerts@contoso.com"],"cc":["ceo@contoso.com"],"body":{"text":"x"}}`)
 	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "errors/recipient-not-allowed") {
 		t.Fatalf("mailbox outside allowedRecipients: want 403 recipient-not-allowed, got %d %s", w.Code, w.Body.String())
 	}
@@ -300,7 +344,7 @@ func TestHandleSendMessage_AllowedRecipients(t *testing.T) {
 
 	// Allowed recipients pass the policy; this test has no backend, so the
 	// request stops at backend resolution instead.
-	w = post(s, `{"from":"a@team.example","to":["alerts@contoso.com","pager@oncall.contoso.com"]}`)
+	w = post(s, `{"from":"a@team.example","to":["alerts@contoso.com","pager@oncall.contoso.com"],"body":{"text":"x"}}`)
 	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "errors/backend-not-ready") {
 		t.Fatalf("allowed recipients: want to pass the policy, got %d %s", w.Code, w.Body.String())
 	}

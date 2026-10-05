@@ -26,6 +26,9 @@ the version being prepared in the same pull request as the change.
   rollout, that controller reports the guard as changed and writes no
   generated credential Secrets (`SecretsManaged=False`) until the other
   side is updated; it re-checks every 30 s.
+- REST: `POST /v1/messages` now rejects unknown JSON fields and messages
+  without content with `400 invalid-payload` (see Changed). Check that
+  clients send only the documented fields.
 
 ### Added
 
@@ -60,6 +63,15 @@ the version being prepared in the same pull request as the change.
 
 ### Changed
 
+- REST: unknown fields in the JSON body (or the multipart `data` part)
+  answer `400 invalid-payload` naming the field, with a hint for common
+  slips (`did you mean body.text?`), and a message needs a non-blank
+  `body.text` or `body.html`, or a non-empty attachment. Before, both were
+  accepted with `202`, so a top-level `"text"` delivered an empty
+  message. In a multipart request, Base64 `attachments` in the `data`
+  part are now sent (they were dropped), and a plain form field named like
+  a message field (`text`, `subject`, …) is refused instead of being
+  mailed as a file (#42).
 - `Retry-After` (REST) is the wait until every full window has room
   again, not only the shortest one; a caller retrying then is no longer
   rejected by the hourly or daily window right after.

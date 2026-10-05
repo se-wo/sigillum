@@ -951,7 +951,10 @@ Request:
 ```
 
 Rules:
+- Unknown fields are rejected (`400`), in the JSON body and in the `data` part of a multipart request, so a misplaced field cannot be dropped silently: a top-level `text` would otherwise send an empty message. The `detail` names the field and, for common slips, the intended one (`did you mean body.text?`).
 - At least one recipient across `to`, `cc`, `bcc`.
+- The message needs content: a non-blank `body.text` or `body.html`, or a non-empty attachment (`400` otherwise).
+- Multipart: the `data` part holds the JSON object above (Base64 `attachments` in it are sent too); every other part is a file attachment, named after its filename or its form name. A part without a filename that is named like a message field (`subject`, `text`, …) is refused, since it belongs in `data`.
 - Addresses are RFC 5322 (display names allowed, subject to US-2.3); local parts follow US-2.4.
 - `disposition` is `attachment` (default) or `inline`.
 - `headers`:
@@ -998,7 +1001,7 @@ The problem `type` is `https://sigillum.dev/errors/<slug>`. The audit / metric `
 | Status | Problem slug | Meaning | Retry? |
 |---|---|---|---|
 | `202` | — | Accepted by the backend | — |
-| `400` | `invalid-payload` | Malformed JSON / multipart, invalid address or header, no recipient | No, fix the request |
+| `400` | `invalid-payload` | Malformed JSON / multipart, unknown field, invalid address or header, no recipient, no content | No, fix the request |
 | `401` | `invalid-token` | Missing, invalid, expired or wrong-audience token | No, fix the token |
 | `403` | `no-policy-matched` | No policy matches the caller | No |
 | `403` | `sender-not-allowed` | US-2.3 | No |

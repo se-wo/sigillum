@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -10,6 +11,8 @@ import (
 	"net/http"
 	"net/mail"
 	"net/textproto"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,15 +28,14 @@ import (
 
 // requestBody is the JSON payload accepted by POST /v1/messages.
 type requestBody struct {
-	From        string                 `json:"from"`
-	To          []string               `json:"to,omitempty"`
-	Cc          []string               `json:"cc,omitempty"`
-	Bcc         []string               `json:"bcc,omitempty"`
-	Subject     string                 `json:"subject,omitempty"`
-	Body        requestBodyContent     `json:"body,omitempty"`
-	Attachments []requestAttachment    `json:"attachments,omitempty"`
-	Headers     map[string]string      `json:"headers,omitempty"`
-	Extra       map[string]interface{} `json:"-"`
+	From        string              `json:"from"`
+	To          []string            `json:"to,omitempty"`
+	Cc          []string            `json:"cc,omitempty"`
+	Bcc         []string            `json:"bcc,omitempty"`
+	Subject     string              `json:"subject,omitempty"`
+	Body        requestBodyContent  `json:"body,omitempty"`
+	Attachments []requestAttachment `json:"attachments,omitempty"`
+	Headers     map[string]string   `json:"headers,omitempty"`
 }
 
 type requestBodyContent struct {
@@ -130,7 +132,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				"Request body exceeds 32MiB ceiling", "use a smaller message or split attachments"))
 			return
 		}
-		if err := json.Unmarshal(body, &req); err != nil {
+		if err := decodeRequestJSON(body, &req); err != nil {
 			rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 				"Malformed JSON payload", err.Error()))
 			return
@@ -207,6 +209,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
 			"Invalid header", err.Error()))
+		return
+	}
+	if !hasContent(req.Body, atts) {
+		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+			"Message has no content", "set body.text or body.html, or add a non-empty attachment"))
 		return
 	}
 
@@ -378,6 +385,92 @@ func decodeAttachments(in []requestAttachment) ([]driver.Attachment, error) {
 	return out, nil
 }
 
+// requestFields holds the top-level keys of requestBody, lower-cased
+// (encoding/json matches keys case-insensitively).
+var requestFields = func() map[string]bool {
+	fields := map[string]bool{}
+	t := reflect.TypeOf(requestBody{})
+	for i := 0; i < t.NumField(); i++ {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+		fields[strings.ToLower(name)] = true
+	}
+	return fields
+}()
+
+// misplacedFields maps unknown top-level keys that callers commonly use
+// (lower-cased) to the field they meant.
+var misplacedFields = map[string]string{
+	"text":     "body.text",
+	"html":     "body.html",
+	"replyto":  `headers["Reply-To"]`,
+	"reply_to": `headers["Reply-To"]`,
+	"sender":   `headers["Sender"]`,
+}
+
+// decodeRequestJSON decodes one JSON message object and rejects unknown
+// fields: an ignored typo (a top-level "text" instead of body.text) would
+// otherwise deliver an empty or incomplete message with 202.
+func decodeRequestJSON(data []byte, req *requestBody) error {
+	// Top-level keys are checked here rather than taken from the decoder
+	// error, which names a nested unknown key without its path: a "text"
+	// inside an attachment must not get the body.text hint.
+	var top map[string]json.RawMessage
+	if err := decodeOneJSON(data, &top, false); err != nil {
+		return err
+	}
+	if top == nil {
+		return errors.New("the payload must be a JSON object")
+	}
+	keys := make([]string, 0, len(top))
+	for k := range top {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if requestFields[strings.ToLower(k)] {
+			continue
+		}
+		if want, ok := misplacedFields[strings.ToLower(k)]; ok {
+			return fmt.Errorf("unknown field %q; did you mean %s?", k, want)
+		}
+		return fmt.Errorf("unknown field %q", k)
+	}
+	return decodeOneJSON(data, req, true)
+}
+
+// decodeOneJSON decodes exactly one JSON value from data into v.
+func decodeOneJSON(data []byte, v any, disallowUnknown bool) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if disallowUnknown {
+		dec.DisallowUnknownFields()
+	}
+	if err := dec.Decode(v); err != nil {
+		if errors.Is(err, io.EOF) {
+			return errors.New("empty JSON payload")
+		}
+		return err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("unexpected data after the JSON object")
+	}
+	return nil
+}
+
+// hasContent reports whether a message would carry anything: the driver
+// treats a whitespace-only body part as absent and an empty attachment
+// carries nothing either.
+func hasContent(body requestBodyContent, atts []driver.Attachment) bool {
+	if strings.TrimSpace(body.Text) != "" || strings.TrimSpace(body.HTML) != "" {
+		return true
+	}
+	for _, a := range atts {
+		if len(a.Content) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // estimateSize returns the post-decode payload weight used for size policy
 // checks: subject, custom headers, body text/html and decoded attachments.
 // Everything the caller controls and the driver relays is counted, so no
@@ -500,9 +593,11 @@ func validateAttachmentMeta(a requestAttachment) error {
 var errBodyTooLarge = errors.New("aggregate request body exceeds 32 MiB ceiling")
 
 // parseMultipartMessage parses a multipart/form-data request body.
-// The part named "data" must contain a JSON object with message metadata
-// (from, to, cc, bcc, subject, body, headers). The attachments field in that
-// JSON is ignored — file parts are collected from all other named parts.
+// The part named "data" holds the same JSON object as a JSON request;
+// Base64 attachments in it are sent too. Every other part is a file
+// attachment, named after its filename or else its form name. A part
+// without a filename that is named like a message field is refused: it
+// was meant for the data part and would otherwise go out as a file.
 func parseMultipartMessage(r *http.Request, maxBytes int64) (requestBody, []driver.Attachment, error) {
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -512,6 +607,7 @@ func parseMultipartMessage(r *http.Request, maxBytes int64) (requestBody, []driv
 	var req requestBody
 	var atts []driver.Attachment
 	var total int64
+	var seenData bool
 
 	for {
 		part, err := mr.NextPart()
@@ -536,14 +632,24 @@ func parseMultipartMessage(r *http.Request, maxBytes int64) (requestBody, []driv
 		}
 
 		if name == "data" {
-			if jsonErr := json.Unmarshal(content, &req); jsonErr != nil {
+			if seenData {
+				return requestBody{}, nil, errors.New("more than one data part")
+			}
+			seenData = true
+			if jsonErr := decodeRequestJSON(content, &req); jsonErr != nil {
 				return requestBody{}, nil, fmt.Errorf("data part: %w", jsonErr)
 			}
 			continue
 		}
 
-		// Treat every other named part as a binary file attachment.
 		if filename == "" {
+			lower := strings.ToLower(name)
+			if want, ok := misplacedFields[lower]; ok {
+				return requestBody{}, nil, fmt.Errorf("form field %q is not a file; did you mean %s in the data part?", name, want)
+			}
+			if requestFields[lower] {
+				return requestBody{}, nil, fmt.Errorf("form field %q is not a file; it belongs in the data part", name)
+			}
 			filename = name
 		}
 		if ct == "" {
@@ -559,5 +665,14 @@ func parseMultipartMessage(r *http.Request, maxBytes int64) (requestBody, []driv
 		})
 	}
 
-	return req, atts, nil
+	for i, a := range req.Attachments {
+		if err := validateAttachmentMeta(a); err != nil {
+			return requestBody{}, nil, fmt.Errorf("data part: attachment[%d]: %w", i, err)
+		}
+	}
+	inline, err := decodeAttachments(req.Attachments)
+	if err != nil {
+		return requestBody{}, nil, fmt.Errorf("data part: %w", err)
+	}
+	return req, append(inline, atts...), nil
 }
