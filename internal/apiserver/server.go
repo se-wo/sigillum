@@ -38,6 +38,7 @@ import (
 	"github.com/se-wo/sigillum/internal/telemetry"
 
 	// pull in the SMTP driver so the registry has it at startup
+	_ "github.com/se-wo/sigillum/internal/driver/graph"
 	_ "github.com/se-wo/sigillum/internal/driver/smtp"
 )
 

@@ -51,3 +51,29 @@ func TestResolveBackendConfigKeepsMailBackendInItsNamespace(t *testing.T) {
 		t.Fatal("ClusterMailBackend without credentialsRef.namespace must be refused")
 	}
 }
+
+func TestResolveBackendConfigMicrosoftGraph(t *testing.T) {
+	sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "m365", Namespace: "sigillum-system"},
+		Data: map[string][]byte{sigv1.GraphSecretClientSecretKey: []byte("s3cret")}}
+	empty := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: "sigillum-system"}}
+	c := fake.NewClientBuilder().WithObjects(sec, empty).Build()
+	spec := func(ref sigv1.SecretReference) *sigv1.BackendSpec {
+		return &sigv1.BackendSpec{Type: sigv1.BackendMicrosoftGraph, MicrosoftGraph: &sigv1.MicrosoftGraphBackendSpec{
+			TenantID: "contoso.onmicrosoft.com", ClientID: "00000000-0000-0000-0000-000000000001", CredentialsRef: ref}}
+	}
+	cfg, err := ResolveBackendConfig(context.Background(), c, "/m365", spec(sigv1.SecretReference{Name: "m365", Namespace: "sigillum-system"}), "")
+	if err != nil || cfg.Graph == nil || cfg.Graph.ClientSecret != "s3cret" || cfg.Graph.TenantID != "contoso.onmicrosoft.com" {
+		t.Fatalf("got %+v %v", cfg.Graph, err)
+	}
+	if _, err := ResolveBackendConfig(context.Background(), c, "/m365", spec(sigv1.SecretReference{Name: "empty", Namespace: "sigillum-system"}), ""); err == nil ||
+		!strings.Contains(err.Error(), "client_secret") {
+		t.Fatalf("a Secret without client_secret must be refused, got %v", err)
+	}
+	if _, err := ResolveBackendConfig(context.Background(), c, "team/m365", spec(sigv1.SecretReference{Name: "m365", Namespace: "sigillum-system"}), "team"); err == nil ||
+		!strings.Contains(err.Error(), "own namespace") {
+		t.Fatalf("a MailBackend must not read another namespace's Secret, got %v", err)
+	}
+	if _, err := ResolveBackendConfig(context.Background(), c, "/m365", &sigv1.BackendSpec{Type: sigv1.BackendMicrosoftGraph}, ""); err == nil {
+		t.Fatal("type microsoftGraph without spec.microsoftGraph must be refused")
+	}
+}

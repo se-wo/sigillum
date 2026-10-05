@@ -26,6 +26,7 @@ import (
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 	"github.com/se-wo/sigillum/internal/credential"
+	_ "github.com/se-wo/sigillum/internal/driver/graph"
 	_ "github.com/se-wo/sigillum/internal/driver/smtp"
 	"github.com/se-wo/sigillum/internal/webhook"
 )

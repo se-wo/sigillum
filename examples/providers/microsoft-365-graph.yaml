@@ -1,0 +1,63 @@
+# Microsoft 365 work or school accounts via Microsoft Graph (SPEC US-6.1).
+#
+# Sends with an Entra ID application and POST /users/{From}/sendMail, so it
+# needs neither SMTP AUTH nor a mailbox password and keeps working after
+# Basic auth for SMTP is switched off (end of December 2026).
+#
+# 1. Register an application (Entra admin center > App registrations), single
+#    tenant. Create a client secret (Certificates & secrets) and note its
+#    value, the Application (client) ID and the Directory (tenant) ID.
+#
+# 2. Let the app send only as the mailboxes it is meant for, with RBAC for
+#    Applications in Exchange Online (Exchange administrator, Exchange Online
+#    PowerShell). Do NOT also grant Mail.Send under API permissions with
+#    admin consent: Entra permissions apply to every mailbox of the tenant
+#    and are added to the scoped Exchange grant, which would make the scope
+#    pointless.
+#
+#      # IDs from Entra > Enterprise applications (not App registrations)
+#      New-ServicePrincipal -AppId <client ID> -ObjectId <object ID> -DisplayName Sigillum
+#      New-ManagementScope -Name "Sigillum senders" `
+#        -RecipientRestrictionFilter "PrimarySmtpAddress -eq 'noreply@example.com'"
+#      New-ManagementRoleAssignment -Name "Sigillum Mail.Send" -App <client ID> `
+#        -Role "Application Mail.Send" -CustomResourceScope "Sigillum senders"
+#      Test-ServicePrincipalAuthorization -Identity <client ID> -Resource noreply@example.com
+#
+#    For several mailboxes, put them in a mail-enabled security group and
+#    filter on "MemberOfGroup -eq '<group distinguished name>'".
+#
+# 3. Apply this file with the real IDs, and the secret out of band.
+#    allowedSenders is required for this backend type: it is the list of
+#    mailboxes Sigillum may send as, checked before Graph is called. Keep it
+#    equal to the Exchange scope.
+#
+# Limits: 4 MB per message including attachments (as Base64; larger
+# messages are refused with a permanent error), 10,000 recipients per day
+# and mailbox. Use the policy's rateLimits.messagesPerDay to stay below the
+# daily limit. The client secret expires (at most 24 months): rotate it in
+# the Secret before; `kubectl get cmb` shows the backend not ready once a
+# secret no longer works.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: microsoft-365-graph
+  namespace: sigillum-system
+type: Opaque
+stringData:
+  client_secret: "REPLACE-ME"   # set out of band; do not commit
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: ClusterMailBackend
+metadata:
+  name: microsoft-365-graph
+spec:
+  type: microsoftGraph
+  microsoftGraph:
+    tenantID: "00000000-0000-0000-0000-000000000000"   # Directory (tenant) ID
+    clientID: "00000000-0000-0000-0000-000000000000"   # Application (client) ID
+    credentialsRef:
+      name: microsoft-365-graph
+      namespace: sigillum-system
+  allowedSenders: ["noreply@example.com"]   # the mailboxes of the Exchange scope
+  healthCheck:
+    intervalSeconds: 300

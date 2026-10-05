@@ -8,7 +8,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
-	_ "github.com/se-wo/sigillum/internal/driver/smtp" // registers type smtp
+	_ "github.com/se-wo/sigillum/internal/driver/graph" // registers type microsoftGraph
+	_ "github.com/se-wo/sigillum/internal/driver/smtp"  // registers type smtp
 )
 
 func validClusterBackend(senders []string) *sigv1.ClusterMailBackend {
@@ -58,5 +59,68 @@ func TestMailBackendValidator_AllowedSenders(t *testing.T) {
 				t.Fatalf("a backend has no allowedDomains to point to: %v", err)
 			}
 		})
+	}
+}
+
+func graphBackend(mutate func(*sigv1.BackendSpec)) *sigv1.ClusterMailBackend {
+	b := &sigv1.ClusterMailBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "m365"},
+		Spec: sigv1.BackendSpec{
+			Type: sigv1.BackendMicrosoftGraph,
+			MicrosoftGraph: &sigv1.MicrosoftGraphBackendSpec{
+				TenantID:       "72f988bf-86f1-41af-91ab-2d7cd011db47",
+				ClientID:       "11111111-2222-3333-4444-555555555555",
+				CredentialsRef: sigv1.SecretReference{Name: "m365", Namespace: "sigillum-system"},
+			},
+			AllowedSenders: []string{"noreply@contoso.com"},
+		},
+	}
+	if mutate != nil {
+		mutate(&b.Spec)
+	}
+	return b
+}
+
+func TestMailBackendValidator_MicrosoftGraph(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*sigv1.BackendSpec)
+		wantErr string
+	}{
+		{name: "valid"},
+		{name: "verified domain as tenant", mutate: func(s *sigv1.BackendSpec) { s.MicrosoftGraph.TenantID = "contoso.onmicrosoft.com" }},
+		{name: "missing block", mutate: func(s *sigv1.BackendSpec) { s.MicrosoftGraph = nil }, wantErr: "spec.microsoftGraph"},
+		{name: "tenant with a path", mutate: func(s *sigv1.BackendSpec) { s.MicrosoftGraph.TenantID = "common/../x" }, wantErr: "tenantID"},
+		{name: "upper-case tenant", mutate: func(s *sigv1.BackendSpec) { s.MicrosoftGraph.TenantID = "Contoso.com" }, wantErr: "tenantID"},
+		{name: "client ID not a GUID", mutate: func(s *sigv1.BackendSpec) { s.MicrosoftGraph.ClientID = "my-app" }, wantErr: "clientID"},
+		{name: "no namespace on a cluster backend", mutate: func(s *sigv1.BackendSpec) { s.MicrosoftGraph.CredentialsRef.Namespace = "" },
+			wantErr: "credentialsRef.namespace"},
+		{name: "allowedSenders omitted", mutate: func(s *sigv1.BackendSpec) { s.AllowedSenders = nil }, wantErr: "spec.allowedSenders"},
+		{name: "allowedSenders empty", mutate: func(s *sigv1.BackendSpec) { s.AllowedSenders = []string{} }, wantErr: "spec.allowedSenders"},
+		{name: "smtp block as well", mutate: func(s *sigv1.BackendSpec) { s.SMTP = &sigv1.SMTPBackendSpec{} }, wantErr: "spec.smtp"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewClusterMailBackendValidator().ValidateCreate(context.Background(), graphBackend(tc.mutate))
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+
+	// A namespaced MailBackend reads its own namespace only.
+	mb := &sigv1.MailBackend{ObjectMeta: metav1.ObjectMeta{Name: "m365", Namespace: "team"}, Spec: graphBackend(nil).Spec}
+	if _, err := NewMailBackendValidator().ValidateCreate(context.Background(), mb); err == nil || !strings.Contains(err.Error(), "cross-namespace") {
+		t.Fatalf("want cross-namespace refusal, got %v", err)
+	}
+
+	// The graph block on an smtp backend is refused too.
+	smtp := validClusterBackend(nil)
+	smtp.Spec.MicrosoftGraph = graphBackend(nil).Spec.MicrosoftGraph
+	if _, err := NewClusterMailBackendValidator().ValidateCreate(context.Background(), smtp); err == nil || !strings.Contains(err.Error(), "spec.microsoftGraph") {
+		t.Fatalf("want spec.microsoftGraph refused on smtp, got %v", err)
 	}
 }

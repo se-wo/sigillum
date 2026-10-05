@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -305,6 +306,19 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 	}
 	sendSpan.End()
 
+	if err != nil && errors.Is(err, driver.ErrRecipientNotInEnvelope) {
+		// An API backend delivers to the header recipients; one the policy
+		// never checked as an envelope recipient is a policy refusal
+		// (SPEC US-6.1), not an upstream failure. Nothing was sent.
+		if charged {
+			if rerr := g.Limiter.Refund(ctx, rlKey); rerr != nil {
+				logger.Warn("rate limit refund failed", "policy", p.Name, "err", rerr)
+			}
+		}
+		detail := strings.TrimPrefix(err.Error(), driver.ErrUpstreamPermanent.Error()+": ")
+		return deny(p.Name, policy.DenyRecipientBlocked, detail, backendKey,
+			"backend", backendKey, "restriction", "headers")
+	}
 	if err != nil {
 		// A permanent rejection (5xx to MAIL, RCPT or DATA) and a transient
 		// failure get different reasons, so SIEM rules and dashboards can

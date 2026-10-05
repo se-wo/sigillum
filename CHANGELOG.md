@@ -45,6 +45,18 @@ the version being prepared in the same pull request as the change.
   addresses or globs anchored on a domain; an empty list denies every
   sender and draws a warning. The Gmail and Microsoft 365 recipes pin
   their backend to the mailbox.
+- Microsoft Graph backend (`type: microsoftGraph`) for Microsoft 365 work
+  and school accounts, app-only with an Entra application and
+  `POST /users/{From}/sendMail`, so it needs no SMTP AUTH and keeps working
+  after Basic auth for SMTP is switched off at the end of December 2026
+  (US-6.1). `spec.microsoftGraph` holds `tenantID`, `clientID` and
+  `credentialsRef` (key `client_secret`); `allowedSenders` is required.
+  REST and the SMTP proxy both work. The delivered recipients always equal
+  the checked envelope: a `To` or `Cc` address outside it is refused as
+  `recipient_not_allowed`, blind copies go into `Bcc`. Messages up to 4 MB.
+  The health check acquires a token, so a wrong secret shows as not ready.
+  Recipe `examples/providers/microsoft-365-graph.yaml`, with RBAC for
+  Applications to confine the app to its mailboxes.
 
 ### Changed
 

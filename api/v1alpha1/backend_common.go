@@ -92,6 +92,24 @@ type SMTPBackendSpec struct {
 	HeloDomain string `json:"heloDomain,omitempty"`
 }
 
+// MicrosoftGraphBackendSpec is the shape of a microsoftGraph backend (SPEC
+// US-6.1 stage 1): an Entra ID application with the Mail.Send application
+// permission. It sends as the From mailbox of each message, bounded by the
+// backend's allowedSenders, which is required for this type.
+type MicrosoftGraphBackendSpec struct {
+	// TenantID is the directory (tenant) ID or a verified domain of the
+	// tenant, in lower case.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	TenantID string `json:"tenantID"`
+	// ClientID is the application (client) ID of the app registration.
+	// +kubebuilder:validation:MinLength=1
+	ClientID string `json:"clientID"`
+	// CredentialsRef points at the Secret holding the client secret under
+	// the key client_secret.
+	CredentialsRef SecretReference `json:"credentialsRef"`
+}
+
 // SecretReference is a name (and optional namespace) reference to a
 // Kubernetes secret. ClusterMailBackend always sets Namespace; MailBackend
 // implicitly resolves to its own namespace if Namespace is empty.
@@ -127,6 +145,10 @@ type BackendSpec struct {
 	// SMTP is required when type == smtp.
 	// +optional
 	SMTP *SMTPBackendSpec `json:"smtp,omitempty"`
+
+	// MicrosoftGraph is required when type == microsoftGraph.
+	// +optional
+	MicrosoftGraph *MicrosoftGraphBackendSpec `json:"microsoftGraph,omitempty"`
 
 	// HealthCheck controls periodic probing.
 	// +optional
@@ -238,6 +260,9 @@ const (
 const (
 	SMTPSecretUsernameKey = "username"
 	SMTPSecretPasswordKey = "password"
+	// GraphSecretClientSecretKey holds a microsoftGraph backend's client
+	// secret.
+	GraphSecretClientSecretKey = "client_secret"
 )
 
 // avoid unused import warning in some builds

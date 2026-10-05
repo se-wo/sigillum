@@ -152,7 +152,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 
 *Acceptance criteria:*
 - Namespace-scoped CRD `MailBackend` and cluster-scoped CRD `ClusterMailBackend`.
-- The spec has a `type` discriminator (`smtp` implemented; `microsoftGraph` and `gmail` planned for v0.4.0, `sendgrid` reserved in the schema enum).
+- The spec has a `type` discriminator (`smtp` implemented, `microsoftGraph` **[v0.4.0]**; `gmail` planned for v0.4.0, `sendgrid` reserved in the schema enum).
 - For `type: smtp`: an `endpoints` list (at least one entry), `authType`, and `credentialsRef` (required unless `authType: NONE`).
 - `endpoints` is an ordered failover list; sends use the first Ready endpoint.
 - The validating webhook checks the spec **statically**: it rejects types without a registered driver, missing `smtp` block, empty endpoints, `insecureSkipVerify: true`, a missing `credentialsRef` when auth is required, a missing `credentialsRef.namespace` on `ClusterMailBackend`, and a cross-namespace `credentialsRef` on `MailBackend`.
@@ -503,7 +503,7 @@ Two paths, one per kind of account:
 | Microsoft 365 work or school account | Graph driver, app-only (stage 1) | Needs no SMTP AUTH, which new tenants have switched off and admins often disable per mailbox |
 | Personal Microsoft account (Outlook.com, Microsoft 365 Personal / Family) | SMTP driver with `XOAUTH2`, delegated (stage 2) | Outlook.com keeps SMTP with OAuth. The existing SMTP driver relays the message byte for byte with its envelope, so there is no header-recipient problem (below) and no 4 MB request limit, and the change is much smaller than a second Graph mode |
 
-*Stage 1 — Graph driver* **[planned v0.4.0; driver in `internal/driver/graph` since row 4a, enabled with 4b]**, for work and school accounts:
+*Stage 1 — Graph driver* **[v0.4.0]**, for work and school accounts:
 - `type: microsoftGraph`, send only. It does not depend on SMTP AUTH being enabled for tenant or mailbox.
 - App-only: OAuth2 client-credentials flow against Entra ID, `POST /users/{mailbox}/sendMail` with the application permission `Mail.Send`. Tenant ID and client ID in the spec, `client_secret` in the credentials Secret. The driver caches the access token and refreshes it before expiry. Certificate credentials and workload identity federation stay in the backlog (§8.8, cloud workload identity). Delegated Graph sign-in is in the backlog too (§8.8); personal accounts use stage 2.
 - App-only `Mail.Send` can send as any mailbox in the tenant. The backend sends as the `From` mailbox and requires its own `allowedSenders` (US-2.8); the recipe (`examples/providers/`) additionally confines the Entra application to those mailboxes with Exchange Online RBAC for Applications.
@@ -517,7 +517,8 @@ Two paths, one per kind of account:
 - Implementation notes (row 4a): REST messages are assembled to MIME like for SMTP; the request is `POST {base}/users/{From}/sendMail` with the Base64 MIME as `text/plain`, and `202` is success (the response's `request-id` is the upstream ID). A `401` drops the token and retries once with a new one; a second `401` is permanent. Graph's `Retry-After` is not passed on yet: driver errors carry no delay, so a throttled send answers like any transient upstream error (`502`, SMTP `451`) and the client retries on its own schedule. A failed token request is permanent for `invalid_client` and the other permanent token errors (§4.5), transient otherwise. Because the gateway builds a driver per send, the token cache is shared by every driver of the same tenant endpoint, client and secret, and by the health check. The envelope rule refuses a message that still carries `Bcc` (the SMTP proxy strips it, REST never writes it) and validates every envelope recipient as a bare address before writing the `Bcc` field; `FuzzPrepare` checks that the delivered set equals the envelope.
 - The health check acquires a token, so a wrong tenant, client ID or secret shows up as `Ready=False` instead of on the first send. `status.endpointStatus` has a single entry for the Graph endpoint.
 - Exchange Online's daily limit (10,000 recipients per mailbox) applies to Graph as well; the daily limit (US-2.7) ships in the same release.
-- `MailBackend.spec.type` already accepts `microsoftGraph` in the schema enum; the webhook rejects it until the driver is registered. No CRD redesign is needed.
+- Spec: `spec.microsoftGraph` with `tenantID` (tenant ID or verified domain, lower case, since it becomes part of the token URL), `clientID` (a GUID) and `credentialsRef` (key `client_secret`). The webhook requires the block for `type: microsoftGraph`, refuses it on other types and refuses `spec.smtp` on Graph backends, and requires a non-empty `allowedSenders` (US-2.8). The recipe `examples/providers/microsoft-365-graph.yaml` confines the app to its mailboxes with RBAC for Applications in Exchange Online and warns against also granting `Mail.Send` with admin consent in Entra, which would apply to every mailbox.
+- A header recipient outside the envelope is a policy refusal: `403 recipient-not-allowed` on REST, `550 5.7.1` on SMTP, audit and metric reason `recipient_not_allowed` with the backend in the audit record, not charged to the rate limit.
 
 *Stage 2 — XOAUTH2 for the SMTP driver* **[planned v0.4.0]**, the path for personal accounts:
 - New `authType: XOAUTH2` for SMTP backends, with two Microsoft token sources:
@@ -767,7 +768,7 @@ With `healthCheck.enabled: false` the backend is reported Ready without probing,
 |---|---|
 | `smtp` | `username`, `password` |
 | `smtp` with `authType: XOAUTH2` [planned v0.4.0] | as the matching `microsoftGraph` or `gmail` mode below |
-| `microsoftGraph` app-only [planned v0.4.0] | `client_secret` (plus tenant / client ID in the spec) |
+| `microsoftGraph` app-only [v0.4.0] | `client_secret` (plus tenant / client ID in the spec) |
 | `gmail` service account [planned v0.4.0] | `service_account.json` |
 | Delegated, Microsoft or Google [planned v0.4.0] | optional `refresh_token` from `sigillum oauth login`; `client_secret` for Google's desktop client (client ID in the spec). The controller keeps the current tokens in its own Secret `sigillum-oauth-<backend>` (US-6.3). |
 | `sendgrid` [backlog] | `api_key` |
@@ -1067,7 +1068,7 @@ type RawSender interface {
 
 Drivers register a factory per type in a process-wide registry. The webhook rejects backend types without a registered factory. The SMTP driver supports STARTTLS and implicit TLS, `PLAIN` / `LOGIN` / `CRAM-MD5`, and MIME multipart assembly.
 
-**Capability matrix** (target picture; only the `smtp` row is implemented, and `send` for `microsoftGraph` and `gmail` is planned for v0.4.0):
+**Capability matrix** (target picture; implemented are the `smtp` row and `send` for `microsoftGraph` [v0.4.0]; `send` for `gmail` is planned for v0.4.0):
 
 | Backend type | send | read | subscribeEvents | folders |
 |---|---|---|---|---|
@@ -1404,7 +1405,7 @@ The release is built as a sequence of small pull requests (§8.0, `CONTRIBUTING.
 | 2 | `spec.allowedSenders` on backends, for `smtp` (done) | — | Pin a relay to its domains | US-2.8 |
 | 3 | OAuth token sources (`internal/oauth`): client credentials and cache, against a fake token endpoint; no user-visible change (done, §4.5) | — | — | US-6.1 |
 | 4a | Graph driver package (`internal/driver/graph`), app-only, messages up to 4 MB, recipients from the envelope; not registered yet (done) | 2, 3 | — | US-6.1 stage 1 |
-| 4b | `spec.microsoftGraph` (tenant, client ID, credentials), resolver, driver registration, webhook accepts `microsoftGraph` and requires `allowedSenders`; audit reason `recipient_not_allowed` for the envelope rule; recipe | 4a | Microsoft 365 work accounts | US-6.1 stage 1 |
+| 4b | `spec.microsoftGraph` (tenant, client ID, credentials), resolver, driver registration, webhook accepts `microsoftGraph` and requires `allowedSenders`; audit reason `recipient_not_allowed` for the envelope rule; recipe (done) | 4a | Microsoft 365 work accounts | US-6.1 stage 1 |
 | 5a | Credential Secret guard admits OAuth token Secrets (label, owner, keys, release namespace) (done) | — | — | US-6.3, §4.10 |
 | 5b | Refresh-token source, token Secret and broker in the controller, `sigillum_backend_authorized`; no provider yet (done) | 3, 5a | — | US-6.3 |
 | 6 | `authType: XOAUTH2` on the SMTP driver with device code sign-in (`smtp-mail.outlook.com`); recipe `outlook-com.yaml` | 2, 5 | **Outlook.com** | US-6.1 stage 2, US-6.3 |

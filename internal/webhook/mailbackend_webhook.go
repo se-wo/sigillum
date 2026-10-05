@@ -5,9 +5,11 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -127,19 +129,17 @@ func (v *MailBackendValidator[T]) validate(obj runtime.Object) (admission.Warnin
 			if spec.SMTP.AuthType != "" && spec.SMTP.AuthType != sigv1.SMTPAuthNone && spec.SMTP.CredentialsRef == nil {
 				allErrs = append(allErrs, field.Required(smtpPath.Child("credentialsRef"), "credentialsRef is required when authType != NONE"))
 			}
-			if v.clusterScoped && spec.SMTP.CredentialsRef != nil && spec.SMTP.CredentialsRef.Namespace == "" {
-				allErrs = append(allErrs, field.Required(smtpPath.Child("credentialsRef").Child("namespace"),
-					"namespace is required for credentialsRef on cluster-scoped backends"))
-			}
-			// Prevent cross-namespace Secret reads: a namespace-scoped MailBackend
-			// must resolve its credentials within its own namespace only.
-			if !v.clusterScoped && spec.SMTP.CredentialsRef != nil &&
-				spec.SMTP.CredentialsRef.Namespace != "" && spec.SMTP.CredentialsRef.Namespace != selfNs {
-				allErrs = append(allErrs, field.Invalid(smtpPath.Child("credentialsRef").Child("namespace"),
-					spec.SMTP.CredentialsRef.Namespace,
-					"cross-namespace credential references are not permitted on namespace-scoped backends"))
+			if spec.SMTP.CredentialsRef != nil {
+				allErrs = append(allErrs, v.validateCredentialsRef(smtpPath.Child("credentialsRef"), *spec.SMTP.CredentialsRef, selfNs)...)
 			}
 		}
+		if spec.MicrosoftGraph != nil {
+			allErrs = append(allErrs, field.Forbidden(specPath.Child("microsoftGraph"), "only for type microsoftGraph"))
+		}
+	}
+
+	if spec.Type == sigv1.BackendMicrosoftGraph {
+		allErrs = append(allErrs, v.validateGraph(specPath, spec, selfNs)...)
 	}
 
 	// A backend's sender list bounds every policy that uses it, so its
@@ -160,6 +160,50 @@ func (v *MailBackendValidator[T]) validate(obj runtime.Object) (admission.Warnin
 		return warnings, nil
 	}
 	return warnings, apierrors.NewInvalid(gk, name, allErrs)
+}
+
+// validateGraph checks a microsoftGraph backend (SPEC US-6.1, US-2.8).
+func (v *MailBackendValidator[T]) validateGraph(specPath *field.Path, spec *sigv1.BackendSpec, selfNs string) field.ErrorList {
+	var errs field.ErrorList
+	gPath := specPath.Child("microsoftGraph")
+	if g := spec.MicrosoftGraph; g == nil {
+		errs = append(errs, field.Required(gPath, "spec.microsoftGraph is required when type=microsoftGraph"))
+	} else {
+		// The tenant becomes part of the token URL.
+		if len(validation.IsDNS1123Subdomain(g.TenantID)) > 0 {
+			errs = append(errs, field.Invalid(gPath.Child("tenantID"), g.TenantID,
+				"must be the directory (tenant) ID or a verified domain of the tenant, in lower case"))
+		}
+		if _, err := uuid.Parse(g.ClientID); err != nil || len(g.ClientID) != 36 {
+			errs = append(errs, field.Invalid(gPath.Child("clientID"), g.ClientID,
+				"must be the application (client) ID of the app registration, a GUID"))
+		}
+		errs = append(errs, v.validateCredentialsRef(gPath.Child("credentialsRef"), g.CredentialsRef, selfNs)...)
+	}
+	// App-only Mail.Send can send as any mailbox of the tenant; the
+	// backend's list is what bounds it.
+	if len(spec.AllowedSenders) == 0 {
+		errs = append(errs, field.Required(specPath.Child("allowedSenders"),
+			"a microsoftGraph backend can send as any mailbox of the tenant; list the mailboxes it sends for"))
+	}
+	if spec.SMTP != nil {
+		errs = append(errs, field.Forbidden(specPath.Child("smtp"), "only for type smtp"))
+	}
+	return errs
+}
+
+// validateCredentialsRef requires a namespace on cluster-scoped backends and
+// forbids cross-namespace Secret reads from namespace-scoped ones.
+func (v *MailBackendValidator[T]) validateCredentialsRef(p *field.Path, ref sigv1.SecretReference, selfNs string) field.ErrorList {
+	if v.clusterScoped && ref.Namespace == "" {
+		return field.ErrorList{field.Required(p.Child("namespace"),
+			"namespace is required for credentialsRef on cluster-scoped backends")}
+	}
+	if !v.clusterScoped && ref.Namespace != "" && ref.Namespace != selfNs {
+		return field.ErrorList{field.Invalid(p.Child("namespace"), ref.Namespace,
+			"cross-namespace credential references are not permitted on namespace-scoped backends")}
+	}
+	return nil
 }
 
 func asStringSlice(types []driver.Type) []string {
