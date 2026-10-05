@@ -28,6 +28,7 @@ import (
 	"github.com/se-wo/sigillum/internal/audit"
 	"github.com/se-wo/sigillum/internal/gateway"
 	"github.com/se-wo/sigillum/internal/policy"
+	"github.com/se-wo/sigillum/internal/policy/ratelimit"
 )
 
 type auditSink struct {
@@ -45,7 +46,7 @@ type fixedLimiter struct{}
 
 func (fixedLimiter) Refund(context.Context, string) error { return nil }
 
-func (fixedLimiter) Allow(context.Context, string, int32, int32) (bool, time.Duration, error) {
+func (fixedLimiter) Allow(context.Context, string, ratelimit.Limits) (bool, time.Duration, error) {
 	return true, 0, nil
 }
 

@@ -16,11 +16,24 @@ the version being prepared in the same pull request as the change.
 
 - Apply the CRDs before upgrading:
   `kubectl apply --server-side -f charts/sigillum/crds/`. The 0.4.0 pods
-  refuse to start on 0.3 CRDs, which would drop a backend's
-  `allowedSenders` without an error and leave it unbounded.
+  refuse to start on 0.3 CRDs, which would drop `messagesPerDay` and a
+  backend's `allowedSenders` without an error, leaving the policy without
+  a daily cap and the backend unbounded.
+- The credential Secret guard changes (it also admits the OAuth token
+  Secrets of delegated backends). Upgrade the chart and the controller
+  together with `helm upgrade`. While the old guard and a new
+  controller, or the new guard and an old controller, meet during the
+  rollout, that controller reports the guard as changed and writes no
+  generated credential Secrets (`SecretsManaged=False`) until the other
+  side is updated; it re-checks every 30 s.
 
 ### Added
 
+- `MailPolicy.spec.rateLimits.messagesPerDay`: a sliding 24-hour cap per
+  policy, next to the per-minute and per-hour caps, to keep one workload
+  from using up the daily quota of the upstream mailbox (US-2.7). With a
+  daily cap, the in-memory store keeps a timestamp per message for a day
+  and Redis keeps the counter key for a day.
 - `MailBackend.spec.allowedSenders` and
   `ClusterMailBackend.spec.allowedSenders`: the senders a backend sends
   for, checked on every send in addition to the policy's
@@ -32,6 +45,24 @@ the version being prepared in the same pull request as the change.
   addresses or globs anchored on a domain; an empty list denies every
   sender and draws a warning. The Gmail and Microsoft 365 recipes pin
   their backend to the mailbox.
+
+### Changed
+
+- `Retry-After` (REST) is the wait until every full window has room
+  again, not only the shortest one; a caller retrying then is no longer
+  rejected by the hourly or daily window right after.
+- Credential Secret guard: a second allowed shape for the OAuth token
+  Secrets of delegated backends (label `sigillum.dev/oauth-token`,
+  annotation `sigillum.dev/oauth-token-uid`, controlled by the
+  `MailBackend` or `ClusterMailBackend`, only the keys `refresh_token`,
+  `access_token` and `expires_at`), also in the release namespace. Nothing
+  writes such Secrets yet (US-6.3).
+
+### Fixed
+
+- A message now leaves a rate-limit window the moment it is as old as the
+  window. Before, a caller retrying exactly after `Retry-After` could be
+  rejected once more.
 
 ## [0.3.1] - unreleased
 
@@ -46,6 +77,9 @@ the version being prepared in the same pull request as the change.
 
 - Continuous fuzzing of the SMTP, REST, address and credential parsers
   with Go's native fuzzer (`make fuzz`, `fuzz` workflow on PRs and daily).
+- Static analysis of the GitHub Actions workflows and local actions with
+  actionlint and zizmor (`make lint-actions`, `lint-actions` workflow on
+  PRs and weekly).
 
 ## [0.3.0] - 2026-09-26
 

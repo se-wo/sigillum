@@ -15,8 +15,8 @@ before forwarding through a `MailBackend` (SMTP) relay.
   `LOGIN`); opt-in pod-IP fallback for SMTP clients that cannot authenticate
 - **Policy:** sender allowlists (envelope and header), recipient domain and
   address allowlists and domain denylists, size and recipient limits,
-  sliding-window rate limits (in-memory or Redis for multi-replica
-  deployments)
+  sliding-window rate limits per minute, hour and day (in-memory or Redis
+  for multi-replica deployments)
 - **Drivers:** SMTP (STARTTLS, PLAIN/LOGIN/CRAM-MD5). Microsoft Graph and
   the Gmail API are planned for v0.4.0; SendGrid is a reserved enum value,
   not implemented.
@@ -94,6 +94,7 @@ spec:
   rateLimits:
     messagesPerMinute: 60
     messagesPerHour: 1000
+    messagesPerDay: 5000          # stay below the upstream mailbox's daily quota
 ```
 
 Mount a projected token with audience `sigillum` in the workload pod, then:
@@ -268,7 +269,9 @@ docker buildx imagetools inspect ghcr.io/se-wo/sigillum:0.3.0 \
 
 In CI, `govulncheck` fails the build on known vulnerabilities that the code
 actually reaches, dependency review blocks PRs that add vulnerable
-dependencies, and CodeQL scans the Go code and the workflows. Go's native
+dependencies, and CodeQL scans the Go code and the workflows. actionlint and
+zizmor check the workflows and local actions for mistakes and security issues
+([`lint-actions.yml`](.github/workflows/lint-actions.yml)). Go's native
 fuzzer exercises the parsers of SMTP and REST input on every PR and daily
 ([`fuzz.yml`](.github/workflows/fuzz.yml)). Dependabot
 opens weekly update PRs for Go modules, Actions and base images, after a
@@ -292,6 +295,7 @@ cmd/sigillum/                  # single entrypoint, --mode=api|controller|smtp
 api/v1alpha1/                  # CRD types + generated deepcopy
 internal/driver/               # Driver interface + registry
 internal/driver/smtp/          # SMTP driver (STARTTLS, PLAIN/LOGIN/CRAM-MD5, MIME)
+internal/oauth/                # OAuth 2.0 token sources and cache for API backends (v0.4.0, not wired yet)
 internal/policy/               # priority+tiebreak engine, sliding-window rate limit (memory, Redis)
 internal/credential/           # MailCredential usernames, hashing, verification, Secret guard
 internal/gateway/              # transport-agnostic send pipeline shared by REST and SMTP

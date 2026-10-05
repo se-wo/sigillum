@@ -18,7 +18,7 @@ import (
 // Guard describes the credential Secret guard (SPEC §4.10): a
 // ValidatingAdmissionPolicy and binding that restrict the controller's
 // Secret writes to generated credential Secrets outside the excluded
-// namespaces. RBAC cannot narrow create/patch by label, so the controller
+// namespaces, and to the OAuth token Secrets of delegated backends. RBAC cannot narrow create/patch by label, so the controller
 // writes Secrets only while this guard is in place, unchanged.
 //
 // The Helm chart renders the same objects (templates/credential-guard.yaml);
@@ -32,29 +32,53 @@ type Guard struct {
 	Exclusions         Exclusions
 }
 
-// Static CEL of the guard. Only the variables below depend on configuration.
+// Static CEL of the guard. Only the variables releaseNamespace,
+// excludedNames and excludedPrefixes depend on configuration.
+//
+// The guard admits two shapes of Secret, each with its own owner, keys and
+// namespaces: a generated MailCredential Secret (US-3.7), and the OAuth
+// token Secret of a delegated backend (US-6.3). A Secret must have exactly
+// one of the two shapes; every validation below checks the rules of the
+// shape the Secret claims.
 const (
 	celCredentialVar = "has(object.metadata.labels) && '" + sigv1.CredentialLabel + "' in object.metadata.labels" +
 		" ? object.metadata.labels['" + sigv1.CredentialLabel + "'] : ''"
 	celUIDVar = "has(object.metadata.annotations) && '" + sigv1.CredentialUIDAnnotation + "' in object.metadata.annotations" +
 		" ? object.metadata.annotations['" + sigv1.CredentialUIDAnnotation + "'] : ''"
+	celOAuthBackendVar = "has(object.metadata.labels) && '" + sigv1.OAuthTokenLabel + "' in object.metadata.labels" +
+		" ? object.metadata.labels['" + sigv1.OAuthTokenLabel + "'] : ''"
+	celOAuthUIDVar = "has(object.metadata.annotations) && '" + sigv1.OAuthTokenUIDAnnotation + "' in object.metadata.annotations" +
+		" ? object.metadata.annotations['" + sigv1.OAuthTokenUIDAnnotation + "'] : ''"
+	celIsCredentialVar = "variables.credential != '' && variables.uid != '' && variables.oauthBackend == '' && variables.oauthUID == ''"
+	celIsOAuthVar      = "variables.oauthBackend != '' && variables.oauthUID != '' && variables.credential == '' && variables.uid == ''"
 
-	celLabelled = "variables.credential != '' && variables.uid != ''"
+	celLabelled = "variables.isCredential || variables.isOAuth"
 	celOwned    = "has(object.metadata.ownerReferences) && object.metadata.ownerReferences.exists(r," +
-		" r.apiVersion.startsWith('sigillum.dev/') && r.kind == 'MailCredential' &&" +
-		" r.name == variables.credential && r.uid == variables.uid && has(r.controller) && r.controller)"
-	celSameOwner = "request.operation != 'UPDATE' || (" +
+		" r.apiVersion.startsWith('sigillum.dev/') && has(r.controller) && r.controller && (variables.isCredential" +
+		" ? r.kind == 'MailCredential' && r.name == variables.credential && r.uid == variables.uid" +
+		" : (r.kind == 'MailBackend' || r.kind == 'ClusterMailBackend') && r.name == variables.oauthBackend && r.uid == variables.oauthUID))"
+	celSameOwner = "request.operation != 'UPDATE' || (variables.isCredential ? (" +
 		"has(oldObject.metadata.labels) && '" + sigv1.CredentialLabel + "' in oldObject.metadata.labels &&" +
 		" oldObject.metadata.labels['" + sigv1.CredentialLabel + "'] == variables.credential &&" +
 		" has(oldObject.metadata.annotations) && '" + sigv1.CredentialUIDAnnotation + "' in oldObject.metadata.annotations &&" +
-		" oldObject.metadata.annotations['" + sigv1.CredentialUIDAnnotation + "'] == variables.uid)"
+		" oldObject.metadata.annotations['" + sigv1.CredentialUIDAnnotation + "'] == variables.uid) : (" +
+		"has(oldObject.metadata.labels) && '" + sigv1.OAuthTokenLabel + "' in oldObject.metadata.labels &&" +
+		" oldObject.metadata.labels['" + sigv1.OAuthTokenLabel + "'] == variables.oauthBackend &&" +
+		" has(oldObject.metadata.annotations) && '" + sigv1.OAuthTokenUIDAnnotation + "' in oldObject.metadata.annotations &&" +
+		" oldObject.metadata.annotations['" + sigv1.OAuthTokenUIDAnnotation + "'] == variables.oauthUID))"
 	// Only Opaque: with type kubernetes.io/service-account-token and a
 	// service-account.name annotation, the token controller would fill the
 	// Secret with a token of any ServiceAccount in the namespace.
 	celOpaque   = "has(object.type) && object.type == 'Opaque'"
-	celDataKeys = "!has(object.data) || object.data.all(k, k in ['" + sigv1.CredentialSecretUsernameKey + "', '" +
-		sigv1.CredentialSecretPasswordKey + "', '" + sigv1.CredentialSecretHostKey + "', '" + sigv1.CredentialSecretPortKey + "'])"
-	celNamespace = "request.namespace != variables.releaseNamespace &&" +
+	celDataKeys = "!has(object.data) || object.data.all(k, variables.isCredential" +
+		" ? k in ['" + sigv1.CredentialSecretUsernameKey + "', '" + sigv1.CredentialSecretPasswordKey + "', '" +
+		sigv1.CredentialSecretHostKey + "', '" + sigv1.CredentialSecretPortKey + "']" +
+		" : k in ['" + sigv1.OAuthSecretRefreshTokenKey + "', '" + sigv1.OAuthSecretAccessTokenKey + "', '" +
+		sigv1.OAuthSecretExpiresAtKey + "'])"
+	// A backend's credentials, and so its token Secret, often live in the
+	// release namespace; generated mail credentials never do.
+	celNamespace = "variables.isOAuth && request.namespace == variables.releaseNamespace ||" +
+		" request.namespace != variables.releaseNamespace &&" +
 		" !(request.namespace in variables.excludedNames) &&" +
 		" !variables.excludedPrefixes.exists(p, request.namespace.startsWith(p))"
 )
@@ -99,18 +123,25 @@ func (g Guard) Policy() *admv1.ValidatingAdmissionPolicy {
 				{Name: "excludedPrefixes", Expression: celJSON(prefixes)},
 				{Name: "credential", Expression: celCredentialVar},
 				{Name: "uid", Expression: celUIDVar},
+				{Name: "oauthBackend", Expression: celOAuthBackendVar},
+				{Name: "oauthUID", Expression: celOAuthUIDVar},
+				{Name: "isCredential", Expression: celIsCredentialVar},
+				{Name: "isOAuth", Expression: celIsOAuthVar},
 			},
 			Validations: []admv1.Validation{
 				{Expression: celLabelled, Message: "the Sigillum controller may only write Secrets labelled " +
-					sigv1.CredentialLabel + " and annotated " + sigv1.CredentialUIDAnnotation},
+					sigv1.CredentialLabel + " and annotated " + sigv1.CredentialUIDAnnotation + ", or labelled " +
+					sigv1.OAuthTokenLabel + " and annotated " + sigv1.OAuthTokenUIDAnnotation},
 				{Expression: celOwned, Message: "the Secret must be controlled by the MailCredential named in its " +
-					sigv1.CredentialLabel + " label"},
+					sigv1.CredentialLabel + " label, or by the backend named in its " + sigv1.OAuthTokenLabel + " label"},
 				{Expression: celSameOwner, Message: "the Sigillum controller may only update Secrets that already " +
-					"belong to the same MailCredential"},
+					"belong to the same MailCredential or backend"},
 				{Expression: celOpaque, Message: "the Sigillum controller may only write Secrets of type Opaque"},
 				{Expression: celDataKeys, Message: "the Sigillum controller may only write the keys " +
 					sigv1.CredentialSecretUsernameKey + ", " + sigv1.CredentialSecretPasswordKey + ", " +
-					sigv1.CredentialSecretHostKey + " and " + sigv1.CredentialSecretPortKey},
+					sigv1.CredentialSecretHostKey + " and " + sigv1.CredentialSecretPortKey + " (credential Secrets) or " +
+					sigv1.OAuthSecretRefreshTokenKey + ", " + sigv1.OAuthSecretAccessTokenKey + " and " +
+					sigv1.OAuthSecretExpiresAtKey + " (OAuth token Secrets)"},
 				{Expression: celNamespace, Message: "this namespace is excluded from generated mail credentials"},
 			},
 		},

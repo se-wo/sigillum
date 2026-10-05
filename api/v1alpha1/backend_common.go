@@ -192,6 +192,47 @@ const (
 	ReasonReady                   = "Ready"
 )
 
+// Labels, annotations and keys of the Secret in which the controller keeps a
+// delegated backend's OAuth tokens (US-6.3). The credential Secret guard
+// (SPEC §4.10) lets the controller write such Secrets only with this label,
+// the backend's UID in the annotation, a controller owner reference to that
+// backend and these keys.
+const (
+	// OAuthTokenLabel's value is the name of the owning MailBackend or
+	// ClusterMailBackend.
+	OAuthTokenLabel = "sigillum.dev/oauth-token"
+	// OAuthTokenUIDAnnotation holds the owning backend's UID.
+	OAuthTokenUIDAnnotation = "sigillum.dev/oauth-token-uid"
+
+	OAuthSecretRefreshTokenKey = "refresh_token"
+	OAuthSecretAccessTokenKey  = "access_token"
+	OAuthSecretExpiresAtKey    = "expires_at"
+
+	// OAuthSeedAnnotation on the token Secret identifies the refresh token
+	// from the credentials Secret the stored one descends from (a hash),
+	// so a new sign-in there replaces the stored chain.
+	OAuthSeedAnnotation = "sigillum.dev/oauth-seed"
+	// OAuthRefreshAtAnnotation is when the controller next refreshes the
+	// access token (RFC 3339): at half its lifetime.
+	OAuthRefreshAtAnnotation = "sigillum.dev/oauth-refresh-at"
+)
+
+// ConditionAuthorized is set on delegated backends (US-6.3): True while the
+// controller holds a refresh token the provider accepts.
+const ConditionAuthorized = "Authorized"
+
+// Condition reasons of delegated backends.
+const (
+	ReasonAuthorized = "Authorized"
+	// ReasonAuthorizationRequired: there is no refresh token, or the
+	// provider rejected it (revoked consent, expiry); a person has to sign
+	// in again.
+	ReasonAuthorizationRequired = "AuthorizationRequired"
+	// ReasonTokenRefreshFailed: the provider could not be reached or
+	// answered with a temporary error; the controller retries.
+	ReasonTokenRefreshFailed = "TokenRefreshFailed"
+)
+
 // SecretKey is a structured reference for the credentials secret keys.
 // Standardised per SPEC §4.3.1: SMTP uses keys `username` and `password`.
 const (

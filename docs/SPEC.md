@@ -163,11 +163,11 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 **As a** platform engineer **I want** to cap how much mail a workload can send, **so that** one broken workload cannot disrupt mail for everyone.
 
 *Acceptance criteria:*
-- Configured in `MailPolicy.spec.rateLimits` as `messagesPerMinute` and `messagesPerHour` (0 or unset = no cap on that window).
+- Configured in `MailPolicy.spec.rateLimits` as `messagesPerMinute`, `messagesPerHour` and `messagesPerDay` **[v0.4.0]** (0 or unset = no cap on that window).
 - **Counting unit is the policy** (`<namespace>/<policy-name>`), not the namespace or the ServiceAccount. All subjects matched by one policy share one budget.
-- True sliding-window counting (timestamp log per key; Redis uses a sorted set, trimmed and counted atomically in a Lua script with Redis server time).
+- True sliding-window counting (timestamp log per key; Redis uses a sorted set, trimmed and counted atomically in a Lua script with Redis server time). A message leaves a window the moment it is as old as the window. Hits are kept for the longest capped window: one hour, or one day when the policy has a daily cap.
 - A request is charged only after it passed policy evaluation and its backend resolved. A transient upstream failure refunds the charge, so callers retrying through an outage don't exhaust their budget. A permanent upstream rejection stays charged.
-- When exceeded: HTTP `429` with a `Retry-After` header (seconds until the oldest entry leaves the window). SMTP: `421 4.7.0`.
+- When exceeded: HTTP `429` with a `Retry-After` header: seconds until every full window has room again, so a caller that waits that long is not rejected by a longer window right after (before v0.4.0 it named the shortest full window). SMTP: `421 4.7.0`.
 - State store: see §4.7. With the in-memory store every replica counts on its own.
 
 #### US-2.3 — Sender address validation **[v0.1.0, hardened v0.2.1]**
@@ -217,11 +217,16 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - The subject type (explicit ServiceAccount vs. selector) does **not** influence precedence today. Whether it should become a secondary key is open question Q-6 (§9.2).
 - A request no policy matches is rejected with `403 no-policy-matched` (default deny).
 
-#### US-2.7 — Daily limit **[planned v0.4.0]**
+#### US-2.7 — Daily limit **[v0.4.0]**
 **As a** platform engineer **I want** a per-day cap in addition to per-minute and per-hour limits, **so that** one workload cannot exhaust the upstream provider's daily sending quota for the whole organization.
 
 *Acceptance criteria:*
-- `rateLimits.messagesPerDay`, counted like the other windows (per policy, sliding window, US-2.2).
+- `rateLimits.messagesPerDay`, counted like the other windows (per policy, sliding window over the last 24 hours, not a calendar day, US-2.2).
+- It counts messages, not recipients. Providers that cap recipients per day (Microsoft 365, personal Gmail) need a cap of their quota divided by the typical recipients per message, bounded by `messageLimits.maxRecipients`.
+- A daily cap added to an existing policy counts only the messages of the last hour before the change, because shorter windows keep no more history. It is fully in effect after one day. The same holds after an upgrade from 0.3: 0.3 replicas keep only the last hour, so the cap is fully in effect one day after the last 0.3 replica is gone.
+- A replica that has not seen a daily cap yet, or a cap briefly set to 0, keeps the day of history a daily cap set up, so it does not reset the daily count. Once the cap is removed, the history shrinks back to an hour within a day.
+- Memory: the in-memory store keeps one timestamp per message for 24 hours (up to `messagesPerDay` per policy) and removes a policy's timestamps once they stop counting, also for idle and deleted policies. Redis keeps the counter key for a day.
+- The startup CRD check (US-5.1) requires the field, so a 0.3 CRD cannot silently drop a daily cap.
 - Motivation: hosted mailboxes enforce daily quotas (for example Microsoft 365 and Google Workspace cap recipients per day and mailbox); exceeding them blocks the sending account for everyone, not just the runaway workload.
 - A namespace-wide quota across policies (`MailQuota`, §4.3.3) stays in the backlog until users ask for it.
 
@@ -363,7 +368,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
   | `sigillum_policy_denied_total` | Counter | `namespace`, `policy`, `reason` | Policy denials, plus `reason="backend_not_ready"` |
   | `sigillum_auth_failures_total` **[v0.3.0]** | Counter | `transport`, `auth_method`, `reason` (`invalid_token`, `invalid_credentials`, `auth_rate_limited`, `auth_unavailable`) | Failed authentication attempts |
   | `sigillum_credential_guard_ok` **[v0.3.0]** | Gauge (controller) | — | 1 while the credential Secret guard is verified (§4.10), 0 while the controller refuses to write credential Secrets |
-  | `sigillum_backend_authorized` **[planned v0.4.0]** | Gauge (controller) | `backend` | 1 while a delegated backend (US-6.3) holds a working refresh token, 0 while it needs a new sign-in |
+  | `sigillum_backend_authorized` **[v0.4.0]** | Gauge (controller) | `backend` | 1 while a delegated backend (US-6.3) holds a working refresh token, 0 while it needs a new sign-in |
 
 - Payload errors (before policy evaluation) are not counted in metrics; they appear in the audit stream. Authentication failures are counted in `sigillum_auth_failures_total` only; no namespace label, since the claimed identity is client-supplied.
 - `ServiceMonitor` in the Helm chart (`serviceMonitor.enabled`).
@@ -422,7 +427,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - Official Helm chart with sensible defaults; every setting available via `values.yaml`.
 - CRDs ship in the chart's `crds/` directory; the generated manifests also live in `config/crd/bases/` for separate installation.
 - **CRD upgrades:** Helm installs `crds/` on first install only and never upgrades or deletes them. Upgrades apply `config/crd/bases/` (or the chart's `crds/`) explicitly, for example with `kubectl apply --server-side` or an Argo CD application. The CRD-migration runbook (§5.7) documents this.
-- **CRD version check [v0.3.0]:** an outdated CRD makes the API server prune fields it does not know, which only warns a server-side apply. A MailPolicy restricted by `allowedRecipients` alone would then allow every recipient that is not blocked, and a backend's `allowedSenders` **[v0.4.0]** would no longer bound its senders. Every component therefore reads the published OpenAPI v3 schemas at startup (readable by every authenticated client, no RBAC) and exits with an error naming the missing kinds and fields if a field the version relies on is absent. It retries for 30 s because the API server publishes a changed CRD a few seconds late. A failed rollout leaves the old pods serving. `--skip-crd-check` turns the check off for clusters that hide the OpenAPI endpoint.
+- **CRD version check [v0.3.0]:** an outdated CRD makes the API server prune fields it does not know, which only warns a server-side apply. A MailPolicy restricted by `allowedRecipients` alone would then allow every recipient that is not blocked, and one with `messagesPerDay` **[v0.4.0]** would have no daily cap, and a backend's `allowedSenders` **[v0.4.0]** would no longer bound its senders. Every component therefore reads the published OpenAPI v3 schemas at startup (readable by every authenticated client, no RBAC) and exits with an error naming the missing kinds and fields if a field the version relies on is absent. It retries for 30 s because the API server publishes a changed CRD a few seconds late. A failed rollout leaves the old pods serving. `--skip-crd-check` turns the check off for clusters that hide the OpenAPI endpoint.
 - No runtime configuration outside Kubernetes resources (no init scripts).
 - The admission webhook needs a serving certificate: either cert-manager (`webhook.certificate.useCertManager=true`) or an existing secret.
 
@@ -558,12 +563,18 @@ Personal accounts have no app-only access: no client credentials for Outlook.com
 - **Sign-in:**
   - Microsoft uses the device authorization grant (RFC 8628), run by the controller. When a delegated backend has no valid refresh token, or on any new value of the annotation `sigillum.dev/authorize`, the controller requests a device code and sets `Authorized=False`, reason `AuthorizationPending`, with the verification URL and the user code in the condition message (`kubectl describe cmb <name>`). The controller polls until the user has signed in or the code expires (15 minutes; then reason `AuthorizationExpired` until the next annotation value).
   - Google does not allow Gmail scopes in its device flow. A subcommand `sigillum oauth login --provider google|microsoft` runs the authorization code flow with PKCE and a loopback redirect (RFC 8252) on a workstation with a browser and prints the refresh token, or writes it into the credentials Secret with the user's own kubeconfig. It ships in the Sigillum binary and image; the `kubectl sigillum` plugin (US-7.2) gets the same command later. It also works for Microsoft, for users who prefer it.
-- **Token broker.** The controller is the only component that redeems the refresh token, so replicas never race and Microsoft's rotating refresh tokens are not lost:
+- **Token broker [v0.4.0, not wired to a backend type yet].** The controller is the only component that redeems the refresh token, so replicas never race and Microsoft's rotating refresh tokens are not lost:
   - It keeps the newest refresh token and the current access token with its expiry in a Secret it owns (`sigillum-oauth-<backend>`, in the backend's credentials namespace, owner reference to the backend). On start it reads that Secret and the credentials Secret and uses the newer refresh token.
   - It refreshes the access token at half its lifetime (Microsoft and Google issue access tokens for about an hour). The api-server and the SMTP proxy read the access token from the Secret through the Secret informer they already have and never see the refresh token's rotation.
   - The periodic health check refreshes the tokens even when no mail is sent, so they do not lapse from inactivity (Microsoft: refresh tokens last 90 days and rotate on use; Google: a refresh token unused for six months expires).
   - When a refresh fails permanently (revoked consent, a changed Google password, expiry), the backend goes `Ready=False` with reason `AuthorizationRequired` and the metric `sigillum_backend_authorized` drops to 0, so the alert rules (US-4.6) can page the owner; a Microsoft backend immediately starts a new device code (above).
-- **Secret guard.** Writing the token Secret extends the credential Secret guard (§4.10): the controller may `create` and `patch` only Opaque Secrets labelled `sigillum.dev/oauth-token`, with the backend's UID in an annotation, a controller owner reference to that backend, and only the keys `refresh_token`, `access_token` and `expires_at`. This is also allowed in the release namespace, for this label only. The chart grants the permission together with the guard.
+  - Implementation (`internal/controller/oauth_broker.go`, `TokenBroker.Ensure`, called on every reconcile and health check of a delegated backend):
+    - The token Secret is `sigillum-oauth-mb-<name>` for a `MailBackend` and `sigillum-oauth-cmb-<name>` for a `ClusterMailBackend` (both may keep credentials in one namespace), shortened with a hash beyond 253 characters. Besides the three keys it carries the annotations `sigillum.dev/oauth-seed` (a hash of the credentials Secret's `refresh_token` that the stored chain descends from) and `sigillum.dev/oauth-refresh-at`.
+    - "The newer refresh token" is decided by the seed: while the credentials Secret holds the refresh token the stored chain started from, the stored (possibly rotated) one is used; a different one there is a new sign-in and replaces the chain. A refresh token written straight into the token Secret (the device code flow) has an empty seed.
+    - It refreshes when `oauth-refresh-at` (half the access token's lifetime) has passed and the credential Secret guard is verified: a refresh may rotate the refresh token, so it is only redeemed while the result can be stored. A rotated token is kept in memory first, so a failed write is retried without redeeming it again.
+    - Results, for the backend's `Authorized` condition: `Authorized`; `AuthorizationRequired` (no refresh token, or the provider rejected it, as a permanent error such as `invalid_grant`; metric 0; retried every 10 minutes and on the next reconcile, which a new sign-in triggers); `TokenRefreshFailed` (a temporary error; retried after 30 s, still authorized); `GuardMissing`, `SecretConflict`, `SecretWriteFailed` as for `MailCredential`.
+    - The api-server and the SMTP proxy read the access token with `AccessTokenFromSecret`.
+- **Secret guard [v0.4.0].** Writing the token Secret extends the credential Secret guard (§4.10): the controller may `create` and `patch` only Opaque Secrets labelled `sigillum.dev/oauth-token`, with the backend's UID in the annotation `sigillum.dev/oauth-token-uid`, a controller owner reference to that backend, and only the keys `refresh_token`, `access_token` and `expires_at`. This is also allowed in the release namespace, for this label only. The chart grants the permission together with the guard.
 - **Usable means tested end to end.** A personal Outlook.com account and a personal Gmail account are supported once a person can go from the recipe (`examples/providers/outlook-com.yaml`, `examples/providers/gmail-oauth.yaml`) to a delivered message through REST and through the SMTP proxy without reading code. CI tests the flows against fake token, Graph and Gmail endpoints; before each release a maintainer runs the recipes against a real Outlook.com and a real Gmail account (a short checklist in `docs/RELEASE-CHECKS.md`), because the providers' consent screens and limits cannot be tested in CI.
 - **Identity in status.** `status.oauth.account` shows the signed-in account (from the ID token or the provider's profile call), so a sign-in with the wrong account is visible. Without `spec.allowedSenders` the backend sends only as that account (US-2.8).
 
@@ -794,6 +805,7 @@ spec:
   rateLimits:                # counted per policy, sliding window
     messagesPerMinute: 60
     messagesPerHour: 1000
+    messagesPerDay: 5000     # below the mailbox's daily quota (v0.4.0)
   messageLimits:
     maxSizeBytes: 10485760   # 10 MiB (default)
     maxRecipients: 50        # default 50; counts to + cc + bcc (REST) or RCPT TO (SMTP)
@@ -1042,6 +1054,16 @@ type RawSender interface {
 // Subscribe(ctx, *SubscribeRequest) (<-chan *Event, error)
 ```
 
+**OAuth token sources [v0.4.0, internal].** Drivers whose upstream takes no password (US-6.1 to US-6.3) get their access tokens from `internal/oauth`. A `Source` fetches a new token; the first one is the client credentials grant (`ClientCredentials`, client ID and secret in the request body), and later rows add the Google service-account assertion and refresh tokens. A `Cache` in front of it is what a driver calls on every send:
+
+- Concurrent callers share one fetch, and a caller's cancellation does not end the fetch the others wait for.
+- A token is replaced 5 minutes before expiry (at half its lifetime if it lives less than 10 minutes). Meanwhile callers get the current token without waiting; if the refresh fails, the current token is used until 30 s before its expiry.
+- A failed fetch is answered from memory for 10 s, or the endpoint's `Retry-After` if longer, so a wrong secret does not hit the token endpoint on every send.
+- `Invalidate` drops a token the upstream rejected with `401`, but only if it is still the cached one.
+- Failures are classified for the drivers' error mapping: `429`, `408`, `5xx`, `temporarily_unavailable` and transport errors are transient; any other answer (`invalid_client`, `invalid_scope`, `404`, a redirect) is permanent, which makes the backend `Ready=False` through its health check.
+- The token endpoint must be `https`, redirects are never followed (the secret goes only to the configured endpoint), and a Microsoft tenant must be a tenant ID or domain before it becomes part of the URL. The answer is limited to 1 MiB, the access token must be an RFC 6750 `b64token` (it ends up in `Authorization` headers and SASL `XOAUTH2` strings), `expires_in` is capped at 24 hours (5 minutes if missing), and the provider's error text is reduced to printable ASCII. `Token` values print without the token.
+- `internal/oauth/oauthtest` is a fake token endpoint for the tests of the drivers that use it.
+
 Drivers register a factory per type in a process-wide registry. The webhook rejects backend types without a registered factory. The SMTP driver supports STARTTLS and implicit TLS, `PLAIN` / `LOGIN` / `CRAM-MD5`, and MIME multipart assembly.
 
 **Capability matrix** (target picture; only the `smtp` row is implemented, and `send` for `microsoftGraph` and `gmail` is planned for v0.4.0):
@@ -1153,7 +1175,7 @@ The api-server and SMTP proxy read backend credentials themselves on the send pa
 - The Secret must be of type `Opaque` and hold only the keys `username`, `password`, `host` and `port`. Otherwise a Secret of type `kubernetes.io/service-account-token` would make the token controller fill it with a token of any ServiceAccount in the namespace.
 - The namespace must not match `credentials.excludeNamespaces`, and must not be the release namespace (which holds the relay credentials).
 - `DELETE` is not needed: owned Secrets are garbage-collected with their `MailCredential`.
-- **[planned v0.4.0]** A second allowed shape for the OAuth token Secrets of delegated backends (US-6.3): label `sigillum.dev/oauth-token`, the backend's UID in an annotation, a controller owner reference to that backend, type `Opaque`, only the keys `refresh_token`, `access_token` and `expires_at`. It is allowed in the backend's credentials namespace, the release namespace included. Every other rule above stays unchanged.
+- **[v0.4.0]** A second allowed shape for the OAuth token Secrets of delegated backends (US-6.3): label `sigillum.dev/oauth-token` with the backend's name, its UID in the annotation `sigillum.dev/oauth-token-uid`, a controller owner reference to that `MailBackend` or `ClusterMailBackend`, type `Opaque`, only the keys `refresh_token`, `access_token` and `expires_at`. It is allowed in the release namespace, where a `ClusterMailBackend`'s credentials usually live, and in every namespace that is not excluded; the excluded namespaces stay closed to both shapes. A Secret has exactly one shape: one carrying both labels is denied, and an update must keep the shape, owner label and UID of the existing Secret, so neither shape can take over a Secret of the other or the relay credentials in the release namespace. The guard is rendered with `credentials.enabled`; delegated backends will need it too.
 
 Without `get`, `list` or `watch`, the controller cannot read any Secret outside the backend-credential namespaces it already had. Worst case, a compromised controller can overwrite or create mail-credential Secrets; it cannot read or change anything else.
 
@@ -1242,7 +1264,7 @@ These targets are not yet verified by a benchmark in CI.
 | SMTP credentials | Generated: 256-bit random, only SHA-256 in status; bring your own: argon2id with bounded parameters. TLS required by default, failed logins throttled, revocation immediate (§4.3.4, US-3.7). Controller writes Secrets only through the credential Secret guard (§4.10). |
 | Pod Security Standard | Compatible with `restricted` |
 | SBOM / signing | Releases after v0.2.1: image and chart signed keyless with cosign, SLSA build provenance via GitHub artifact attestations, SPDX SBOM and BuildKit provenance per platform; base images pinned by digest, Actions by commit SHA (README, "Supply chain") |
-| Dependency scanning | CI: `govulncheck` (reachable vulnerabilities), dependency review on PRs (moderate and above), CodeQL for Go and workflows; Dependabot weekly updates with cooldown, security updates immediately |
+| Dependency scanning | CI: `govulncheck` (reachable vulnerabilities), dependency review on PRs (moderate and above), CodeQL for Go and workflows, actionlint and zizmor for workflows and local actions; Dependabot weekly updates with cooldown, security updates immediately |
 
 ### 5.4 Scalability
 
@@ -1377,11 +1399,12 @@ The release is built as a sequence of small pull requests (§8.0, `CONTRIBUTING.
 
 | # | Pull request | Depends on | Usable afterwards | Ref |
 |---|---|---|---|---|
-| 1 | Daily limit `rateLimits.messagesPerDay` | — | Daily cap per policy | US-2.7 |
+| 1 | Daily limit `rateLimits.messagesPerDay` (done) | — | Daily cap per policy | US-2.7 |
 | 2 | `spec.allowedSenders` on backends, for `smtp` (done) | — | Pin a relay to its domains | US-2.8 |
-| 3 | OAuth token sources (`internal/oauth`): client credentials and cache, against a fake token endpoint; no user-visible change | — | — | US-6.1 |
+| 3 | OAuth token sources (`internal/oauth`): client credentials and cache, against a fake token endpoint; no user-visible change (done, §4.5) | — | — | US-6.1 |
 | 4 | Graph driver, app-only, messages up to 4 MB, recipients from the envelope; webhook accepts `microsoftGraph`; recipe | 2, 3 | Microsoft 365 work accounts | US-6.1 stage 1 |
-| 5 | Token Secret and broker in the controller, guard extension, `sigillum_backend_authorized`; no provider yet | 3 | — | US-6.3 |
+| 5a | Credential Secret guard admits OAuth token Secrets (label, owner, keys, release namespace) (done) | — | — | US-6.3, §4.10 |
+| 5b | Refresh-token source, token Secret and broker in the controller, `sigillum_backend_authorized`; no provider yet (done) | 3, 5a | — | US-6.3 |
 | 6 | `authType: XOAUTH2` on the SMTP driver with device code sign-in (`smtp-mail.outlook.com`); recipe `outlook-com.yaml` | 2, 5 | **Outlook.com** | US-6.1 stage 2, US-6.3 |
 | 7 | `XOAUTH2` app-only for Microsoft 365 (`SMTP.SendAsApp`) | 3, 6 | Microsoft 365 over SMTP without a password | US-6.1 stage 2 |
 | 8 | `sigillum oauth login` (authorization code, PKCE, loopback) | 5 | — | US-6.3 |
@@ -1391,7 +1414,7 @@ The release is built as a sequence of small pull requests (§8.0, `CONTRIBUTING.
 | 12 | Graph messages above 4 MB via draft and upload sessions (opt-in) | 4 | Large Graph messages | US-6.1 stage 1 |
 | 13 | Release: real-account checks (`docs/RELEASE-CHECKS.md`), version bump | all | v0.4.0 | §8.0 |
 
-A backend type, `authType` or field is accepted by the webhook only from the pull request that makes it work, so `main` stays releasable after every merge. If the deadline gets tight, 11 and 12 move to v0.4.1 or v0.5.0; 1 to 6 are the minimum for Microsoft 365 and Outlook.com, and 7 for work accounts that must stay on SMTP. Rows 4 and 6 do not depend on each other and can be reviewed in parallel.
+A backend type, `authType` or field is accepted by the webhook only from the pull request that makes it work, so `main` stays releasable after every merge. If the deadline gets tight, 11 and 12 move to v0.4.1 or v0.5.0; 1 to 6 are the minimum for Microsoft 365 and Outlook.com, and 7 for work accounts that must stay on SMTP. Rows 4 and 6 do not depend on each other and can be reviewed in parallel. Row 5 turned out too large for one pull request and is split into the guard extension (5a) and the broker (5b); "5" in the dependency column means both.
 
 ### 8.4 v0.5.0 — Easy to run, easy to debug
 

@@ -1,5 +1,5 @@
-# Dependabot keeps Go modules, GitHub Actions (pinned to commit SHAs) and the
-# digest-pinned Docker base images current.
+# Dependabot keeps Go modules, GitHub Actions (pinned to commit SHAs), the
+# zizmor workflow linter and the digest-pinned Docker base images current.
 #
 # Version updates wait out a cooldown so a freshly published (and possibly
 # compromised or quickly yanked) release is not pulled in on day one.
@@ -43,6 +43,17 @@ updates:
       actions:
         patterns:
           - "*"
+
+  # zizmor for the lint-actions workflow (hash-pinned requirements file).
+  - package-ecosystem: pip
+    directory: /.github/zizmor
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "deps(actions)"
 
   # Covers Dockerfile and Dockerfile.ci.
   - package-ecosystem: docker

@@ -256,9 +256,13 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 
 	rlKey := p.Namespace + "/" + p.Name
 	charged := false
-	if rl := p.Spec.RateLimits; rl != nil && (rl.MessagesPerMinute > 0 || rl.MessagesPerHour > 0) {
+	var limits ratelimit.Limits
+	if rl := p.Spec.RateLimits; rl != nil {
+		limits = ratelimit.Limits{PerMinute: rl.MessagesPerMinute, PerHour: rl.MessagesPerHour, PerDay: rl.MessagesPerDay}
+	}
+	if !limits.None() {
 		rlCtx, rlSpan := telemetry.Tracer().Start(ctx, "ratelimit.allow")
-		ok, retry, err := g.Limiter.Allow(rlCtx, rlKey, rl.MessagesPerMinute, rl.MessagesPerHour)
+		ok, retry, err := g.Limiter.Allow(rlCtx, rlKey, limits)
 		rlSpan.SetAttributes(attribute.Bool("sigillum.allowed", ok))
 		if err != nil {
 			rlSpan.SetStatus(codes.Error, err.Error())
