@@ -401,7 +401,7 @@ func resultError(res gateway.Result, msgID string) error {
 			return e(554, smtp.EnhancedCode{5, 0, 0}, "Upstream relay rejected the message")
 		}
 		return e(451, smtp.EnhancedCode{4, 4, 1}, "Upstream relay unavailable")
-	default: // backend not ready, limiter unavailable
+	default: // backend not ready, policy invalid, limiter unavailable
 		return e(451, smtp.EnhancedCode{4, 3, 0}, "Temporarily unavailable")
 	}
 }

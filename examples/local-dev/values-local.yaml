@@ -14,7 +14,8 @@ smtp:
 rateLimit:
   backend: memory
 # The webhook needs a serving certificate (cert-manager or a Secret). Skip it
-# locally; the controller still reports invalid resources in status.
+# locally: the controller still reports invalid policies and backends as
+# Ready=False (InvalidConfiguration), and the gateway refuses to use them.
 webhook:
   enabled: false
 logLevel: debug

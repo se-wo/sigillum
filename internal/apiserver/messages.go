@@ -275,6 +275,15 @@ func writeResult(w http.ResponseWriter, msgID string, res gateway.Result) {
 			Policy:    res.Policy,
 			MessageID: msgID,
 		})
+	case gateway.StatusPolicyInvalid:
+		problem.Write(w, problem.Problem{
+			Type:      problem.TypeBase + problem.TypePolicyInvalid,
+			Title:     "Policy is invalid",
+			Status:    http.StatusServiceUnavailable,
+			Detail:    res.Detail,
+			Policy:    res.Policy,
+			MessageID: msgID,
+		})
 	case gateway.StatusUpstreamError:
 		if !res.Permanent {
 			writeUpstreamError(w, msgID, res)

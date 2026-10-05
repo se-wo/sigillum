@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"time"
+	"unicode/utf8"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -53,7 +54,19 @@ func readyConditionFor(generation int64, anyReady bool, message string) metav1.C
 	return cond
 }
 
+// maxConditionMessage keeps condition messages well under the API's limit
+// of 32768 bytes: a validation error echoes every offending entry, and a
+// rejected status update would leave the previous condition in place.
+const maxConditionMessage = 4096
+
 func errorReadyCondition(generation int64, reason, msg string) metav1.Condition {
+	if len(msg) > maxConditionMessage {
+		cut := maxConditionMessage
+		for cut > 0 && !utf8.RuneStart(msg[cut]) {
+			cut--
+		}
+		msg = msg[:cut] + " … (truncated)"
+	}
 	return metav1.Condition{
 		Type:               sigv1.ConditionReady,
 		Status:             metav1.ConditionFalse,

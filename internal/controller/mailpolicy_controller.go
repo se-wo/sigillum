@@ -12,12 +12,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	"github.com/se-wo/sigillum/internal/webhook"
 )
 
 // MailPolicyReconciler computes Ready and UsingLegacyAuth conditions for a
-// MailPolicy by resolving its backendRef. Subject-match counts are deferred
-// to the api-server's hot path; the controller only validates referential
-// integrity and surfaces the legacy-auth opt-in for security scans (US-3.5).
+// MailPolicy by checking it against the admission rules and resolving its
+// backendRef. Subject-match counts are deferred to the api-server's hot
+// path; the controller surfaces the legacy-auth opt-in for security scans
+// (US-3.5).
 type MailPolicyReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -61,6 +63,11 @@ func (r *MailPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 func (r *MailPolicyReconciler) evaluate(ctx context.Context, mp *sigv1.MailPolicy) metav1.Condition {
 	gen := mp.Generation
+	// Admitted without the webhook, or by an older version: the gateway
+	// refuses such a policy, so say why.
+	if err := webhook.ValidateMailPolicy(mp); err != nil {
+		return errorReadyCondition(gen, sigv1.ReasonInvalidConfiguration, err.Error())
+	}
 	switch mp.Spec.BackendRef.Kind {
 	case sigv1.KindClusterMailBackend, "":
 		var cmb sigv1.ClusterMailBackend

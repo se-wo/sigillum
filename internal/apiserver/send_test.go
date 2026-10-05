@@ -123,6 +123,14 @@ func TestWriteResult_UnavailableIs503(t *testing.T) {
 	}
 }
 
+func TestWriteResult_PolicyInvalidIs503(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeResult(w, "m", gateway.Result{Status: gateway.StatusPolicyInvalid, Policy: "p", Detail: "MailPolicy \"p\" is invalid"})
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "errors/policy-invalid") {
+		t.Fatalf("want 503 policy-invalid, got %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestWriteResult_UpstreamTransientVsPermanent(t *testing.T) {
 	w := httptest.NewRecorder()
 	writeResult(w, "m", gateway.Result{Status: gateway.StatusUpstreamError, Policy: "p", Detail: "relay down"})

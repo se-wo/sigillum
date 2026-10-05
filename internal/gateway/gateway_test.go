@@ -232,6 +232,47 @@ func TestSend_BackendNotReady(t *testing.T) {
 	}
 }
 
+// #41: without the webhook a policy with "*" in allowedRecipients would
+// allow every recipient. It is refused instead, and a lower-priority policy
+// does not take over.
+func TestSend_InvalidPolicyIsRefused(t *testing.T) {
+	bad := testPolicy()
+	bad.Name, bad.Spec.Priority = "invalid", 100
+	bad.Spec.RecipientRestrictions = &sigv1.RecipientRestrictions{AllowedRecipients: []string{"*"}}
+	d := &fakeDriver{}
+	g, rec := newGateway(t, d, bad, testPolicy(), readyBackend("relay", true))
+	res := g.Send(context.Background(), request("app@team.example"))
+	if res.Status != StatusPolicyInvalid || res.Policy != "invalid" || !strings.Contains(res.Detail, "invalid") {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	if len(d.sent) != 0 {
+		t.Fatal("driver must not be called for an invalid policy")
+	}
+	if ev := rec.last(t); ev.Decision != audit.DecisionReject || ev.Reason != "policy_invalid" || ev.Policy != "invalid" {
+		t.Fatalf("unexpected audit event %+v", ev)
+	}
+}
+
+// #41: a backend whose spec became invalid after its last probe is not used,
+// even while its status still says Ready.
+func TestSend_InvalidBackendIsNotReady(t *testing.T) {
+	be := readyBackend("relay", true)
+	be.Spec.SMTP.Endpoints[0].InsecureSkipVerify = true
+	d := &fakeDriver{}
+	g, rec := newGateway(t, d, testPolicy(), be)
+	// The status still says Ready; the detail must name the real cause.
+	if res := g.Send(context.Background(), request("app@team.example")); res.Status != StatusBackendNotReady ||
+		!strings.Contains(res.Detail, "insecureSkipVerify") {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	if len(d.sent) != 0 {
+		t.Fatal("driver must not be called for an invalid backend")
+	}
+	if ev := rec.last(t); ev.Reason != "backend_not_ready" {
+		t.Fatalf("unexpected audit event %+v", ev)
+	}
+}
+
 func TestSend_UpstreamError(t *testing.T) {
 	g, rec := newGateway(t, &fakeDriver{err: errors.New("boom")}, testPolicy(), readyBackend("relay", true))
 	if res := g.Send(context.Background(), request("app@team.example")); res.Status != StatusUpstreamError {

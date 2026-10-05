@@ -29,6 +29,12 @@ the version being prepared in the same pull request as the change.
 - REST: `POST /v1/messages` now rejects unknown JSON fields and messages
   without content with `400 invalid-payload` (see Changed). Check that
   clients send only the documented fields.
+- Policies and backends are now checked against the admission rules
+  outside the webhook too (see Fixed). One created without the webhook,
+  or admitted by an older version with laxer rules, turns `Ready=False`
+  (`InvalidConfiguration`) and is no longer used: after the upgrade, run
+  `kubectl get mailpolicies,mailbackends,clustermailbackends -A` and fix
+  any that are not Ready.
 
 ### Added
 
@@ -84,6 +90,16 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- Without the admission webhook (`webhook.enabled: false`, as in the
+  local-dev profile), a `MailPolicy`, `MailBackend` or `ClusterMailBackend`
+  that the webhook would reject was admitted, shown as Ready and enforced
+  with whatever its malformed entries matched: `allowedRecipients: ["*"]`
+  allowed every recipient. The controller now applies the webhook's rules
+  and reports violations as `Ready=False` (`InvalidConfiguration`); the
+  gateway refuses a request whose matching policy is invalid with
+  `503 policy-invalid` (SMTP `451`, reason `policy_invalid`) instead of
+  enforcing it, and treats an invalid backend as not ready, naming the
+  field errors (#41).
 - A message now leaves a rate-limit window the moment it is as old as the
   window. Before, a caller retrying exactly after `Retry-After` could be
   rejected once more.
