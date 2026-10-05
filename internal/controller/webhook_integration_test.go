@@ -9,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 )
@@ -151,5 +152,67 @@ func TestWebhook_MailPolicyRejectsEmptySubjects(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "subject") {
 		t.Fatalf("wanted subject error, got %v", err)
+	}
+}
+
+// An empty allowedSenders denies every sender while an omitted one allows
+// all, so the API server must keep the two apart through a typed client.
+func TestBackend_AllowedSendersEmptyAndOmittedStayApart(t *testing.T) {
+	ctx := context.Background()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "sigillum-wh-senders"}}
+	_ = testClient.Create(ctx, ns)
+
+	for _, tc := range []struct {
+		name    string
+		senders []string
+	}{
+		{"omitted", nil},
+		{"empty", []string{}},
+		{"listed", []string{"me@example.com", "*@noreply.example.com"}},
+	} {
+		mb := &sigv1.MailBackend{
+			ObjectMeta: metav1.ObjectMeta{Name: tc.name, Namespace: ns.Name},
+			Spec: sigv1.BackendSpec{
+				Type: sigv1.BackendSMTP,
+				SMTP: &sigv1.SMTPBackendSpec{
+					Endpoints: []sigv1.SMTPEndpoint{{Host: "mx", Port: 587, TLS: sigv1.SMTPTLSStartTLS}},
+					AuthType:  sigv1.SMTPAuthNone,
+				},
+				AllowedSenders: tc.senders,
+			},
+		}
+		if err := testClient.Create(ctx, mb); err != nil {
+			t.Fatalf("%s: create: %v", tc.name, err)
+		}
+		// A status update sends the whole object back, as the controller does.
+		mb.Status.ObservedGeneration = mb.Generation
+		if err := testClient.Status().Update(ctx, mb); err != nil {
+			t.Fatalf("%s: status update: %v", tc.name, err)
+		}
+		var got sigv1.MailBackend
+		if err := testClient.Get(ctx, client.ObjectKeyFromObject(mb), &got); err != nil {
+			t.Fatalf("%s: get: %v", tc.name, err)
+		}
+		if (got.Spec.AllowedSenders == nil) != (tc.senders == nil) || len(got.Spec.AllowedSenders) != len(tc.senders) {
+			t.Fatalf("%s: allowedSenders = %#v, want %#v", tc.name, got.Spec.AllowedSenders, tc.senders)
+		}
+	}
+}
+
+func TestWebhook_RejectsUnanchoredBackendSender(t *testing.T) {
+	cmb := &sigv1.ClusterMailBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "unanchored-sender"},
+		Spec: sigv1.BackendSpec{
+			Type: sigv1.BackendSMTP,
+			SMTP: &sigv1.SMTPBackendSpec{
+				Endpoints: []sigv1.SMTPEndpoint{{Host: "mx", Port: 587, TLS: sigv1.SMTPTLSStartTLS}},
+				AuthType:  sigv1.SMTPAuthNone,
+			},
+			AllowedSenders: []string{"*example.com"},
+		},
+	}
+	err := testClient.Create(context.Background(), cmb)
+	if err == nil || !strings.Contains(err.Error(), "spec.allowedSenders[0]") {
+		t.Fatalf("want rejection of spec.allowedSenders[0], got %v", err)
 	}
 }

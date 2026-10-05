@@ -68,6 +68,9 @@ spec:
     credentialsRef:
       name: corporate-smtp-credentials
       namespace: sigillum-system
+  # optional: the relay sends only for these. "*@example.com" does not
+  # cover subdomains, so list every domain the policies use.
+  allowedSenders: ["*@example.com", "*@billing.example.com", "*@monitoring.example.com"]
 ---
 # 3. A namespace-scoped policy binding a ServiceAccount to that backend.
 apiVersion: sigillum.dev/v1alpha1

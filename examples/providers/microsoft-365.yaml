@@ -15,8 +15,8 @@
 # Requirements: SMTP AUTH enabled for the tenant and the mailbox
 # (Set-CASMailbox <mailbox> -SmtpClientAuthenticationDisabled $false), no
 # Security Defaults / Conditional Access blocking legacy auth, and every
-# sender is the mailbox itself or one it may send as. Limit: 10,000
-# recipients per day and mailbox.
+# sender is the mailbox itself or one it may send as (list those in the
+# backend's allowedSenders). Limit: 10,000 recipients per day and mailbox.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -43,5 +43,6 @@ spec:
       name: microsoft-365-smtp
       namespace: sigillum-system
     connectionTimeoutSeconds: 10
+  allowedSenders: ["noreply@example.com"]   # the mailbox and those it may send as
   healthCheck:
     intervalSeconds: 300

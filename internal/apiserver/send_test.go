@@ -27,6 +27,7 @@ import (
 	"github.com/se-wo/sigillum/internal/apiserver/auth"
 	"github.com/se-wo/sigillum/internal/audit"
 	"github.com/se-wo/sigillum/internal/gateway"
+	"github.com/se-wo/sigillum/internal/policy"
 	"github.com/se-wo/sigillum/internal/policy/ratelimit"
 )
 
@@ -132,6 +133,18 @@ func TestWriteResult_UpstreamTransientVsPermanent(t *testing.T) {
 	writeResult(w, "m", gateway.Result{Status: gateway.StatusUpstreamError, Permanent: true, Policy: "p", Detail: "550 no such user"})
 	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "errors/upstream-rejected") {
 		t.Fatalf("permanent rejection: got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A sender refused by the backend's allowedSenders (US-2.8) is not
+// attributed to the policy, and the backend stays unnamed.
+func TestWriteResult_SenderRefusedByBackend(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeResult(w, "m", gateway.Result{Status: gateway.StatusDenied, Policy: "p", Backend: "/relay",
+		DenyReason: policy.DenySenderNotAllowed, Detail: "sender 'x@y' not in the backend's allowedSenders"})
+	body := w.Body.String()
+	if w.Code != http.StatusForbidden || !strings.Contains(body, "not allowed by backend") || strings.Contains(body, "relay") {
+		t.Fatalf("got %d %s", w.Code, body)
 	}
 }
 

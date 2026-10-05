@@ -389,3 +389,27 @@ func TestAddressMatchesSlashInLocalPart(t *testing.T) {
 		}
 	}
 }
+
+func TestSendersAllowed(t *testing.T) {
+	allowed := []string{"app@team.example", "*@noreply.team.example"}
+	for _, tc := range []struct {
+		name     string
+		msg      MessageView
+		wantFrom string
+	}{
+		{name: "from only", msg: MessageView{From: "App@Team.example"}},
+		{name: "all three", msg: MessageView{From: "app@team.example", EnvelopeFrom: "x@noreply.team.example", Sender: "app@team.example"}},
+		{name: "from", msg: MessageView{From: "boss@team.example"}, wantFrom: "boss@team.example"},
+		{name: "envelope", msg: MessageView{From: "app@team.example", EnvelopeFrom: "bounce@evil.test"}, wantFrom: "bounce@evil.test"},
+		{name: "sender", msg: MessageView{From: "app@team.example", Sender: "boss@team.example"}, wantFrom: "boss@team.example"},
+		{name: "empty from", msg: MessageView{}, wantFrom: ""},
+	} {
+		from, ok := SendersAllowed(tc.msg, allowed)
+		if wantOK := tc.wantFrom == "" && tc.name != "empty from"; ok != wantOK || from != tc.wantFrom {
+			t.Errorf("%s: got (%q, %v), want (%q, %v)", tc.name, from, ok, tc.wantFrom, wantOK)
+		}
+	}
+	if _, ok := SendersAllowed(MessageView{From: "app@team.example"}, []string{}); ok {
+		t.Error("an empty list must deny every sender")
+	}
+}

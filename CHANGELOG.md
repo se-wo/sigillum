@@ -16,8 +16,9 @@ the version being prepared in the same pull request as the change.
 
 - Apply the CRDs before upgrading:
   `kubectl apply --server-side -f charts/sigillum/crds/`. The 0.4.0 pods
-  refuse to start on 0.3 CRDs, which would drop `messagesPerDay` without
-  an error and leave the policy without a daily cap.
+  refuse to start on 0.3 CRDs, which would drop `messagesPerDay` and a
+  backend's `allowedSenders` without an error, leaving the policy without
+  a daily cap and the backend unbounded.
 - The credential Secret guard changes (it also admits the OAuth token
   Secrets of delegated backends). Upgrade the chart and the controller
   together with `helm upgrade`. While the old guard and a new
@@ -33,6 +34,17 @@ the version being prepared in the same pull request as the change.
   from using up the daily quota of the upstream mailbox (US-2.7). With a
   daily cap, the in-memory store keeps a timestamp per message for a day
   and Redis keeps the counter key for a day.
+- `MailBackend.spec.allowedSenders` and
+  `ClusterMailBackend.spec.allowedSenders`: the senders a backend sends
+  for, checked on every send in addition to the policy's
+  `senderRestrictions` (`From`, envelope sender, `Sender`). A policy can
+  narrow the list but never widen it, so a personal account is used only
+  with its own address and a relay only for its domains (US-2.8).
+  Violations answer `403 sender-not-allowed` (reason
+  `sender_not_allowed`); the log names the backend. Entries must be plain
+  addresses or globs anchored on a domain; an empty list denies every
+  sender and draws a warning. The Gmail and Microsoft 365 recipes pin
+  their backend to the mailbox.
 
 ### Changed
 
