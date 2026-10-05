@@ -62,15 +62,20 @@ the version being prepared in the same pull request as the change.
   (`smtp-mail.outlook.com`), which has no password login any more (US-6.1,
   US-6.3). `spec.smtp.oauth` holds the provider (`microsoft`), the tenant
   (default `consumers`), the client ID of your own app registration and
-  the mailbox; the credentials Secret holds the sign-in's `refresh_token`.
-  The controller redeems it, keeps the access token fresh in its own
+  the mailbox. The controller runs the sign-in itself: `kubectl describe`
+  shows a link and a code (condition `Authorized`, reason
+  `AuthorizationPending`); after you sign in there, it keeps the access
+  token fresh in its own
   Secret `sigillum-oauth-mb-<name>` / `sigillum-oauth-cmb-<name>` and
   reports the condition `Authorized` and the metric
   `sigillum_backend_authorized`; without a token the backend is not ready.
-  Without `allowedSenders` the backend sends only as the mailbox. Every
-  endpoint needs `starttls` or `tls`. Needs `credentials.enabled` (default),
-  whose Secret guard admits the token Secret. For now the sign-in is a
-  manual device code flow with `curl`; recipe
+  Only a sign-in of the configured mailbox is accepted. A new value of the
+  annotation `sigillum.dev/authorize` asks for a new sign-in, after the
+  code expired or to switch the account. A `refresh_token` in the
+  credentials Secret, from a sign-in elsewhere, works too. Without
+  `allowedSenders` the backend sends only as the mailbox. Every endpoint
+  needs `starttls` or `tls`. Needs `credentials.enabled` (default), whose
+  Secret guard admits the token Secret. Recipe
   `examples/providers/outlook-com.yaml`.
 
 ### Changed

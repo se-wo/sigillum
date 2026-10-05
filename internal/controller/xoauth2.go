@@ -17,7 +17,21 @@ import (
 
 // MicrosoftSMTPScopes are requested when the refresh token of an XOAUTH2
 // backend is redeemed: sending over SMTP, and a new refresh token.
-var MicrosoftSMTPScopes = []string{"https://outlook.office.com/SMTP.Send", "offline_access"}
+// microsoftSignInScopes add an ID token naming the account, so the
+// controller can check that the mailbox itself signed in.
+var (
+	MicrosoftSMTPScopes   = []string{"https://outlook.office.com/SMTP.Send", "offline_access"}
+	microsoftSignInScopes = append([]string{"openid", "profile", "email"}, MicrosoftSMTPScopes...)
+)
+
+func microsoftEndpoints(tenant string) (string, string, error) {
+	tokenURL, err := oauth.MicrosoftTokenURL(tenant)
+	if err != nil {
+		return "", "", err
+	}
+	deviceURL, err := oauth.MicrosoftDeviceCodeURL(tenant)
+	return tokenURL, deviceURL, err
+}
 
 // defaultMicrosoftTenant lets personal Microsoft accounts sign in.
 const defaultMicrosoftTenant = "consumers"
@@ -60,37 +74,48 @@ func backendKindName(key string) (kind, name string) {
 
 // authorizeDelegated runs the token broker for an XOAUTH2 backend (SPEC
 // US-6.3): the seed refresh token and an optional client secret come from
-// the credentials Secret, and the token Secret is kept in its namespace.
+// the credentials Secret, which may be missing; the token Secret is kept
+// in its namespace. Without a usable refresh token, the broker runs a
+// device code sign-in for the mailbox.
 func authorizeDelegated(ctx context.Context, c client.Reader, b *TokenBroker, owner client.Object, kind, key string,
 	spec *sigv1.BackendSpec, secretFallbackNs string) (BrokerResult, error) {
 	if b == nil {
 		return BrokerResult{}, fmt.Errorf("this controller runs without a token broker")
 	}
-	o := spec.SMTP.OAuth
-	sec, err := credentialsSecret(ctx, c, "spec.smtp", *spec.SMTP.CredentialsRef, secretFallbackNs)
+	o, ref := spec.SMTP.OAuth, *spec.SMTP.CredentialsRef
+	ns, err := credentialsNamespace("spec.smtp", ref, secretFallbackNs)
 	if err != nil {
 		return BrokerResult{}, err
+	}
+	var sec corev1.Secret
+	if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: ref.Name}, &sec); client.IgnoreNotFound(err) != nil {
+		return BrokerResult{}, fmt.Errorf("failed to load credentials secret %s/%s: %w", ns, ref.Name, err)
 	}
 	tenant := o.Tenant
 	if tenant == "" {
 		tenant = defaultMicrosoftTenant
 	}
-	tokenURL := oauth.MicrosoftTokenURL
-	if b.TokenURL != nil {
-		tokenURL = b.TokenURL
+	endpoints := microsoftEndpoints
+	if b.Endpoints != nil {
+		endpoints = b.Endpoints
 	}
-	u, err := tokenURL(tenant)
+	tokenURL, deviceURL, err := endpoints(tenant)
 	if err != nil {
 		return BrokerResult{}, err
 	}
+	clientSecret := string(sec.Data[sigv1.GraphSecretClientSecretKey])
 	return b.Ensure(ctx, DelegatedBackend{
 		Owner:     owner,
 		Kind:      kind,
 		Key:       key,
-		Namespace: sec.Namespace,
+		Namespace: ns,
 		Seed:      string(sec.Data[sigv1.OAuthSecretRefreshTokenKey]),
-		Refresher: &oauth.RefreshToken{TokenURL: u, ClientID: o.ClientID, Scopes: MicrosoftSMTPScopes,
-			ClientSecret: string(sec.Data[sigv1.GraphSecretClientSecretKey]), HTTPClient: b.HTTPClient},
+		Refresher: &oauth.RefreshToken{TokenURL: tokenURL, ClientID: o.ClientID, Scopes: MicrosoftSMTPScopes,
+			ClientSecret: clientSecret, HTTPClient: b.HTTPClient},
+		Device: &oauth.DeviceCode{DeviceAuthURL: deviceURL, TokenURL: tokenURL, ClientID: o.ClientID,
+			ClientSecret: clientSecret, Scopes: microsoftSignInScopes, HTTPClient: b.HTTPClient},
+		Authorize: owner.GetAnnotations()[sigv1.AuthorizeAnnotation],
+		Account:   o.Mailbox,
 	}), nil
 }
 

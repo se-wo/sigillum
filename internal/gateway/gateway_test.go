@@ -475,8 +475,10 @@ func TestSend_XOAUTH2BackendDefaultsToItsMailbox(t *testing.T) {
 		res.DenyReason != policy.DenySenderNotAllowed || !strings.Contains(res.Detail, "backend") {
 		t.Fatalf("another sender: want sender_not_allowed by the backend, got %+v", res)
 	}
-	if res := g.Send(context.Background(), request("APP@team.example")); res.Status != StatusBackendNotReady {
-		t.Fatalf("the mailbox: want past the sender check (backend_not_ready without a token), got %+v", res)
+	// The credentials Secret is optional for XOAUTH2; the fake driver
+	// stands in for the token check.
+	if res := g.Send(context.Background(), request("APP@team.example")); res.Status != StatusAccepted {
+		t.Fatalf("the mailbox: want accepted, got %+v", res)
 	}
 }
 

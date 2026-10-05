@@ -61,15 +61,33 @@ func (c *ClientCredentials) Token(ctx context.Context) (Token, error) {
 	return tok, err
 }
 
-// post sends a token request and parses the answer. The client is copied
-// so that redirects are never followed: the form carries a secret.
+// post sends a token request and parses the answer.
 func post(ctx context.Context, tokenURL string, hc *http.Client, form url.Values, now func() time.Time) (Token, string, error) {
-	if u, err := url.Parse(tokenURL); err != nil || u.Scheme != "https" || u.Host == "" {
-		return Token{}, "", &Error{Permanent: true, Description: "the token URL must be an https URL"}
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	r, err := exchange(ctx, tokenURL, hc, form, now)
 	if err != nil {
-		return Token{}, "", &Error{Permanent: true, Err: err}
+		return Token{}, "", err
+	}
+	return parseResponse(r.status, r.retryAfter, r.body, r.start)
+}
+
+// answer is an endpoint's raw answer; start is when the request was sent.
+type answer struct {
+	status     int
+	retryAfter string
+	body       []byte
+	start      time.Time
+}
+
+// exchange posts form to an https endpoint of the provider and reads the
+// answer, at most 1 MiB. The client is copied so that redirects are never
+// followed: the form carries a secret.
+func exchange(ctx context.Context, endpoint string, hc *http.Client, form url.Values, now func() time.Time) (answer, error) {
+	if u, err := url.Parse(endpoint); err != nil || u.Scheme != "https" || u.Host == "" {
+		return answer{}, &Error{Permanent: true, Description: "the token URL must be an https URL"}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return answer{}, &Error{Permanent: true, Err: err}
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
@@ -89,14 +107,14 @@ func post(ctx context.Context, tokenURL string, hc *http.Client, form url.Values
 	start := now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return Token{}, "", &Error{Err: err}
+		return answer{}, &Error{Err: err}
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		return Token{}, "", &Error{Status: resp.StatusCode, Err: err}
+		return answer{}, &Error{Status: resp.StatusCode, Err: err}
 	}
-	return parseResponse(resp.StatusCode, resp.Header.Get("Retry-After"), body, start)
+	return answer{status: resp.StatusCode, retryAfter: resp.Header.Get("Retry-After"), body: body, start: start}, nil
 }
 
 // parseResponse turns a token endpoint answer into a Token and the
@@ -236,6 +254,16 @@ func printable(s string, n int) string {
 		}
 	}
 	return b.String()
+}
+
+// MicrosoftDeviceCodeURL returns the device authorization endpoint of a
+// tenant, checked like MicrosoftTokenURL.
+func MicrosoftDeviceCodeURL(tenant string) (string, error) {
+	u, err := MicrosoftTokenURL(tenant)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(u, "/token") + "/devicecode", nil
 }
 
 // MicrosoftTokenURL returns the Microsoft identity platform v2.0 token

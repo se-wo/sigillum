@@ -13,43 +13,43 @@
 #      - Supported account types: "Personal Microsoft accounts only" (or
 #        "... and personal Microsoft accounts").
 #      - Authentication > Allow public client flows: Yes.
-#      - API permissions > Add > Microsoft Graph > Delegated: SMTP.Send and
-#        offline_access.
+#      - API permissions > Add > Microsoft Graph > Delegated: openid,
+#        profile, email, offline_access and SMTP.Send.
 #    Note the Application (client) ID. No client secret is needed.
 #
-# 2. Sign in once with the device code flow and keep the refresh token. The
-#    controller will do this step itself in a later release; until then:
-#
-#      CLIENT_ID=<Application (client) ID>
-#      SCOPE='https://outlook.office.com/SMTP.Send offline_access'
-#      curl -s https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode \
-#        -d client_id="$CLIENT_ID" --data-urlencode scope="$SCOPE" | tee device.json
-#      # Open the verification_uri, enter the user_code, sign in as the
-#      # mailbox and consent. Then:
-#      curl -s https://login.microsoftonline.com/consumers/oauth2/v2.0/token \
-#        -d grant_type=urn:ietf:params:oauth:grant-type:device_code \
-#        -d client_id="$CLIENT_ID" -d device_code="$(jq -r .device_code device.json)" |
-#        jq -r .refresh_token > refresh_token
-#      kubectl -n sigillum-system create secret generic outlook-com-signin \
-#        --from-file=refresh_token=refresh_token
-#      rm device.json refresh_token
-#
-#    The refresh token grants sending as you (and nothing else with this
-#    scope): treat it like a password. Microsoft rotates it on every use;
-#    the controller keeps the current one in the Secret
-#    sigillum-oauth-cmb-outlook-com next to this one. A new sign-in is a new
-#    refresh_token in outlook-com-signin.
-#
-# 3. Apply the ClusterMailBackend below with your client ID and address.
+# 2. Apply the ClusterMailBackend below with your client ID and address.
 #    The chart's credentials.enabled (default true) must stay on: it
 #    installs the Secret guard under which the controller may write the
-#    token Secret.
+#    token Secret. The Secret named in credentialsRef does not have to
+#    exist; its namespace is where the controller keeps the tokens.
 #
-# Check it with `kubectl describe cmb outlook-com`: the condition Authorized
-# is True once the refresh token was redeemed; AuthorizationRequired means
-# a new sign-in is needed (consent revoked, or the refresh token expired;
-# the controller uses it about every half hour, so it does not lapse from
-# inactivity). The metric sigillum_backend_authorized drops to 0 then.
+# 3. Sign in once. The controller starts a device code sign-in and shows
+#    where to go:
+#
+#      kubectl describe cmb outlook-com
+#      #  Authorized  False  AuthorizationPending  to sign in as me@outlook.com,
+#      #  open https://www.microsoft.com/link and enter the code ABCD1234 ...
+#
+#    Open the link on any device, enter the code, sign in as the mailbox and
+#    consent. Within a few seconds Authorized turns True and the backend
+#    Ready. Only a sign-in of oauth.mailbox is accepted: anyone who can read
+#    the backend sees the code, and another account's sign-in is refused.
+#
+# The code is valid for 15 minutes. When it expired, was declined, or the
+# provider later rejects the refresh token (consent revoked), the condition
+# says so; ask for a new sign-in by setting any new value:
+#
+#      kubectl annotate --overwrite cmb outlook-com sigillum.dev/authorize="$(date +%s)"
+#
+# The same starts a new sign-in while the backend works (to switch the
+# account); it keeps sending with the old one until the new one is done.
+# The metric sigillum_backend_authorized is 0 while no sign-in works.
+#
+# A refresh token obtained elsewhere (sigillum oauth login, later) can be put
+# into the credentials Secret under the key refresh_token instead; a new
+# value there replaces the stored sign-in. The refresh token grants
+# sending as you: Microsoft rotates it on every use, and the controller
+# keeps the current one in the Secret sigillum-oauth-cmb-outlook-com.
 #
 # Without allowedSenders the backend sends only as oauth.mailbox. Personal
 # accounts have far lower daily sending limits than business mailboxes:
@@ -67,7 +67,7 @@ spec:
         tls: starttls
     authType: XOAUTH2
     credentialsRef:
-      name: outlook-com-signin   # key refresh_token, created in step 2
+      name: outlook-com-signin   # optional Secret; its namespace holds the tokens
       namespace: sigillum-system
     oauth:
       provider: microsoft

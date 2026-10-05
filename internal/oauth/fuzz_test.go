@@ -53,3 +53,44 @@ func FuzzParseResponse(f *testing.F) {
 		}
 	})
 }
+
+// FuzzParseDeviceAuthorization checks that what a device authorization
+// answer yields is safe to show in a status condition: short printable
+// ASCII and an https verification URI, with bounded timings.
+func FuzzParseDeviceAuthorization(f *testing.F) {
+	f.Add(200, []byte(`{"device_code":"DAQABAAEAAAD","user_code":"ABCD1234","verification_uri":"https://www.microsoft.com/link","expires_in":900,"interval":5}`))
+	f.Add(200, []byte(`{"device_code":"x","user_code":"A\r\nB","verification_uri":"javascript:alert(1)","expires_in":"99999999"}`))
+	f.Add(400, []byte(`{"error":"invalid_client"}`))
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	f.Fuzz(func(t *testing.T, status int, body []byte) {
+		a, err := parseDeviceAuthorization(status, "", body, now)
+		if err != nil {
+			return
+		}
+		for _, s := range []string{a.DeviceCode, a.UserCode, a.VerificationURI} {
+			if !isVisibleASCII(s, maxRefreshTokenBytes) {
+				t.Fatalf("accepted %q", s)
+			}
+		}
+		if len(a.UserCode) > maxUserCodeLen || !strings.HasPrefix(a.VerificationURI, "https://") {
+			t.Fatalf("accepted user code %q, URI %q", a.UserCode, a.VerificationURI)
+		}
+		if !a.ExpiresAt.After(now) || a.ExpiresAt.After(now.Add(maxDeviceCodeLifetime)) ||
+			a.Interval < minPollInterval || a.Interval > time.Minute {
+			t.Fatalf("timings out of bounds: %+v", a)
+		}
+	})
+}
+
+// FuzzAccountOf checks that the account read from an ID token is printable
+// ASCII of bounded length, or empty.
+func FuzzAccountOf(f *testing.F) {
+	f.Add([]byte(`{"id_token":"eyJhbGciOiJub25lIn0.eyJlbWFpbCI6Im1lQG91dGxvb2suY29tIn0.sig"}`))
+	f.Add([]byte(`{"id_token":"a.b.c"}`))
+	f.Add([]byte(`{"id_token":"eyJhbGciOiJub25lIn0.eyJlbWFpbCI6Im1lXHJcbkBvdXRsb29rLmNvbSJ9.sig"}`))
+	f.Fuzz(func(t *testing.T, body []byte) {
+		if a := accountOf(body); a != "" && !isVisibleASCII(a, maxAccountLen) {
+			t.Fatalf("accepted account %q", a)
+		}
+	})
+}

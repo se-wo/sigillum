@@ -65,6 +65,15 @@ type DelegatedBackend struct {
 	// left it; empty if there is none.
 	Seed      string
 	Refresher Refresher
+	// Device runs a device code sign-in when there is no usable refresh
+	// token or a new one is asked for; nil leaves the sign-in to the
+	// person (a refresh_token in the credentials Secret).
+	Device DeviceFlow
+	// Authorize is the backend's sigillum.dev/authorize annotation; a new
+	// value asks for a new sign-in.
+	Authorize string
+	// Account is the address the sign-in must be for; empty: any.
+	Account string
 }
 
 // BrokerResult is the outcome of TokenBroker.Ensure, for the backend's
@@ -93,9 +102,10 @@ type TokenBroker struct {
 	Writer client.Writer
 	Guard  *GuardChecker
 	Now    func() time.Time
-	// TokenURL and HTTPClient reach the provider; nil uses
-	// oauth.MicrosoftTokenURL and the default client. Tests replace them.
-	TokenURL   func(tenant string) (string, error)
+	// Endpoints returns the token and device authorization endpoints of a
+	// Microsoft tenant; nil uses Microsoft's. HTTPClient reaches them; nil
+	// uses the default client. Tests replace both.
+	Endpoints  func(tenant string) (tokenURL, deviceURL string, err error)
 	HTTPClient *http.Client
 
 	// mu serializes Ensure, token requests included: a few delegated
@@ -113,6 +123,13 @@ type brokerState struct {
 	token        oauth.Token
 	refreshAt    time.Time
 	stored       bool // token and refreshToken are in the Secret
+
+	// Device code sign-in (oauth_signin.go).
+	authorize  *string // the sigillum.dev/authorize value handled last
+	wantSignIn bool    // a new sign-in was asked for
+	device     *oauth.DeviceAuthorization
+	nextPoll   time.Time
+	expired    string // why the last sign-in failed; until a new request
 }
 
 // Ensure refreshes the backend's access token when it is due and stores it
@@ -136,7 +153,16 @@ func (b *TokenBroker) Ensure(ctx context.Context, d DelegatedBackend) (res Broke
 		if res.Authorized {
 			res.Token = st.token
 		}
+		// A new sign-in failed while the old one works: keep using the
+		// old one, and say so until the next request.
+		if res.Reason == sigv1.ReasonAuthorized && st.expired != "" {
+			res.Reason, res.Message = sigv1.ReasonAuthorizationExpired, expiredMessage(st.expired)
+		}
 	}()
+	noteAuthorize(st, d)
+	if d.Device != nil && (st.refreshToken == "" || st.wantSignIn && st.expired == "") {
+		return b.signIn(ctx, d, st, now)
+	}
 	if st.refreshToken == "" {
 		backendAuthorized.WithLabelValues(d.Key).Set(0)
 		return BrokerResult{Reason: sigv1.ReasonAuthorizationRequired, RequeueAfter: brokerReauthRetry,
@@ -154,6 +180,10 @@ func (b *TokenBroker) Ensure(ctx context.Context, d DelegatedBackend) (res Broke
 	if !now.Before(st.refreshAt) {
 		tok, next, err := d.Refresher.Refresh(ctx, st.refreshToken)
 		if err != nil {
+			if oauth.IsPermanent(err) && d.Device != nil {
+				st.refreshToken, st.token, st.stored = "", oauth.Token{}, false
+				return b.signIn(ctx, d, st, now)
+			}
 			if oauth.IsPermanent(err) {
 				backendAuthorized.WithLabelValues(d.Key).Set(0)
 				return BrokerResult{Reason: sigv1.ReasonAuthorizationRequired, RequeueAfter: brokerReauthRetry,
@@ -165,6 +195,11 @@ func (b *TokenBroker) Ensure(ctx context.Context, d DelegatedBackend) (res Broke
 		st.refreshToken, st.token, st.stored = next, tok, false
 		st.refreshAt = now.Add(tok.Expiry.Sub(now) / 2)
 	}
+	return b.store(ctx, d, st, now)
+}
+
+// store writes the state's tokens into the token Secret.
+func (b *TokenBroker) store(ctx context.Context, d DelegatedBackend, st *brokerState, now time.Time) BrokerResult {
 	if conflict, err := b.write(ctx, d, st); err != nil {
 		reason := sigv1.ReasonSecretWriteFailed
 		if conflict {

@@ -114,9 +114,10 @@ type SMTPBackendSpec struct {
 	AuthType SMTPAuthType `json:"authType,omitempty"`
 
 	// CredentialsRef points at the secret holding upstream credentials.
-	// Required unless AuthType is NONE. For XOAUTH2 it holds the
-	// refresh_token of the sign-in (and client_secret for a confidential
-	// client); the controller keeps its token Secret in the same namespace.
+	// Required unless AuthType is NONE. For XOAUTH2 the Secret is optional:
+	// its namespace holds the controller's token Secret, and it may hold
+	// the refresh_token of a sign-in done elsewhere (and client_secret for
+	// a confidential client).
 	// +optional
 	CredentialsRef *SecretReference `json:"credentialsRef,omitempty"`
 
@@ -296,7 +297,19 @@ const (
 	// ReasonTokenRefreshFailed: the provider could not be reached or
 	// answered with a temporary error; the controller retries.
 	ReasonTokenRefreshFailed = "TokenRefreshFailed"
+	// ReasonAuthorizationPending: a device code sign-in is waiting for a
+	// person; the condition message holds the URL and the code.
+	ReasonAuthorizationPending = "AuthorizationPending"
+	// ReasonAuthorizationExpired: the sign-in code expired, was declined
+	// or was used by another account; a new value of AuthorizeAnnotation
+	// starts another.
+	ReasonAuthorizationExpired = "AuthorizationExpired"
 )
+
+// AuthorizeAnnotation on a delegated backend asks the controller for a
+// new device code sign-in whenever its value changes, for example to a
+// timestamp (US-6.3).
+const AuthorizeAnnotation = "sigillum.dev/authorize"
 
 // SecretKey is a structured reference for the credentials secret keys.
 // Standardised per SPEC §4.3.1: SMTP uses keys `username` and `password`.

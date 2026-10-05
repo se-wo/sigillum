@@ -60,21 +60,25 @@ func ResolveBackendConfig(
 			if spec.SMTP.CredentialsRef == nil {
 				return cfg, fmt.Errorf("spec.smtp.credentialsRef is required when authType != NONE")
 			}
-			sec, err := credentialsSecret(ctx, c, "spec.smtp", *spec.SMTP.CredentialsRef, secretFallbackNs)
-			if err != nil {
-				return cfg, err
-			}
 			if spec.SMTP.AuthType == sigv1.SMTPAuthXOAUTH2 {
 				// The access token comes from the token Secret the
-				// controller's broker keeps next to the credentials.
+				// controller's broker keeps in the credentials
+				// namespace; the credentials Secret itself is optional.
 				if spec.SMTP.OAuth == nil {
 					return cfg, fmt.Errorf("spec.smtp.oauth is required when authType=XOAUTH2")
 				}
+				ns, err := credentialsNamespace("spec.smtp", *spec.SMTP.CredentialsRef, secretFallbackNs)
+				if err != nil {
+					return cfg, err
+				}
 				kind, name := backendKindName(backendKey)
 				smtpCfg.Username = spec.SMTP.OAuth.Mailbox
-				smtpCfg.Tokens = &secretTokens{reader: c,
-					key: types.NamespacedName{Namespace: sec.Namespace, Name: TokenSecretName(kind, name)}}
+				smtpCfg.Tokens = &secretTokens{reader: c, key: types.NamespacedName{Namespace: ns, Name: TokenSecretName(kind, name)}}
 			} else {
+				sec, err := credentialsSecret(ctx, c, "spec.smtp", *spec.SMTP.CredentialsRef, secretFallbackNs)
+				if err != nil {
+					return cfg, err
+				}
 				smtpCfg.Username = string(sec.Data[sigv1.SMTPSecretUsernameKey])
 				smtpCfg.Password = string(sec.Data[sigv1.SMTPSecretPasswordKey])
 			}
@@ -104,20 +108,9 @@ func ResolveBackendConfig(
 // is the namespace of a namespaced MailBackend, empty for a
 // ClusterMailBackend; field names the spec block in errors.
 func credentialsSecret(ctx context.Context, c client.Reader, field string, ref sigv1.SecretReference, secretFallbackNs string) (*corev1.Secret, error) {
-	ns := ref.Namespace
-	if secretFallbackNs != "" {
-		// A namespaced MailBackend may only use Secrets of its own
-		// namespace. The webhook enforces this too, but it can be
-		// disabled; without this check a tenant could point a
-		// MailBackend at the relay credentials in the release
-		// namespace and send them to an endpoint of its choice.
-		if ns != "" && ns != secretFallbackNs {
-			return nil, fmt.Errorf("%s.credentialsRef.namespace %q must be empty or the backend's own namespace %q", field, ns, secretFallbackNs)
-		}
-		ns = secretFallbackNs
-	}
-	if ns == "" {
-		return nil, fmt.Errorf("%s.credentialsRef.namespace must be set on cluster-scoped backends", field)
+	ns, err := credentialsNamespace(field, ref, secretFallbackNs)
+	if err != nil {
+		return nil, err
 	}
 	var sec corev1.Secret
 	if err := c.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: ns}, &sec); err != nil {
@@ -127,4 +120,24 @@ func credentialsSecret(ctx context.Context, c client.Reader, field string, ref s
 		return nil, fmt.Errorf("failed to load credentials secret %s/%s: %w", ns, ref.Name, err)
 	}
 	return &sec, nil
+}
+
+// credentialsNamespace is the namespace a credentials reference may use.
+func credentialsNamespace(field string, ref sigv1.SecretReference, secretFallbackNs string) (string, error) {
+	ns := ref.Namespace
+	if secretFallbackNs != "" {
+		// A namespaced MailBackend may only use Secrets of its own
+		// namespace. The webhook enforces this too, but it can be
+		// disabled; without this check a tenant could point a
+		// MailBackend at the relay credentials in the release
+		// namespace and send them to an endpoint of its choice.
+		if ns != "" && ns != secretFallbackNs {
+			return "", fmt.Errorf("%s.credentialsRef.namespace %q must be empty or the backend's own namespace %q", field, ns, secretFallbackNs)
+		}
+		ns = secretFallbackNs
+	}
+	if ns == "" {
+		return "", fmt.Errorf("%s.credentialsRef.namespace must be set on cluster-scoped backends", field)
+	}
+	return ns, nil
 }

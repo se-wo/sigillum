@@ -4,6 +4,7 @@
 package oauthtest
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,8 +15,19 @@ import (
 	"time"
 )
 
-// TokenPath is the path of the token endpoint on the server.
-const TokenPath = "/token"
+// TokenPath is the path of the token endpoint on the server, DevicePath
+// that of the device authorization endpoint (RFC 8628).
+const (
+	TokenPath  = "/token"
+	DevicePath = "/devicecode"
+)
+
+// Device sign-in states, see SetDevice.
+const (
+	DevicePending  = "pending"
+	DeviceApproved = "approved"
+	DeviceDenied   = "denied"
+)
 
 // Server is a fake token endpoint served over TLS. It issues tokens
 // "token-1", "token-2", ... to the configured client and answers
@@ -33,6 +45,11 @@ type Server struct {
 	failure  *failure
 	requests int
 	last     url.Values
+
+	devices       int
+	deviceState   string
+	deviceAccount string
+	signIns       map[string]bool // refresh tokens of device sign-ins
 }
 
 type failure struct {
@@ -52,6 +69,27 @@ func New(t testing.TB, clientID, clientSecret string) *Server {
 
 // TokenURL is the URL of the token endpoint.
 func (s *Server) TokenURL() string { return s.URL + TokenPath }
+
+// DeviceURL is the URL of the device authorization endpoint. Each request
+// starts a sign-in with device code "device-<n>" and user code
+// "CODE-<n>"; only the latest one can be redeemed.
+func (s *Server) DeviceURL() string { return s.URL + DevicePath }
+
+// SetDevice sets the state of the latest device sign-in. Once approved,
+// polling returns tokens, an ID token naming account and a refresh token
+// the server then accepts too, rotated on every use.
+func (s *Server) SetDevice(state, account string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deviceState, s.deviceAccount = state, account
+}
+
+// DeviceStarts is the number of device sign-ins started so far.
+func (s *Server) DeviceStarts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.devices
+}
 
 // SetLifetime sets expires_in of the tokens issued from now on.
 func (s *Server) SetLifetime(d time.Duration) {
@@ -105,6 +143,10 @@ func (s *Server) LastForm() url.Values {
 }
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == DevicePath && r.Method == http.MethodPost {
+		s.serveDevice(w, r)
+		return
+	}
 	if r.URL.Path != TokenPath || r.Method != http.MethodPost {
 		http.NotFound(w, r)
 		return
@@ -115,11 +157,23 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	n, lifetime, fail := s.requests, s.lifetime, s.failure
 	s.last = r.PostForm
 	grant := r.PostForm.Get("grant_type")
-	refreshOK := grant == "refresh_token" && s.refresh != "" && r.PostForm.Get("refresh_token") == s.refresh
+	if grant == deviceGrant {
+		s.mu.Unlock()
+		s.pollDevice(w, r, n)
+		return
+	}
+	rt := r.PostForm.Get("refresh_token")
+	signedIn := s.signIns[rt]
+	refreshOK := grant == "refresh_token" && rt != "" && (rt == s.refresh || signedIn)
 	var rotated string
-	if refreshOK && fail == nil && s.rotate {
+	if refreshOK && fail == nil && (s.rotate || signedIn) {
 		rotated = fmt.Sprintf("refresh-%d", n)
-		s.refresh = rotated
+		if signedIn {
+			delete(s.signIns, rt)
+			s.signIns[rotated] = true
+		} else {
+			s.refresh = rotated
+		}
 	}
 	s.mu.Unlock()
 
@@ -161,5 +215,71 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			answer["refresh_token"] = rotated
 		}
 		_ = json.NewEncoder(w).Encode(answer)
+	}
+}
+
+const deviceGrant = "urn:ietf:params:oauth:grant-type:device_code"
+
+func (s *Server) serveDevice(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	s.mu.Lock()
+	s.devices++
+	n := s.devices
+	s.deviceState, s.deviceAccount = DevicePending, ""
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	if r.PostForm.Get("client_id") != s.ClientID {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_client"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"device_code":      fmt.Sprintf("device-%d", n),
+		"user_code":        fmt.Sprintf("CODE-%d", n),
+		"verification_uri": "https://login.example.test/link",
+		"expires_in":       900,
+		"interval":         5,
+	})
+}
+
+func (s *Server) pollDevice(w http.ResponseWriter, r *http.Request, n int) {
+	s.mu.Lock()
+	current := fmt.Sprintf("device-%d", s.devices)
+	state, account, lifetime := s.deviceState, s.deviceAccount, s.lifetime
+	if r.PostForm.Get("device_code") != current {
+		state = "expired"
+	}
+	refresh := fmt.Sprintf("refresh-device-%d", n)
+	if state == DeviceApproved {
+		// Like Microsoft, a new sign-in leaves earlier refresh tokens
+		// valid; its own rotates on every use.
+		if s.signIns == nil {
+			s.signIns = map[string]bool{}
+		}
+		s.signIns[refresh] = true
+		s.deviceState = "redeemed"
+	}
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	fail := func(code string) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": code})
+	}
+	switch state {
+	case DevicePending:
+		fail("authorization_pending")
+	case DeviceDenied:
+		fail("access_denied")
+	case DeviceApproved:
+		claims, _ := json.Marshal(map[string]string{"email": account, "preferred_username": account})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  fmt.Sprintf("token-%d", n),
+			"token_type":    "Bearer",
+			"expires_in":    int(lifetime / time.Second),
+			"refresh_token": refresh,
+			"id_token":      "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(claims) + ".sig",
+		})
+	default:
+		fail("expired_token")
 	}
 }
