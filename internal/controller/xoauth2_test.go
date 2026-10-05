@@ -398,3 +398,64 @@ func TestReconcile_XOAUTH2FailedReSignInKeepsTheOldOne(t *testing.T) {
 		t.Fatal("no new code without a new request")
 	}
 }
+
+// An app-only XOAUTH2 backend (flow clientCredentials) gets its tokens
+// from the application's secret: no broker, no sign-in, no token Secret.
+func TestReconcile_XOAUTH2AppOnly(t *testing.T) {
+	s := oauthtest.New(t, testClientID, "app-secret")
+	old := appOnlyEnv
+	appOnlyEnv.tokenURL = func(tenant string) (string, error) {
+		if tenant != "contoso.onmicrosoft.com" {
+			t.Errorf("tenant %q", tenant)
+		}
+		return s.TokenURL(), nil
+	}
+	appOnlyEnv.httpClient = s.Client()
+	t.Cleanup(func() { appOnlyEnv = old })
+
+	for _, tc := range []struct {
+		name, secret string
+		wantReady    metav1.ConditionStatus
+		wantReason   string
+	}{
+		{"valid secret", "app-secret", metav1.ConditionTrue, sigv1.ReasonAtLeastOneEndpointReady},
+		{"wrong secret", "wrong", metav1.ConditionFalse, sigv1.ReasonAllEndpointsDown},
+		{"no secret", "", metav1.ConditionFalse, sigv1.ReasonInvalidConfiguration},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newXOAUTH2Fixture(t, "")
+			ctx := context.Background()
+			var mb sigv1.MailBackend
+			if err := f.client.Get(ctx, types.NamespacedName{Namespace: "team", Name: "outlook"}, &mb); err != nil {
+				t.Fatal(err)
+			}
+			mb.Spec.SMTP.OAuth.Flow, mb.Spec.SMTP.OAuth.Tenant, mb.Spec.SMTP.OAuth.Mailbox =
+				sigv1.OAuthFlowClientCredentials, "contoso.onmicrosoft.com", "noreply@contoso.com"
+			if err := f.client.Update(ctx, &mb); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.client.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "outlook-signin", Namespace: "team"},
+				Data: map[string][]byte{sigv1.GraphSecretClientSecretKey: []byte(tc.secret)}}); err != nil {
+				t.Fatal(err)
+			}
+			got := f.reconcile(t)
+			wantCondition(t, got, sigv1.ConditionReady, tc.wantReady, tc.wantReason)
+			if meta.FindStatusCondition(got.Status.Conditions, sigv1.ConditionAuthorized) != nil || f.server.DeviceStarts() != 0 {
+				t.Fatal("an app-only backend has no sign-in")
+			}
+			if tc.secret == "app-secret" {
+				if form := s.LastForm(); form.Get("grant_type") != "client_credentials" || form.Get("scope") != MicrosoftSMTPAppScope {
+					t.Fatalf("token request %v", form)
+				}
+				// The send path gets the same application token.
+				cfg, err := ResolveBackendConfig(ctx, f.client, "team/outlook", &got.Spec, "team")
+				if err != nil || cfg.SMTP.Username != "noreply@contoso.com" {
+					t.Fatalf("resolve: %v %+v", err, cfg.SMTP)
+				}
+				if tok, err := cfg.SMTP.Tokens.Token(ctx); err != nil || tok.AccessToken == "" {
+					t.Fatalf("token: %v %v", tok, err)
+				}
+			}
+		})
+	}
+}

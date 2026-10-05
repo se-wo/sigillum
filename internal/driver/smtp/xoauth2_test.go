@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"net/smtp"
@@ -423,5 +424,56 @@ func TestDescribeXOAUTH2Error(t *testing.T) {
 		if got := describeXOAUTH2Error([]byte(in)); got != want {
 			t.Errorf("describeXOAUTH2Error(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// invalidatingTokens hands out tok-1, tok-2, ... and records drops, like a
+// client credentials cache.
+type invalidatingTokens struct {
+	n       int
+	dropped []string
+}
+
+func (s *invalidatingTokens) Token(context.Context) (oauth.Token, error) {
+	s.n++
+	return oauth.Token{AccessToken: fmt.Sprintf("tok-%d", s.n), Expiry: time.Now().Add(time.Hour)}, nil
+}
+
+func (s *invalidatingTokens) Invalidate(t oauth.Token) { s.dropped = append(s.dropped, t.AccessToken) }
+
+func TestXOAUTH2_RejectedTokenIsReplacedOnce(t *testing.T) {
+	srv := newXOAUTH2Server(t, "noreply@contoso.com", "tok-2")
+	src := &invalidatingTokens{}
+	d := newXOAUTH2Driver(t, srv.port(), "noreply@contoso.com", src)
+	if _, err := d.(driver.RawSender).SendRaw(context.Background(), "noreply@contoso.com", []string{"a@example.com"}, rawMsg); err != nil {
+		t.Fatalf("the second token must be used: %v", err)
+	}
+	if len(src.dropped) != 1 || src.dropped[0] != "tok-1" {
+		t.Fatalf("dropped %v, want tok-1", src.dropped)
+	}
+
+	// A second rejection is final.
+	srv = newXOAUTH2Server(t, "noreply@contoso.com", "never")
+	src = &invalidatingTokens{}
+	d = newXOAUTH2Driver(t, srv.port(), "noreply@contoso.com", src)
+	_, err := d.(driver.RawSender).SendRaw(context.Background(), "noreply@contoso.com", []string{"a@example.com"}, rawMsg)
+	if !errors.Is(err, driver.ErrUpstreamTransient) || src.n != 2 {
+		t.Fatalf("want a transient error after two tokens, got %v after %d", err, src.n)
+	}
+}
+
+func TestXOAUTH2_RejectedTokenWithoutInvalidateIsNotRetried(t *testing.T) {
+	srv := newXOAUTH2Server(t, "me@outlook.com", "right")
+	var calls int
+	src := tokenFunc(func(context.Context) (oauth.Token, error) {
+		calls++
+		return oauth.Token{AccessToken: "wrong"}, nil
+	})
+	d := newXOAUTH2Driver(t, srv.port(), "me@outlook.com", src)
+	if _, err := d.(driver.RawSender).SendRaw(context.Background(), "me@outlook.com", []string{"a@example.com"}, rawMsg); err == nil {
+		t.Fatal("want an error")
+	}
+	if calls != 1 {
+		t.Fatalf("a source that cannot drop the token gets no retry, got %d calls", calls)
 	}
 }

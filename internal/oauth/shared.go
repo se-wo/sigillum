@@ -1,12 +1,10 @@
-package graph
+package oauth
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
 	"sync"
-
-	"github.com/se-wo/sigillum/internal/oauth"
 )
 
 // maxCaches bounds the shared caches. Each distinct application and secret
@@ -16,16 +14,16 @@ const maxCaches = 256
 
 var (
 	cachesMu sync.Mutex
-	caches   = map[string]*oauth.Cache{}
+	caches   = map[string]*Cache{}
 )
 
-// sharedCache returns the token cache of src's application. The gateway
+// SharedCache returns the token cache of src's application. The gateway
 // builds a driver per send, so a cache per driver would fetch a token for
 // every message; one per token endpoint, client, secret and scope keeps a
 // token for its lifetime and shares it between all sends and the health
 // check. The secret is part of the key so a rotated secret takes effect at
 // once, hashed so it is not kept in memory twice.
-func sharedCache(src *oauth.ClientCredentials) *oauth.Cache {
+func SharedCache(src *ClientCredentials) *Cache {
 	h := sha256.Sum256([]byte(strings.Join([]string{src.TokenURL, src.ClientID, src.ClientSecret,
 		strings.Join(src.Scopes, " ")}, "\x00")))
 	key := hex.EncodeToString(h[:])
@@ -35,9 +33,9 @@ func sharedCache(src *oauth.ClientCredentials) *oauth.Cache {
 		return c
 	}
 	if len(caches) >= maxCaches {
-		caches = map[string]*oauth.Cache{}
+		caches = map[string]*Cache{}
 	}
-	c := oauth.NewCache(src)
+	c := NewCache(src)
 	caches[key] = c
 	return c
 }

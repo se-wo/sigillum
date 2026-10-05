@@ -181,3 +181,23 @@ func TestMailBackendValidator_XOAUTH2(t *testing.T) {
 		t.Fatalf("MailBackend: %v", err)
 	}
 }
+
+func TestMailBackendValidator_XOAUTH2AppOnly(t *testing.T) {
+	for tenant, wantErr := range map[string]bool{
+		"72f988bf-86f1-41af-91ab-2d7cd011db47": false,
+		"contoso.onmicrosoft.com":              false,
+		"":                                     true,
+		"consumers":                            true,
+		"organizations":                        true,
+		"common":                               true,
+	} {
+		b := xoauth2Backend(func(s *sigv1.BackendSpec) {
+			s.SMTP.Endpoints[0].Host = "smtp.office365.com"
+			s.SMTP.OAuth.Flow, s.SMTP.OAuth.Tenant, s.SMTP.OAuth.Mailbox = sigv1.OAuthFlowClientCredentials, tenant, "noreply@contoso.com"
+		})
+		_, err := NewClusterMailBackendValidator().ValidateCreate(context.Background(), b)
+		if wantErr != (err != nil) || (err != nil && !strings.Contains(err.Error(), "clientCredentials")) {
+			t.Errorf("tenant %q: wantErr=%v, got %v", tenant, wantErr, err)
+		}
+	}
+}

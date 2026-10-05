@@ -77,6 +77,13 @@ the version being prepared in the same pull request as the change.
   needs `starttls` or `tls`. Needs `credentials.enabled` (default), whose
   Secret guard admits the token Secret. Recipe
   `examples/providers/outlook-com.yaml`.
+- `spec.smtp.oauth.flow: clientCredentials`: app-only `XOAUTH2` for
+  Microsoft 365 work accounts that must stay on SMTP
+  (`smtp.office365.com`, application permission `SMTP.SendAsApp`), with
+  the client secret in the credentials Secret and the tenant ID or domain
+  as `tenant`. No sign-in and no password; a rejected token is replaced
+  once. The Graph driver stays the recommendation for work accounts.
+  Recipe `examples/providers/microsoft-365-smtp-oauth.yaml`.
 
 ### Changed
 

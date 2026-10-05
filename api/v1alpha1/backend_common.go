@@ -63,12 +63,32 @@ type OAuthProvider string
 
 const OAuthProviderMicrosoft OAuthProvider = "microsoft"
 
-// SMTPOAuthSpec configures authType XOAUTH2 with a delegated sign-in: a
+// OAuthFlow is how an XOAUTH2 backend gets its access tokens.
+// +kubebuilder:validation:Enum=delegated;clientCredentials
+type OAuthFlow string
+
+const (
+	// OAuthFlowDelegated: a person signs in once and the controller keeps
+	// the tokens of that sign-in fresh (US-6.3).
+	OAuthFlowDelegated OAuthFlow = "delegated"
+	// OAuthFlowClientCredentials: app-only, with an Entra application's
+	// client secret and the application permission SMTP.SendAsApp
+	// (Microsoft 365 work accounts, US-6.1 stage 2).
+	OAuthFlowClientCredentials OAuthFlow = "clientCredentials"
+)
+
+// SMTPOAuthSpec configures authType XOAUTH2: with the delegated flow a
 // person signs in once with the OAuth client below, and the controller
-// keeps the access token fresh with the refresh token (SPEC US-6.3).
+// keeps the access token fresh with the refresh token (SPEC US-6.3); with
+// clientCredentials the application itself gets tokens with its secret.
 type SMTPOAuthSpec struct {
 	// Provider is the identity provider.
 	Provider OAuthProvider `json:"provider"`
+	// Flow is delegated (default) or clientCredentials (app-only; needs
+	// the tenant and a client_secret in the credentials Secret).
+	// +kubebuilder:default=delegated
+	// +optional
+	Flow OAuthFlow `json:"flow,omitempty"`
 	// Tenant selects the Microsoft accounts that may sign in: "consumers"
 	// for personal accounts (Outlook.com), "organizations", or a tenant ID
 	// or verified domain in lower case. Defaults to "consumers".
@@ -81,7 +101,8 @@ type SMTPOAuthSpec struct {
 	// permissions SMTP.Send and offline_access.
 	// +kubebuilder:validation:MinLength=1
 	ClientID string `json:"clientID"`
-	// Mailbox is the address that signed in; it is the SASL user. Without
+	// Mailbox is the address that signed in, or with clientCredentials the
+	// mailbox the application sends as; it is the SASL user. Without
 	// spec.allowedSenders the backend sends only as this address.
 	// +kubebuilder:validation:MinLength=3
 	// +kubebuilder:validation:MaxLength=320
@@ -320,6 +341,12 @@ const (
 	// secret, and the optional client secret of an XOAUTH2 backend.
 	GraphSecretClientSecretKey = "client_secret"
 )
+
+// Delegated reports whether the tokens come from a person's sign-in that
+// the controller keeps fresh, rather than from the application itself.
+func (o *SMTPOAuthSpec) Delegated() bool {
+	return o.Flow != OAuthFlowClientCredentials
+}
 
 // EffectiveAllowedSenders is the sender bound the gateway enforces: the
 // spec's allowedSenders, or, when it is omitted on an XOAUTH2 backend, only

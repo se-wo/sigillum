@@ -75,19 +75,25 @@ func describeXOAUTH2Error(challenge []byte) string {
 // checked here as well as by internal/oauth, because sources other than a
 // token endpoint (the token Secret of a delegated backend) hand it over
 // unchecked, and the SASL string uses control characters as separators.
-func (d *Driver) accessToken(ctx context.Context) (string, error) {
+func (d *Driver) accessToken(ctx context.Context) (oauth.Token, error) {
 	tok, err := d.cfg.SMTP.Tokens.Token(ctx)
 	if err != nil {
-		return "", err
+		return oauth.Token{}, err
 	}
 	if !oauth.ValidAccessToken(tok.AccessToken) {
-		return "", errors.New("the access token is missing or not a valid bearer token")
+		return oauth.Token{}, errors.New("the access token is missing or not a valid bearer token")
 	}
 	if !tok.Expiry.IsZero() && !time.Now().Before(tok.Expiry) {
-		return "", fmt.Errorf("the access token expired at %s", tok.Expiry.UTC().Format(time.RFC3339))
+		return oauth.Token{}, fmt.Errorf("the access token expired at %s", tok.Expiry.UTC().Format(time.RFC3339))
 	}
-	return tok.AccessToken, nil
+	return tok, nil
 }
+
+// authError marks a relay's rejection of the XOAUTH2 token.
+type authError struct{ err error }
+
+func (e authError) Error() string { return e.err.Error() }
+func (e authError) Unwrap() error { return e.err }
 
 // tokenError maps a failed token request like the Graph driver: a wrong
 // client, a missing grant or a misconfigured endpoint is permanent,
