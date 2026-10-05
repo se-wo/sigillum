@@ -62,3 +62,11 @@ func TestEffectiveAllowedSenders(t *testing.T) {
 		t.Fatalf("other backends without the list have no bound, got %v", got)
 	}
 }
+
+func TestSMTPOAuthSpecDelegated(t *testing.T) {
+	for flow, want := range map[OAuthFlow]bool{"": true, OAuthFlowDelegated: true, OAuthFlowClientCredentials: false} {
+		if got := (&SMTPOAuthSpec{Flow: flow}).Delegated(); got != want {
+			t.Errorf("flow %q: Delegated() = %v", flow, got)
+		}
+	}
+}

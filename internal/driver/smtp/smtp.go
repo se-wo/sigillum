@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/se-wo/sigillum/internal/driver"
+	"github.com/se-wo/sigillum/internal/oauth"
 )
 
 const driverHelo = "sigillum"
@@ -154,18 +155,32 @@ func (d *Driver) SendRaw(ctx context.Context, envelopeFrom string, recipients []
 }
 
 func (d *Driver) sendBody(ctx context.Context, from string, rcpts []string, body []byte, msgID string) (*driver.SendResult, error) {
-	// One token for every endpoint of this send.
-	var token string
-	if d.cfg.SMTP.AuthType == AuthXOAUTH2 {
-		var err error
-		if token, err = d.accessToken(ctx); err != nil {
+	if d.cfg.SMTP.AuthType != AuthXOAUTH2 {
+		return d.sendOnce(ctx, oauth.Token{}, from, rcpts, body, msgID)
+	}
+	// One token for every endpoint of this send. A token the relay
+	// rejects may have been revoked before its expiry: a source that can
+	// drop it (a client credentials cache) gets one more try.
+	for attempt := 0; ; attempt++ {
+		tok, err := d.accessToken(ctx)
+		if err != nil {
 			return nil, tokenError(err)
 		}
+		res, err := d.sendOnce(ctx, tok, from, rcpts, body, msgID)
+		inv, ok := d.cfg.SMTP.Tokens.(interface{ Invalidate(oauth.Token) })
+		if !errors.As(err, new(authError)) || !ok || attempt > 0 {
+			return res, err
+		}
+		inv.Invalidate(tok)
 	}
+}
+
+// sendOnce tries the endpoints in order with one token.
+func (d *Driver) sendOnce(ctx context.Context, tok oauth.Token, from string, rcpts []string, body []byte, msgID string) (*driver.SendResult, error) {
 	var lastErr error
 	transient := true
 	for _, ep := range d.cfg.SMTP.Endpoints {
-		if err := d.sendVia(ctx, ep, token, from, rcpts, body); err != nil {
+		if err := d.sendVia(ctx, ep, tok.AccessToken, from, rcpts, body); err != nil {
 			lastErr = err
 			if !isTransient(err) {
 				transient = false
@@ -186,9 +201,9 @@ func (d *Driver) sendBody(ctx context.Context, from string, rcpts []string, body
 		lastErr = driver.ErrNoReadyEndpoint
 	}
 	if transient {
-		return nil, fmt.Errorf("%w: %v", driver.ErrUpstreamTransient, lastErr)
+		return nil, fmt.Errorf("%w: %w", driver.ErrUpstreamTransient, lastErr)
 	}
-	return nil, fmt.Errorf("%w: %v", driver.ErrUpstreamPermanent, lastErr)
+	return nil, fmt.Errorf("%w: %w", driver.ErrUpstreamPermanent, lastErr)
 }
 
 func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, token, from string, rcpts []string, body []byte) error {
@@ -239,9 +254,9 @@ func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, token, fro
 		var rejected string
 		if err := c.Auth(xoauth2Auth{username: d.cfg.SMTP.Username, token: token, rejected: &rejected}); err != nil {
 			if rejected != "" {
-				return fmt.Errorf("%w (XOAUTH2 %s)", err, rejected)
+				return authError{fmt.Errorf("%w (XOAUTH2 %s)", err, rejected)}
 			}
-			return err
+			return authError{err}
 		}
 	default:
 		auth, err := buildAuth(d.cfg.SMTP.AuthType, d.cfg.SMTP.Username, d.cfg.SMTP.Password, ep.Host)

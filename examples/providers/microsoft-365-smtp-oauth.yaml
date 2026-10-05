@@ -1,0 +1,66 @@
+# Microsoft 365 work or school accounts via SMTP with OAuth, app-only
+# (XOAUTH2 with the client credentials flow; SPEC US-6.1 stage 2).
+#
+# Prefer the Microsoft Graph driver (microsoft-365-graph.yaml): it needs no
+# SMTP AUTH at all. Use this one when a mailbox must stay on SMTP, for
+# example for messages larger than Graph's 4 MB (SMTP allows the mailbox's
+# send limit, 35 MB by default). It keeps working after Basic auth for SMTP
+# is switched off at the end of December 2026, because it sends no
+# password; SMTP AUTH itself must stay enabled for the mailbox.
+#
+# 1. Register an application (Entra admin center > App registrations),
+#    single tenant. Create a client secret and note its value, the
+#    Application (client) ID and the Directory (tenant) ID.
+#    API permissions > Add > APIs my organization uses > Office 365
+#    Exchange Online > Application permissions > SMTP.SendAsApp, then
+#    grant admin consent.
+#
+# 2. Let the application use the mailbox (Exchange Online PowerShell, as
+#    an Exchange administrator). Microsoft's documented grant is FullAccess,
+#    which also lets the app read the mailbox; give it only to a mailbox
+#    that is used for sending:
+#
+#      # IDs from Entra > Enterprise applications (not App registrations)
+#      New-ServicePrincipal -AppId <client ID> -ObjectId <object ID> -DisplayName Sigillum
+#      Add-MailboxPermission -Identity noreply@contoso.com -User <object ID> -AccessRights FullAccess
+#      Set-CASMailbox -Identity noreply@contoso.com -SmtpClientAuthenticationDisabled $false
+#
+# 3. Apply this file with the real IDs and the secret out of band. The
+#    backend sends only as oauth.mailbox unless allowedSenders lists more
+#    (each one needs the permission from step 2).
+#
+# `kubectl get cmb` shows the backend not ready when no token can be
+# fetched (wrong tenant, client ID or secret). The client secret expires
+# (at most 24 months): rotate it in the Secret before; a new value is used
+# at once. Exchange Online's limit of 10,000 recipients per day and mailbox
+# applies: use the policy's rateLimits.messagesPerDay.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: microsoft-365-smtp-oauth
+  namespace: sigillum-system
+type: Opaque
+stringData:
+  client_secret: "REPLACE-ME"   # set out of band; do not commit
+---
+apiVersion: sigillum.dev/v1alpha1
+kind: ClusterMailBackend
+metadata:
+  name: microsoft-365-smtp-oauth
+spec:
+  type: smtp
+  smtp:
+    endpoints:
+      - host: smtp.office365.com
+        port: 587
+        tls: starttls
+    authType: XOAUTH2
+    credentialsRef:
+      name: microsoft-365-smtp-oauth
+      namespace: sigillum-system
+    oauth:
+      provider: microsoft
+      flow: clientCredentials
+      tenant: "00000000-0000-0000-0000-000000000000"   # Directory (tenant) ID
+      clientID: "00000000-0000-0000-0000-000000000000"   # Application (client) ID
+      mailbox: noreply@contoso.com

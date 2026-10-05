@@ -60,7 +60,13 @@ func ResolveBackendConfig(
 			if spec.SMTP.CredentialsRef == nil {
 				return cfg, fmt.Errorf("spec.smtp.credentialsRef is required when authType != NONE")
 			}
-			if spec.SMTP.AuthType == sigv1.SMTPAuthXOAUTH2 {
+			if spec.SMTP.AuthType == sigv1.SMTPAuthXOAUTH2 && spec.SMTP.OAuth != nil && !spec.SMTP.OAuth.Delegated() {
+				tokens, err := appOnlyTokens(ctx, c, spec.SMTP, secretFallbackNs)
+				if err != nil {
+					return cfg, err
+				}
+				smtpCfg.Username, smtpCfg.Tokens = spec.SMTP.OAuth.Mailbox, tokens
+			} else if spec.SMTP.AuthType == sigv1.SMTPAuthXOAUTH2 {
 				// The access token comes from the token Secret the
 				// controller's broker keeps in the credentials
 				// namespace; the credentials Secret itself is optional.

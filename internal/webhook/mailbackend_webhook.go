@@ -214,6 +214,15 @@ func validateSMTPOAuth(smtpPath *field.Path, s *sigv1.SMTPBackendSpec) field.Err
 		errs = append(errs, field.Invalid(oPath.Child("tenant"), o.Tenant,
 			`must be "consumers", "organizations", a tenant ID or a verified domain, in lower case`))
 	}
+	// App-only tokens are issued by one tenant, never by the multi-tenant
+	// aliases; and the application authenticates with its secret.
+	if !o.Delegated() {
+		switch o.Tenant {
+		case "", "consumers", "organizations", "common":
+			errs = append(errs, field.Invalid(oPath.Child("tenant"), o.Tenant,
+				"flow clientCredentials needs the directory (tenant) ID or a verified domain of the tenant"))
+		}
+	}
 	if _, err := uuid.Parse(o.ClientID); err != nil || len(o.ClientID) != 36 {
 		errs = append(errs, field.Invalid(oPath.Child("clientID"), o.ClientID,
 			"must be the application (client) ID of the app registration, a GUID"))

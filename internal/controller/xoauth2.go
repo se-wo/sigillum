@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -35,6 +36,37 @@ func microsoftEndpoints(tenant string) (string, string, error) {
 
 // defaultMicrosoftTenant lets personal Microsoft accounts sign in.
 const defaultMicrosoftTenant = "consumers"
+
+// MicrosoftSMTPAppScope requests the application permissions granted to an
+// app for Exchange Online, SMTP.SendAsApp among them.
+const MicrosoftSMTPAppScope = "https://outlook.office365.com/.default"
+
+// appOnlyEnv reaches Microsoft's token endpoint; tests replace it.
+var appOnlyEnv = struct {
+	tokenURL   func(tenant string) (string, error)
+	httpClient *http.Client
+}{tokenURL: oauth.MicrosoftTokenURL}
+
+// appOnlyTokens is the token source of an XOAUTH2 backend with the client
+// credentials flow: the application's own tokens, from a cache shared by
+// every driver of the same application, so the gateway's per-send drivers
+// and the health check fetch a token once per lifetime.
+func appOnlyTokens(ctx context.Context, c client.Reader, s *sigv1.SMTPBackendSpec, secretFallbackNs string) (*oauth.Cache, error) {
+	sec, err := credentialsSecret(ctx, c, "spec.smtp", *s.CredentialsRef, secretFallbackNs)
+	if err != nil {
+		return nil, err
+	}
+	secret := string(sec.Data[sigv1.GraphSecretClientSecretKey])
+	if secret == "" {
+		return nil, fmt.Errorf("credentials secret %s/%s has no key %s", sec.Namespace, sec.Name, sigv1.GraphSecretClientSecretKey)
+	}
+	tokenURL, err := appOnlyEnv.tokenURL(s.OAuth.Tenant)
+	if err != nil {
+		return nil, err
+	}
+	return oauth.SharedCache(&oauth.ClientCredentials{TokenURL: tokenURL, ClientID: s.OAuth.ClientID, ClientSecret: secret,
+		Scopes: []string{MicrosoftSMTPAppScope}, HTTPClient: appOnlyEnv.httpClient}), nil
+}
 
 // secretTokens is the token source of an XOAUTH2 backend on the send path
 // (api-server, SMTP proxy): the access token the controller's broker stored

@@ -53,7 +53,7 @@ func init() {
 
 // Driver sends through Microsoft Graph. Drivers are built per send; the
 // access token lives in a cache shared by every Driver of the same
-// application (tokens.go).
+// application (oauth.SharedCache).
 type Driver struct {
 	key     string
 	baseURL string
@@ -88,7 +88,7 @@ func newDriver(cfg driver.Config, env environment) (*Driver, error) {
 	src := &oauth.ClientCredentials{TokenURL: tokenURL, ClientID: g.ClientID, ClientSecret: g.ClientSecret,
 		Scopes: []string{Scope}, HTTPClient: env.httpClient}
 	return &Driver{key: cfg.BackendKey, baseURL: env.baseURL, host: u.Hostname(), hc: hc,
-		tokens: sharedCache(src)}, nil
+		tokens: oauth.SharedCache(src)}, nil
 }
 
 func (d *Driver) Type() driver.Type { return driver.TypeMicrosoftGraph }

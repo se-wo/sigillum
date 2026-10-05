@@ -82,7 +82,7 @@ func reconcileBackend(
 
 	// A delegated sign-in (XOAUTH2): the broker refreshes the access token
 	// on every reconcile that is due, and the health check below uses it.
-	if cfg.SMTP != nil && cfg.SMTP.AuthType == string(sigv1.SMTPAuthXOAUTH2) {
+	if cfg.SMTP != nil && cfg.SMTP.AuthType == string(sigv1.SMTPAuthXOAUTH2) && spec.SMTP.OAuth.Delegated() {
 		res, err := authorizeDelegated(ctx, c, broker, owner, kind, key, spec, secretFallbackNs)
 		if err != nil {
 			status.Conditions = setCondition(status.Conditions, errorReadyCondition(generation, sigv1.ReasonInvalidConfiguration, err.Error()))
