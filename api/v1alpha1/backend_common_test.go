@@ -37,3 +37,28 @@ func TestBackendSpec_AllowedSendersRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestEffectiveAllowedSenders(t *testing.T) {
+	xoauth2 := func(senders []string) *BackendSpec {
+		return &BackendSpec{Type: BackendSMTP, AllowedSenders: senders, SMTP: &SMTPBackendSpec{
+			AuthType: SMTPAuthXOAUTH2, OAuth: &SMTPOAuthSpec{Mailbox: "me@outlook.com"}}}
+	}
+	if got := xoauth2(nil).EffectiveAllowedSenders(); len(got) != 1 || got[0] != "me@outlook.com" {
+		t.Fatalf("an XOAUTH2 backend without allowedSenders sends only as its mailbox, got %v", got)
+	}
+	if got := xoauth2([]string{"alias@outlook.com"}).EffectiveAllowedSenders(); len(got) != 1 || got[0] != "alias@outlook.com" {
+		t.Fatalf("an explicit list wins, got %v", got)
+	}
+	if got := xoauth2([]string{}).EffectiveAllowedSenders(); got == nil || len(got) != 0 {
+		t.Fatalf("an empty list still denies every sender, got %#v", got)
+	}
+	glob := xoauth2(nil)
+	glob.SMTP.OAuth.Mailbox = "*@outlook.com"
+	if got := glob.EffectiveAllowedSenders(); got == nil || len(got) != 0 {
+		t.Fatalf("a mailbox that is a pattern must deny, not widen, got %#v", got)
+	}
+	plain := &BackendSpec{Type: BackendSMTP, SMTP: &SMTPBackendSpec{AuthType: SMTPAuthPlain}}
+	if got := plain.EffectiveAllowedSenders(); got != nil {
+		t.Fatalf("other backends without the list have no bound, got %v", got)
+	}
+}

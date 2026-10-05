@@ -4,6 +4,7 @@ package webhook
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -16,6 +17,7 @@ import (
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 	"github.com/se-wo/sigillum/internal/driver"
+	"github.com/se-wo/sigillum/internal/policy"
 )
 
 // +kubebuilder:webhook:path=/validate-sigillum-dev-v1alpha1-mailbackend,mutating=false,failurePolicy=fail,sideEffects=None,groups=sigillum.dev,resources=mailbackends,verbs=create;update,versions=v1alpha1,name=vmailbackend.sigillum.dev,admissionReviewVersions=v1
@@ -132,6 +134,7 @@ func (v *MailBackendValidator[T]) validate(obj runtime.Object) (admission.Warnin
 			if spec.SMTP.CredentialsRef != nil {
 				allErrs = append(allErrs, v.validateCredentialsRef(smtpPath.Child("credentialsRef"), *spec.SMTP.CredentialsRef, selfNs)...)
 			}
+			allErrs = append(allErrs, validateSMTPOAuth(smtpPath, spec.SMTP)...)
 		}
 		if spec.MicrosoftGraph != nil {
 			allErrs = append(allErrs, field.Forbidden(specPath.Child("microsoftGraph"), "only for type microsoftGraph"))
@@ -188,6 +191,50 @@ func (v *MailBackendValidator[T]) validateGraph(specPath *field.Path, spec *sigv
 	}
 	if spec.SMTP != nil {
 		errs = append(errs, field.Forbidden(specPath.Child("smtp"), "only for type smtp"))
+	}
+	return errs
+}
+
+// validateSMTPOAuth checks authType XOAUTH2 (SPEC US-6.1 stage 2, US-6.3).
+func validateSMTPOAuth(smtpPath *field.Path, s *sigv1.SMTPBackendSpec) field.ErrorList {
+	var errs field.ErrorList
+	oPath := smtpPath.Child("oauth")
+	if s.AuthType != sigv1.SMTPAuthXOAUTH2 {
+		if s.OAuth != nil {
+			errs = append(errs, field.Forbidden(oPath, "only for authType XOAUTH2"))
+		}
+		return errs
+	}
+	o := s.OAuth
+	if o == nil {
+		return append(errs, field.Required(oPath, "spec.smtp.oauth is required when authType=XOAUTH2"))
+	}
+	// The tenant becomes part of the token URL.
+	if o.Tenant != "" && len(validation.IsDNS1123Subdomain(o.Tenant)) > 0 {
+		errs = append(errs, field.Invalid(oPath.Child("tenant"), o.Tenant,
+			`must be "consumers", "organizations", a tenant ID or a verified domain, in lower case`))
+	}
+	if _, err := uuid.Parse(o.ClientID); err != nil || len(o.ClientID) != 36 {
+		errs = append(errs, field.Invalid(oPath.Child("clientID"), o.ClientID,
+			"must be the application (client) ID of the app registration, a GUID"))
+	}
+	if err := policy.ValidatePlainAddress(o.Mailbox); err != nil {
+		errs = append(errs, field.Invalid(oPath.Child("mailbox"), o.Mailbox,
+			err.Error()+" (must be the address that signed in, such as me@outlook.com)"))
+	} else if strings.ContainsAny(o.Mailbox, "*?[") {
+		// Without allowedSenders the mailbox is the sender bound, where
+		// these would act as a glob.
+		errs = append(errs, field.Invalid(oPath.Child("mailbox"), o.Mailbox, "must be a plain address, not a pattern"))
+	} else if strings.IndexFunc(o.Mailbox, func(r rune) bool { return r > 0x7e }) >= 0 {
+		// It is the SASL user of the XOAUTH2 string, which is ASCII.
+		errs = append(errs, field.Invalid(oPath.Child("mailbox"), o.Mailbox, "must be ASCII"))
+	}
+	// The access token lets anyone who sees it send as the mailbox.
+	for i, ep := range s.Endpoints {
+		if ep.TLS == sigv1.SMTPTLSNone {
+			errs = append(errs, field.Forbidden(smtpPath.Child("endpoints").Index(i).Child("tls"),
+				"XOAUTH2 sends an access token and needs starttls or tls"))
+		}
 	}
 	return errs
 }

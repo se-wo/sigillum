@@ -149,12 +149,13 @@ func init() {
 			return err
 		}
 
-		if err := (&MailBackendReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
-			return err
-		}
-		if err := (&ClusterMailBackendReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
-			return err
-		}
+		// The token broker of XOAUTH2 backends writes token Secrets only
+		// while the credential Secret guard is verified; without
+		// --credentials-generated there is no guard checker, and such
+		// backends report GuardMissing.
+		broker := &TokenBroker{Reader: mgr.GetClient(), Writer: mgr.GetClient()}
+		mbReconciler := &MailBackendReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Broker: broker}
+		cmbReconciler := &ClusterMailBackendReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Broker: broker}
 		if err := (&MailPolicyReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
 			return err
 		}
@@ -190,8 +191,15 @@ func init() {
 				return err
 			}
 			credReconciler.Guard = checker
+			broker.Guard = checker
 		}
 		if err := credReconciler.SetupWithManager(mgr); err != nil {
+			return err
+		}
+		if err := mbReconciler.SetupWithManager(mgr); err != nil {
+			return err
+		}
+		if err := cmbReconciler.SetupWithManager(mgr); err != nil {
 			return err
 		}
 

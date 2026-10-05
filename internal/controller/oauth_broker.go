@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -73,6 +74,9 @@ type BrokerResult struct {
 	Reason       string
 	Message      string
 	RequeueAfter time.Duration
+	// Token is the current access token while Authorized; it may be
+	// empty or expired after a temporary refresh failure.
+	Token oauth.Token
 }
 
 // TokenBroker keeps the access tokens of delegated backends fresh (SPEC
@@ -89,6 +93,10 @@ type TokenBroker struct {
 	Writer client.Writer
 	Guard  *GuardChecker
 	Now    func() time.Time
+	// TokenURL and HTTPClient reach the provider; nil uses
+	// oauth.MicrosoftTokenURL and the default client. Tests replace them.
+	TokenURL   func(tenant string) (string, error)
+	HTTPClient *http.Client
 
 	// mu serializes Ensure, token requests included: a few delegated
 	// backends refresh once every half hour, so contention is negligible
@@ -99,6 +107,7 @@ type TokenBroker struct {
 
 // brokerState is what the broker holds for one backend.
 type brokerState struct {
+	key          string // DelegatedBackend.Key, for Forget
 	seed         string // seedHash of the sign-in this chain descends from
 	refreshToken string
 	token        oauth.Token
@@ -110,7 +119,7 @@ type brokerState struct {
 // in the token Secret. Callers run it on every reconcile and health check,
 // so the refresh token is used, and kept alive, every half token lifetime
 // even when no mail is sent.
-func (b *TokenBroker) Ensure(ctx context.Context, d DelegatedBackend) BrokerResult {
+func (b *TokenBroker) Ensure(ctx context.Context, d DelegatedBackend) (res BrokerResult) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now()
@@ -123,6 +132,11 @@ func (b *TokenBroker) Ensure(ctx context.Context, d DelegatedBackend) BrokerResu
 		}
 		b.state[d.Owner.GetUID()] = st
 	}
+	defer func() {
+		if res.Authorized {
+			res.Token = st.token
+		}
+	}()
 	if st.refreshToken == "" {
 		backendAuthorized.WithLabelValues(d.Key).Set(0)
 		return BrokerResult{Reason: sigv1.ReasonAuthorizationRequired, RequeueAfter: brokerReauthRetry,
@@ -164,11 +178,19 @@ func (b *TokenBroker) Ensure(ctx context.Context, d DelegatedBackend) BrokerResu
 	return authorized(st.refreshAt.Sub(now))
 }
 
-// Forget drops a deleted backend's state and metric.
-func (b *TokenBroker) Forget(uid types.UID, key string) {
+// Forget drops the state and metric of a backend that was deleted or no
+// longer uses a delegated sign-in. key is DelegatedBackend.Key.
+func (b *TokenBroker) Forget(key string) {
+	if b == nil {
+		return
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	delete(b.state, uid)
+	for uid, st := range b.state {
+		if st.key == key {
+			delete(b.state, uid)
+		}
+	}
 	backendAuthorized.DeleteLabelValues(key)
 }
 
@@ -182,7 +204,7 @@ func authorized(requeue time.Duration) BrokerResult {
 // which fails with invalid_grant if it was rotated away, and asks for a
 // new sign-in rather than guessing.
 func (b *TokenBroker) load(ctx context.Context, d DelegatedBackend, seed string) *brokerState {
-	st := &brokerState{seed: seed, refreshToken: d.Seed}
+	st := &brokerState{key: d.Key, seed: seed, refreshToken: d.Seed}
 	var sec corev1.Secret
 	if err := b.Reader.Get(ctx, types.NamespacedName{Namespace: d.Namespace, Name: tokenSecretName(d)}, &sec); err != nil {
 		return st

@@ -58,7 +58,7 @@ func NewGuardChecker(g credential.Guard, reader, lister client.Reader, interval 
 // OK reports whether the guard was verified, and the reason if not.
 func (g *GuardChecker) OK() (bool, string) {
 	if g == nil {
-		return false, "credential Secret guard is not being checked"
+		return false, "credential Secret guard is not installed (chart value credentials.enabled is false)"
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()

@@ -124,6 +124,7 @@ spec:
                     - PLAIN
                     - LOGIN
                     - CRAM-MD5
+                    - XOAUTH2
                     type: string
                   connectionTimeoutSeconds:
                     default: 10
@@ -136,7 +137,9 @@ spec:
                   credentialsRef:
                     description: |-
                       CredentialsRef points at the secret holding upstream credentials.
-                      Required unless AuthType is NONE.
+                      Required unless AuthType is NONE. For XOAUTH2 it holds the
+                      refresh_token of the sign-in (and client_secret for a confidential
+                      client); the controller keeps its token Secret in the same namespace.
                     properties:
                       name:
                         minLength: 1
@@ -185,6 +188,41 @@ spec:
                     description: HeloDomain is sent in the SMTP HELO/EHLO command.
                       Defaults to "sigillum".
                     type: string
+                  oauth:
+                    description: OAuth is required when AuthType is XOAUTH2.
+                    properties:
+                      clientID:
+                        description: |-
+                          ClientID is the application (client) ID of the user's own app
+                          registration, with public client flows enabled and the delegated
+                          permissions SMTP.Send and offline_access.
+                        minLength: 1
+                        type: string
+                      mailbox:
+                        description: |-
+                          Mailbox is the address that signed in; it is the SASL user. Without
+                          spec.allowedSenders the backend sends only as this address.
+                        maxLength: 320
+                        minLength: 3
+                        type: string
+                      provider:
+                        description: Provider is the identity provider.
+                        enum:
+                        - microsoft
+                        type: string
+                      tenant:
+                        default: consumers
+                        description: |-
+                          Tenant selects the Microsoft accounts that may sign in: "consumers"
+                          for personal accounts (Outlook.com), "organizations", or a tenant ID
+                          or verified domain in lower case. Defaults to "consumers".
+                        maxLength: 253
+                        type: string
+                    required:
+                    - clientID
+                    - mailbox
+                    - provider
+                    type: object
                 required:
                 - endpoints
                 type: object

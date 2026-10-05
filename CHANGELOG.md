@@ -57,6 +57,21 @@ the version being prepared in the same pull request as the change.
   The health check acquires a token, so a wrong secret shows as not ready.
   Recipe `examples/providers/microsoft-365-graph.yaml`, with RBAC for
   Applications to confine the app to its mailboxes.
+- `authType: XOAUTH2` for SMTP backends with a person's delegated
+  Microsoft sign-in, the way to send through a personal Outlook.com account
+  (`smtp-mail.outlook.com`), which has no password login any more (US-6.1,
+  US-6.3). `spec.smtp.oauth` holds the provider (`microsoft`), the tenant
+  (default `consumers`), the client ID of your own app registration and
+  the mailbox; the credentials Secret holds the sign-in's `refresh_token`.
+  The controller redeems it, keeps the access token fresh in its own
+  Secret `sigillum-oauth-mb-<name>` / `sigillum-oauth-cmb-<name>` and
+  reports the condition `Authorized` and the metric
+  `sigillum_backend_authorized`; without a token the backend is not ready.
+  Without `allowedSenders` the backend sends only as the mailbox. Every
+  endpoint needs `starttls` or `tls`. Needs `credentials.enabled` (default),
+  whose Secret guard admits the token Secret. For now the sign-in is a
+  manual device code flow with `curl`; recipe
+  `examples/providers/outlook-com.yaml`.
 
 ### Changed
 

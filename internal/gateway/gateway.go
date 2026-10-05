@@ -240,9 +240,10 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 	// The backend bounds the senders of every policy that uses it (US-2.8);
 	// a policy can narrow that list but never widen it. nil: no bound.
 	// Checked before the credentials are resolved, so a refused sender gets
-	// a permanent 403 even while the credentials Secret is broken.
-	if spec.AllowedSenders != nil {
-		if from, ok := policy.SendersAllowed(view, spec.AllowedSenders); !ok {
+	// a permanent 403 even while the credentials Secret is broken. An
+	// XOAUTH2 backend without the list sends only as its mailbox.
+	if allowed := spec.EffectiveAllowedSenders(); allowed != nil {
+		if from, ok := policy.SendersAllowed(view, allowed); !ok {
 			return deny(p.Name, policy.DenySenderNotAllowed,
 				"sender '"+from+"' not in the backend's allowedSenders", backendKey,
 				"backend", backendKey, "restriction", "backend")
