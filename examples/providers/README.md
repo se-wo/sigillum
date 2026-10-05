@@ -8,10 +8,11 @@ the Secret out of band (External Secrets, Sealed Secrets, `kubectl create
 secret`), never in Git.
 
 The SMTP driver authenticates with `PLAIN`, `LOGIN` or `CRAM-MD5`, i.e. with
-a static secret. Microsoft 365 work accounts can use the Microsoft Graph
-driver instead (v0.4.0, [`microsoft-365-graph.yaml`](microsoft-365-graph.yaml)).
-A Gmail API driver and OAuth (`XOAUTH2`) for the SMTP driver are planned for
-v0.4.0 (SPEC US-6.1, US-6.2). The table shows what still works with a static secret, as of
+a static secret, or with `XOAUTH2` and a person's one-time sign-in (v0.4.0,
+personal Outlook.com accounts, [`outlook-com.yaml`](outlook-com.yaml)).
+Microsoft 365 work accounts can use the Microsoft Graph driver instead
+(v0.4.0, [`microsoft-365-graph.yaml`](microsoft-365-graph.yaml)). A Gmail
+API driver is planned for v0.4.0 (SPEC US-6.1, US-6.2). The table shows what still works with a static secret, as of
 September 2026.
 
 | Provider | File | Endpoint | Auth | Password login still possible? |
@@ -21,7 +22,7 @@ September 2026.
 | Microsoft 365, relay connector | [`microsoft-365-connector.yaml`](microsoft-365-connector.yaml) | `<tenant>.mail.protection.outlook.com:25` | `NONE`, inbound connector by static egress IP | Not needed. Requires a static egress IP and outbound port 25. |
 | Azure Communication Services | [`azure-communication-services.yaml`](azure-communication-services.yaml) | `smtp.azurecomm.net:587` | `LOGIN`, Entra app + client secret | Yes: a client secret, not a mailbox password. Rotate before it expires (≤ 24 months). |
 | Microsoft 365 High Volume Email | [`microsoft-365-hve.yaml`](microsoft-365-hve.yaml) | `smtp-hve.office365.com:587` | `LOGIN`, HVE account | Yes, until September 2028, for **internal recipients only**. |
-| Outlook.com (personal Microsoft account) | none | `smtp-mail.outlook.com:587` | OAuth only | **No.** Basic auth and app passwords are already gone for personal accounts. Not usable until `XOAUTH2` with a one-time sign-in (v0.4.0). |
+| Outlook.com (personal Microsoft account, v0.4.0) | [`outlook-com.yaml`](outlook-com.yaml) | `smtp-mail.outlook.com:587` | `XOAUTH2`, your own app registration and a one-time sign-in | **No.** Basic auth and app passwords are already gone for personal accounts. Sign in once with the device code flow (manual `curl` steps for now); the controller keeps the token fresh. |
 | Gmail (personal account) | [`gmail.yaml`](gmail.yaml) | `smtp.gmail.com:587` | `PLAIN` with an app password | Only app passwords (2-Step Verification on); no cut-off announced. Gmail API driver with a one-time sign-in planned for v0.4.0. |
 | Google Workspace | [`google-workspace.yaml`](google-workspace.yaml) | `smtp-relay.gmail.com:587` | `PLAIN` with an app password, or `NONE` by static egress IP | Only app passwords (2-Step Verification, not disabled by the admin); no cut-off announced. "Less secure apps" are gone; plain account passwords are rejected. A Gmail API driver with a service account is planned for v0.4.0. |
 | Amazon SES | [`amazon-ses.yaml`](amazon-ses.yaml) | `email-smtp.<region>.amazonaws.com:587` | `PLAIN`, SES SMTP credentials | Yes. Derived from an IAM user (not the IAM access key). Verify the sender domain; leave the sandbox for production. |
@@ -29,8 +30,8 @@ September 2026.
 | Postmark | [`postmark.yaml`](postmark.yaml) | `smtp.postmarkapp.com:587` | `PLAIN`, Server API token or SMTP token | Yes. Add header `X-PM-Message-Stream` for broadcast streams. |
 | Brevo | [`brevo.yaml`](brevo.yaml) | `smtp-relay.brevo.com:587` | `LOGIN`, SMTP key | Yes: an SMTP key, not the account password. |
 
-For a personal Outlook.com account there is no way to send through
-Sigillum until v0.4.0; a personal Gmail account works with an app password.
+A personal Outlook.com account needs v0.4.0 (`XOAUTH2`); a personal Gmail
+account works with an app password.
 
 For Microsoft 365: use the Graph driver (v0.4.0). Without it, use the relay
 connector if you have a static egress IP, Azure Communication Services if

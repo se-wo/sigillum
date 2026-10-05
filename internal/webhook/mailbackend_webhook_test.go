@@ -124,3 +124,60 @@ func TestMailBackendValidator_MicrosoftGraph(t *testing.T) {
 		t.Fatalf("want spec.microsoftGraph refused on smtp, got %v", err)
 	}
 }
+
+func xoauth2Backend(mutate func(*sigv1.BackendSpec)) *sigv1.ClusterMailBackend {
+	b := &sigv1.ClusterMailBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "outlook"},
+		Spec: sigv1.BackendSpec{Type: sigv1.BackendSMTP, SMTP: &sigv1.SMTPBackendSpec{
+			Endpoints:      []sigv1.SMTPEndpoint{{Host: "smtp-mail.outlook.com", Port: 587, TLS: sigv1.SMTPTLSStartTLS}},
+			AuthType:       sigv1.SMTPAuthXOAUTH2,
+			CredentialsRef: &sigv1.SecretReference{Name: "outlook-signin", Namespace: "sigillum-system"},
+			OAuth: &sigv1.SMTPOAuthSpec{Provider: sigv1.OAuthProviderMicrosoft, Tenant: "consumers",
+				ClientID: "11111111-2222-3333-4444-555555555555", Mailbox: "me@outlook.com"},
+		}},
+	}
+	if mutate != nil {
+		mutate(&b.Spec)
+	}
+	return b
+}
+
+func TestMailBackendValidator_XOAUTH2(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*sigv1.BackendSpec)
+		wantErr string
+	}{
+		{name: "valid"},
+		{name: "default tenant", mutate: func(s *sigv1.BackendSpec) { s.SMTP.OAuth.Tenant = "" }},
+		{name: "work tenant", mutate: func(s *sigv1.BackendSpec) { s.SMTP.OAuth.Tenant = "contoso.onmicrosoft.com" }},
+		{name: "implicit TLS", mutate: func(s *sigv1.BackendSpec) { s.SMTP.Endpoints[0].TLS = sigv1.SMTPTLSImplicit }},
+		{name: "oauth block missing", mutate: func(s *sigv1.BackendSpec) { s.SMTP.OAuth = nil }, wantErr: "spec.smtp.oauth"},
+		{name: "credentialsRef missing", mutate: func(s *sigv1.BackendSpec) { s.SMTP.CredentialsRef = nil }, wantErr: "credentialsRef"},
+		{name: "tenant with a path", mutate: func(s *sigv1.BackendSpec) { s.SMTP.OAuth.Tenant = "common/../x" }, wantErr: "oauth.tenant"},
+		{name: "client ID not a GUID", mutate: func(s *sigv1.BackendSpec) { s.SMTP.OAuth.ClientID = "my-app" }, wantErr: "oauth.clientID"},
+		{name: "mailbox with display name", mutate: func(s *sigv1.BackendSpec) { s.SMTP.OAuth.Mailbox = "Me <me@outlook.com>" }, wantErr: "oauth.mailbox"},
+		{name: "mailbox glob", mutate: func(s *sigv1.BackendSpec) { s.SMTP.OAuth.Mailbox = "*@outlook.com" }, wantErr: "oauth.mailbox"},
+		{name: "non-ASCII mailbox", mutate: func(s *sigv1.BackendSpec) { s.SMTP.OAuth.Mailbox = "jörg@outlook.com" }, wantErr: "must be ASCII"},
+		{name: "plaintext endpoint", mutate: func(s *sigv1.BackendSpec) { s.SMTP.Endpoints[0].TLS = sigv1.SMTPTLSNone }, wantErr: "endpoints[0].tls"},
+		{name: "oauth block on PLAIN", mutate: func(s *sigv1.BackendSpec) { s.SMTP.AuthType = sigv1.SMTPAuthPlain }, wantErr: "only for authType XOAUTH2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewClusterMailBackendValidator().ValidateCreate(context.Background(), xoauth2Backend(tc.mutate))
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+
+	// A namespaced MailBackend keeps the sign-in in its own namespace.
+	mb := &sigv1.MailBackend{ObjectMeta: metav1.ObjectMeta{Name: "outlook", Namespace: "home"}, Spec: xoauth2Backend(nil).Spec}
+	mb.Spec.SMTP.CredentialsRef.Namespace = ""
+	if _, err := NewMailBackendValidator().ValidateCreate(context.Background(), mb); err != nil {
+		t.Fatalf("MailBackend: %v", err)
+	}
+}

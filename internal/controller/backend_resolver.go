@@ -64,8 +64,20 @@ func ResolveBackendConfig(
 			if err != nil {
 				return cfg, err
 			}
-			smtpCfg.Username = string(sec.Data[sigv1.SMTPSecretUsernameKey])
-			smtpCfg.Password = string(sec.Data[sigv1.SMTPSecretPasswordKey])
+			if spec.SMTP.AuthType == sigv1.SMTPAuthXOAUTH2 {
+				// The access token comes from the token Secret the
+				// controller's broker keeps next to the credentials.
+				if spec.SMTP.OAuth == nil {
+					return cfg, fmt.Errorf("spec.smtp.oauth is required when authType=XOAUTH2")
+				}
+				kind, name := backendKindName(backendKey)
+				smtpCfg.Username = spec.SMTP.OAuth.Mailbox
+				smtpCfg.Tokens = &secretTokens{reader: c,
+					key: types.NamespacedName{Namespace: sec.Namespace, Name: TokenSecretName(kind, name)}}
+			} else {
+				smtpCfg.Username = string(sec.Data[sigv1.SMTPSecretUsernameKey])
+				smtpCfg.Password = string(sec.Data[sigv1.SMTPSecretPasswordKey])
+			}
 		}
 		cfg.SMTP = smtpCfg
 	case sigv1.BackendMicrosoftGraph:

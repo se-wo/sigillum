@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -41,7 +43,7 @@ const (
 )
 
 // SMTPAuthType is the SASL mechanism used by the SMTP driver.
-// +kubebuilder:validation:Enum=NONE;PLAIN;LOGIN;CRAM-MD5
+// +kubebuilder:validation:Enum=NONE;PLAIN;LOGIN;CRAM-MD5;XOAUTH2
 type SMTPAuthType string
 
 const (
@@ -49,7 +51,42 @@ const (
 	SMTPAuthPlain   SMTPAuthType = "PLAIN"
 	SMTPAuthLogin   SMTPAuthType = "LOGIN"
 	SMTPAuthCRAMMD5 SMTPAuthType = "CRAM-MD5"
+	// SMTPAuthXOAUTH2 authenticates with an OAuth access token of a
+	// person's delegated sign-in (SPEC US-6.1 stage 2, US-6.3); see
+	// SMTPBackendSpec.OAuth.
+	SMTPAuthXOAUTH2 SMTPAuthType = "XOAUTH2"
 )
+
+// OAuthProvider names the identity provider of an XOAUTH2 backend.
+// +kubebuilder:validation:Enum=microsoft
+type OAuthProvider string
+
+const OAuthProviderMicrosoft OAuthProvider = "microsoft"
+
+// SMTPOAuthSpec configures authType XOAUTH2 with a delegated sign-in: a
+// person signs in once with the OAuth client below, and the controller
+// keeps the access token fresh with the refresh token (SPEC US-6.3).
+type SMTPOAuthSpec struct {
+	// Provider is the identity provider.
+	Provider OAuthProvider `json:"provider"`
+	// Tenant selects the Microsoft accounts that may sign in: "consumers"
+	// for personal accounts (Outlook.com), "organizations", or a tenant ID
+	// or verified domain in lower case. Defaults to "consumers".
+	// +kubebuilder:default=consumers
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	Tenant string `json:"tenant,omitempty"`
+	// ClientID is the application (client) ID of the user's own app
+	// registration, with public client flows enabled and the delegated
+	// permissions SMTP.Send and offline_access.
+	// +kubebuilder:validation:MinLength=1
+	ClientID string `json:"clientID"`
+	// Mailbox is the address that signed in; it is the SASL user. Without
+	// spec.allowedSenders the backend sends only as this address.
+	// +kubebuilder:validation:MinLength=3
+	// +kubebuilder:validation:MaxLength=320
+	Mailbox string `json:"mailbox"`
+}
 
 // SMTPEndpoint is one host:port pair in a backend's failover list.
 // The driver tries endpoints in declared order and uses the first Ready one.
@@ -77,9 +114,15 @@ type SMTPBackendSpec struct {
 	AuthType SMTPAuthType `json:"authType,omitempty"`
 
 	// CredentialsRef points at the secret holding upstream credentials.
-	// Required unless AuthType is NONE.
+	// Required unless AuthType is NONE. For XOAUTH2 it holds the
+	// refresh_token of the sign-in (and client_secret for a confidential
+	// client); the controller keeps its token Secret in the same namespace.
 	// +optional
 	CredentialsRef *SecretReference `json:"credentialsRef,omitempty"`
+
+	// OAuth is required when AuthType is XOAUTH2.
+	// +optional
+	OAuth *SMTPOAuthSpec `json:"oauth,omitempty"`
 
 	// ConnectionTimeoutSeconds caps each dial / handshake attempt.
 	// +kubebuilder:default=10
@@ -261,9 +304,24 @@ const (
 	SMTPSecretUsernameKey = "username"
 	SMTPSecretPasswordKey = "password"
 	// GraphSecretClientSecretKey holds a microsoftGraph backend's client
-	// secret.
+	// secret, and the optional client secret of an XOAUTH2 backend.
 	GraphSecretClientSecretKey = "client_secret"
 )
+
+// EffectiveAllowedSenders is the sender bound the gateway enforces: the
+// spec's allowedSenders, or, when it is omitted on an XOAUTH2 backend, only
+// the mailbox that signed in (US-2.8, US-6.3). nil means no bound.
+func (s *BackendSpec) EffectiveAllowedSenders() []string {
+	if s.AllowedSenders == nil && s.SMTP != nil && s.SMTP.AuthType == SMTPAuthXOAUTH2 && s.SMTP.OAuth != nil {
+		// The list holds glob patterns; a mailbox that looks like one
+		// (refused by the webhook) must not widen the bound.
+		if strings.ContainsAny(s.SMTP.OAuth.Mailbox, "*?[") {
+			return []string{}
+		}
+		return []string{s.SMTP.OAuth.Mailbox}
+	}
+	return s.AllowedSenders
+}
 
 // avoid unused import warning in some builds
 var _ = corev1.ConditionTrue

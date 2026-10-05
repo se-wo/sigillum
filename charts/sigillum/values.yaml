@@ -165,6 +165,8 @@ credentials:
   # controller Secret create/patch cluster-wide only together with a guard
   # ValidatingAdmissionPolicy that limits it to labelled credential Secrets. false = bring-your-own-hash only
   # (spec.passwordHash), and the controller gets no Secret write access.
+  # The same guard admits the token Secrets of XOAUTH2 backends (Outlook.com
+  # sign-in); with false, those backends stay not ready (GuardMissing).
   enabled: true
   # Namespaces that may not hold MailCredentials: exact names, or prefixes
   # ending in a single "*" ("*-system" is refused). The release namespace (which holds the relay credentials)

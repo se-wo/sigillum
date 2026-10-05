@@ -462,6 +462,24 @@ func TestSend_BackendAllowedSendersBeforeCredentials(t *testing.T) {
 	}
 }
 
+// An XOAUTH2 backend without allowedSenders sends only as the mailbox that
+// signed in (US-6.3).
+func TestSend_XOAUTH2BackendDefaultsToItsMailbox(t *testing.T) {
+	b := readyBackend("relay", true)
+	b.Spec.SMTP.AuthType = sigv1.SMTPAuthXOAUTH2
+	b.Spec.SMTP.CredentialsRef = &sigv1.SecretReference{Name: "missing", Namespace: "sigillum-system"}
+	b.Spec.SMTP.OAuth = &sigv1.SMTPOAuthSpec{Provider: sigv1.OAuthProviderMicrosoft, Mailbox: "app@team.example"}
+	g, _ := newGateway(t, &fakeDriver{}, testPolicy(), b)
+
+	if res := g.Send(context.Background(), request("other@team.example")); res.Status != StatusDenied ||
+		res.DenyReason != policy.DenySenderNotAllowed || !strings.Contains(res.Detail, "backend") {
+		t.Fatalf("another sender: want sender_not_allowed by the backend, got %+v", res)
+	}
+	if res := g.Send(context.Background(), request("APP@team.example")); res.Status != StatusBackendNotReady {
+		t.Fatalf("the mailbox: want past the sender check (backend_not_ready without a token), got %+v", res)
+	}
+}
+
 // An API backend refuses a header recipient outside the envelope; that is a
 // policy refusal, not an upstream failure (SPEC US-6.1).
 func TestSend_HeaderRecipientOutsideEnvelope(t *testing.T) {

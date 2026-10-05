@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -16,6 +18,9 @@ import (
 type MailBackendReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Broker keeps the tokens of XOAUTH2 backends; nil leaves them not
+	// ready.
+	Broker *TokenBroker
 }
 
 // +kubebuilder:rbac:groups=sigillum.dev,resources=mailbackends,verbs=get;list;watch
@@ -27,10 +32,14 @@ type MailBackendReconciler struct {
 func (r *MailBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var mb sigv1.MailBackend
 	if err := r.Get(ctx, req.NamespacedName, &mb); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.Broker.Forget(req.NamespacedName.String())
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	requeue := reconcileBackend(ctx, r.Client, req.NamespacedName.String(), &mb.Spec, &mb.Status, mb.Generation, mb.Namespace)
+	requeue := reconcileBackend(ctx, r.Client, r.Broker, &mb, string(sigv1.KindMailBackend), req.NamespacedName.String(),
+		&mb.Spec, &mb.Status, mb.Namespace)
 	if err := r.Status().Update(ctx, &mb); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -48,12 +57,15 @@ func (r *MailBackendReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func reconcileBackend(
 	ctx context.Context,
 	c client.Client,
+	broker *TokenBroker,
+	owner client.Object,
+	kind string,
 	key string,
 	spec *sigv1.BackendSpec,
 	status *sigv1.BackendStatus,
-	generation int64,
 	secretFallbackNs string,
 ) time.Duration {
+	generation := owner.GetGeneration()
 	// Default health-check cadence per SPEC §4.3.1.
 	probeInterval := 60 * time.Second
 	if spec.HealthCheck != nil && spec.HealthCheck.IntervalSeconds > 0 {
@@ -66,6 +78,32 @@ func reconcileBackend(
 		status.Conditions = setCondition(status.Conditions, errorReadyCondition(generation, sigv1.ReasonInvalidConfiguration, err.Error()))
 		status.ObservedGeneration = generation
 		return probeInterval
+	}
+
+	// A delegated sign-in (XOAUTH2): the broker refreshes the access token
+	// on every reconcile that is due, and the health check below uses it.
+	if cfg.SMTP != nil && cfg.SMTP.AuthType == string(sigv1.SMTPAuthXOAUTH2) {
+		res, err := authorizeDelegated(ctx, c, broker, owner, kind, key, spec, secretFallbackNs)
+		if err != nil {
+			status.Conditions = setCondition(status.Conditions, errorReadyCondition(generation, sigv1.ReasonInvalidConfiguration, err.Error()))
+			status.ObservedGeneration = generation
+			return probeInterval
+		}
+		authz := authorizedCondition(generation, res)
+		status.Conditions = setCondition(status.Conditions, authz)
+		if res.RequeueAfter > 0 && res.RequeueAfter < probeInterval {
+			probeInterval = res.RequeueAfter
+		}
+		if res.Token.AccessToken == "" {
+			status.Conditions = setCondition(status.Conditions, errorReadyCondition(generation, authz.Reason,
+				"no access token yet: "+authz.Message))
+			status.ObservedGeneration = generation
+			return probeInterval
+		}
+		cfg.SMTP.Tokens = staticTokens(res.Token)
+	} else {
+		meta.RemoveStatusCondition(&status.Conditions, sigv1.ConditionAuthorized)
+		broker.Forget(key)
 	}
 
 	if !probeEnabled {
