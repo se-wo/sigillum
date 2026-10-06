@@ -155,7 +155,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - The spec has a `type` discriminator (`smtp` implemented, `microsoftGraph` **[v0.4.0]**; `gmail` planned for v0.4.0, `sendgrid` reserved in the schema enum).
 - For `type: smtp`: an `endpoints` list (at least one entry), `authType`, and `credentialsRef` (required unless `authType: NONE`).
 - `endpoints` is an ordered failover list; sends use the first Ready endpoint. **[v0.4.0]** Endpoints the last probe found unready are tried last, and `connectionTimeoutSeconds` bounds the dial and the handshake (banner, `EHLO`, `STARTTLS`, `AUTH`) of each endpoint, so a relay that accepts connections and never answers costs one connection timeout before the next endpoint is tried, not the whole send budget. Once `MAIL FROM` is sent, a failure does not fail over (the relay may already have the message).
-- The validating webhook checks the spec **statically**: it rejects types without a registered driver, missing `smtp` block, empty endpoints, `insecureSkipVerify: true`, a missing `credentialsRef` when auth is required, a missing `credentialsRef.namespace` on `ClusterMailBackend`, and a cross-namespace `credentialsRef` on `MailBackend`.
+- The validating webhook checks the spec **statically**: it rejects types without a registered driver, missing `smtp` block, empty endpoints, `insecureSkipVerify: true`, a missing `credentialsRef` when auth is required, a missing `credentialsRef.namespace` (or `caSecretRef.namespace`) on `ClusterMailBackend`, and a cross-namespace `credentialsRef` (or `caSecretRef`) on `MailBackend`.
 - The webhook does **not** probe reachability. Network calls during admission are slow, flaky, and break GitOps apply ordering (a backend could not be applied before its relay exists). Reachability is the controller's job and shows up in status.
 - The status subresource reflects: `Ready` condition (True if at least one endpoint is Ready), `capabilities` (declared by the driver), `endpointStatus` per endpoint, `lastProbeTime`, `observedGeneration`.
 
@@ -734,6 +734,10 @@ spec:
       namespace: sigillum-system
     connectionTimeoutSeconds: 10 # 1–120, default 10
     heloDomain: sigillum         # optional, default "sigillum"
+    caSecretRef:                 # [v0.4.0] optional: PEM CA certificates trusted in addition to the system roots
+      name: corporate-ca         # namespace rules as for credentialsRef
+      namespace: sigillum-system
+      key: ca.crt                # default ca.crt
   allowedSenders:                # [v0.4.0] optional for smtp; the backend sends only for these (US-2.8)
     - "*@example.com"            # not subdomains: list each domain the policies use
     - "*@billing.noreply.example.com"
@@ -758,7 +762,7 @@ status:
   observedGeneration: 1
 ```
 
-`endpoints[].insecureSkipVerify` exists in the schema but the webhook rejects `true`.
+`endpoints[].insecureSkipVerify` exists in the schema but the webhook rejects `true` (and so do the controller and the gateway, §4.3.2). **[v0.4.0]** For a relay whose certificate comes from a private CA, `smtp.caSecretRef` names a Secret key with PEM CA certificates; they are trusted in addition to the system roots, for this backend only, by the probe and by every send (STARTTLS and implicit TLS). The Secret follows the rules of `credentialsRef`: a `ClusterMailBackend` names its namespace, which must be the release namespace or one in `rbac.allowedSecretNamespaces`; a `MailBackend` uses its own namespace. A missing Secret, key or certificate makes the backend `Ready=False` (`InvalidConfiguration`). The webhook warns when no endpoint uses TLS.
 
 With `healthCheck.enabled: false` the backend is reported Ready without probing, and `status.capabilities` stays empty.
 

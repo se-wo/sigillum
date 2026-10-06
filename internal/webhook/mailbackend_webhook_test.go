@@ -124,3 +124,30 @@ func TestMailBackendValidator_MicrosoftGraph(t *testing.T) {
 		t.Fatalf("want spec.microsoftGraph refused on smtp, got %v", err)
 	}
 }
+
+// #57: caSecretRef follows the namespace rules of credentialsRef, and
+// draws a warning when no endpoint uses TLS.
+func TestMailBackendValidator_CASecretRef(t *testing.T) {
+	cmb := validClusterBackend(nil)
+	cmb.Spec.SMTP.CASecretRef = &sigv1.CASecretReference{Name: "corp-ca"}
+	if _, err := NewClusterMailBackendValidator().ValidateCreate(context.Background(), cmb); err == nil ||
+		!strings.Contains(err.Error(), "spec.smtp.caSecretRef.namespace") {
+		t.Fatalf("cluster backend without caSecretRef.namespace: got %v", err)
+	}
+	cmb.Spec.SMTP.CASecretRef.Namespace = "sigillum-system"
+	if w, err := NewClusterMailBackendValidator().ValidateCreate(context.Background(), cmb); err != nil || len(w) != 0 {
+		t.Fatalf("valid caSecretRef: got %v %v", w, err)
+	}
+	cmb.Spec.SMTP.Endpoints[0].TLS = sigv1.SMTPTLSNone
+	if w, err := NewClusterMailBackendValidator().ValidateCreate(context.Background(), cmb); err != nil ||
+		len(w) != 1 || !strings.Contains(w[0], "no effect") {
+		t.Fatalf("caSecretRef without TLS endpoints: want a warning, got %v %v", w, err)
+	}
+
+	mb := &sigv1.MailBackend{ObjectMeta: metav1.ObjectMeta{Name: "relay", Namespace: "team"}, Spec: *validClusterBackend(nil).Spec.DeepCopy()}
+	mb.Spec.SMTP.CASecretRef = &sigv1.CASecretReference{Name: "corp-ca", Namespace: "sigillum-system"}
+	if _, err := NewMailBackendValidator().ValidateCreate(context.Background(), mb); err == nil ||
+		!strings.Contains(err.Error(), "cross-namespace") {
+		t.Fatalf("MailBackend with a cross-namespace caSecretRef: got %v", err)
+	}
+}

@@ -38,6 +38,12 @@ the version being prepared in the same pull request as the change.
 
 ### Added
 
+- `spec.smtp.caSecretRef` on `MailBackend` and `ClusterMailBackend`: PEM
+  CA certificates (key `ca.crt` by default) trusted in addition to the
+  system roots, for relays with a certificate from a private CA. Before,
+  such a relay only worked with `tls: none`, which sends the relay
+  password in cleartext. The Secret follows the namespace rules of
+  `credentialsRef`; the probe and every send use it (#57).
 - `MailPolicy.spec.rateLimits.messagesPerDay`: a sliding 24-hour cap per
   policy, next to the per-minute and per-hour caps, to keep one workload
   from using up the daily quota of the upstream mailbox (US-2.7). With a

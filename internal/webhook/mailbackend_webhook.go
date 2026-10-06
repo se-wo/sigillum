@@ -95,6 +95,7 @@ func (v *MailBackendValidator[T]) validate(obj runtime.Object) (admission.Warnin
 	}
 
 	var allErrs field.ErrorList
+	var warnings admission.Warnings
 	specPath := field.NewPath("spec")
 
 	// Reject unknown / not-yet-implemented backend types — the schema enum
@@ -132,6 +133,13 @@ func (v *MailBackendValidator[T]) validate(obj runtime.Object) (admission.Warnin
 			if spec.SMTP.CredentialsRef != nil {
 				allErrs = append(allErrs, v.validateCredentialsRef(smtpPath.Child("credentialsRef"), *spec.SMTP.CredentialsRef, selfNs)...)
 			}
+			if ref := spec.SMTP.CASecretRef; ref != nil {
+				allErrs = append(allErrs, v.validateCredentialsRef(smtpPath.Child("caSecretRef"),
+					sigv1.SecretReference{Name: ref.Name, Namespace: ref.Namespace}, selfNs)...)
+				if !anyTLSEndpoint(spec.SMTP.Endpoints) {
+					warnings = append(warnings, "spec.smtp.caSecretRef has no effect: no endpoint uses tls or starttls")
+				}
+			}
 		}
 		if spec.MicrosoftGraph != nil {
 			allErrs = append(allErrs, field.Forbidden(specPath.Child("microsoftGraph"), "only for type microsoftGraph"))
@@ -145,7 +153,6 @@ func (v *MailBackendValidator[T]) validate(obj runtime.Object) (admission.Warnin
 	// A backend's sender list bounds every policy that uses it, so its
 	// entries follow the stricter rules of allowedRecipients: a glob must
 	// be anchored on a bare domain.
-	var warnings admission.Warnings
 	for i, e := range spec.AllowedSenders {
 		if msg := addressEntryError(e); msg != "" {
 			allErrs = append(allErrs, field.Invalid(specPath.Child("allowedSenders").Index(i), e, msg))
@@ -193,17 +200,27 @@ func (v *MailBackendValidator[T]) validateGraph(specPath *field.Path, spec *sigv
 }
 
 // validateCredentialsRef requires a namespace on cluster-scoped backends and
-// forbids cross-namespace Secret reads from namespace-scoped ones.
+// forbids cross-namespace Secret reads from namespace-scoped ones. It
+// applies to every Secret a backend references (credentials, CA).
 func (v *MailBackendValidator[T]) validateCredentialsRef(p *field.Path, ref sigv1.SecretReference, selfNs string) field.ErrorList {
 	if v.clusterScoped && ref.Namespace == "" {
 		return field.ErrorList{field.Required(p.Child("namespace"),
-			"namespace is required for credentialsRef on cluster-scoped backends")}
+			"namespace is required for Secret references on cluster-scoped backends")}
 	}
 	if !v.clusterScoped && ref.Namespace != "" && ref.Namespace != selfNs {
 		return field.ErrorList{field.Invalid(p.Child("namespace"), ref.Namespace,
-			"cross-namespace credential references are not permitted on namespace-scoped backends")}
+			"cross-namespace Secret references are not permitted on namespace-scoped backends")}
 	}
 	return nil
+}
+
+func anyTLSEndpoint(eps []sigv1.SMTPEndpoint) bool {
+	for _, ep := range eps {
+		if ep.TLS != sigv1.SMTPTLSNone {
+			return true
+		}
+	}
+	return false
 }
 
 func asStringSlice(types []driver.Type) []string {

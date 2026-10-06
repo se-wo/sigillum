@@ -78,7 +78,7 @@ func (d *Driver) probeEndpoint(ctx context.Context, ep driver.SMTPEndpoint) driv
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	conn, err := dial(dialCtx, ep)
+	conn, err := d.dial(dialCtx, ep)
 	if err != nil {
 		return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: false, Message: err.Error()}
 	}
@@ -99,8 +99,7 @@ func (d *Driver) probeEndpoint(ctx context.Context, ep driver.SMTPEndpoint) driv
 		if !ok {
 			return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: false, Message: "server does not advertise STARTTLS"}
 		}
-		tlsCfg := &tls.Config{ServerName: ep.Host, InsecureSkipVerify: ep.InsecureSkipVerify}
-		if err := c.StartTLS(tlsCfg); err != nil {
+		if err := c.StartTLS(d.tlsConfig(ep)); err != nil {
 			return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: false, Message: err.Error()}
 		}
 	}
@@ -178,7 +177,7 @@ func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, from strin
 	dialCtx, cancel := context.WithDeadline(ctx, handshakeDeadline)
 	defer cancel()
 
-	conn, err := dial(dialCtx, ep)
+	conn, err := d.dial(dialCtx, ep)
 	if err != nil {
 		return err
 	}
@@ -206,8 +205,7 @@ func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, from strin
 		if !ok {
 			return fmt.Errorf("server does not advertise STARTTLS")
 		}
-		tlsCfg := &tls.Config{ServerName: ep.Host, InsecureSkipVerify: ep.InsecureSkipVerify}
-		if err := c.StartTLS(tlsCfg); err != nil {
+		if err := c.StartTLS(d.tlsConfig(ep)); err != nil {
 			return err
 		}
 	}
@@ -264,14 +262,25 @@ func (e deliveryError) Unwrap() error { return e.err }
 
 // dial connects to ep; ctx bounds the TCP connect and, for implicit TLS,
 // the TLS handshake.
-func dial(ctx context.Context, ep driver.SMTPEndpoint) (net.Conn, error) {
+func (d *Driver) dial(ctx context.Context, ep driver.SMTPEndpoint) (net.Conn, error) {
 	addr := net.JoinHostPort(ep.Host, strconv.Itoa(int(ep.Port)))
 	if ep.TLS == "tls" {
-		td := tls.Dialer{Config: &tls.Config{ServerName: ep.Host, InsecureSkipVerify: ep.InsecureSkipVerify}}
+		td := tls.Dialer{Config: d.tlsConfig(ep)}
 		return td.DialContext(ctx, "tcp", addr)
 	}
 	var nd net.Dialer
 	return nd.DialContext(ctx, "tcp", addr)
+}
+
+// tlsConfig verifies ep's certificate against the backend's roots
+// (spec.smtp.caSecretRef plus the system roots), or the system roots.
+func (d *Driver) tlsConfig(ep driver.SMTPEndpoint) *tls.Config {
+	return &tls.Config{
+		ServerName:         ep.Host,
+		RootCAs:            d.cfg.SMTP.RootCAs,
+		InsecureSkipVerify: ep.InsecureSkipVerify, //nolint:gosec // refused by the webhook, the controller and the gateway
+		MinVersion:         tls.VersionTLS12,
+	}
 }
 
 // connectTimeout is connectionTimeoutSeconds: the budget of one dial plus
