@@ -127,8 +127,9 @@ spec:
                     type: string
                   connectionTimeoutSeconds:
                     default: 10
-                    description: ConnectionTimeoutSeconds caps each dial / handshake
-                      attempt.
+                    description: |-
+                      ConnectionTimeoutSeconds caps the dial and the handshake (banner, EHLO,
+                      STARTTLS, AUTH) of each endpoint; then the next endpoint is tried.
                     format: int32
                     maximum: 120
                     minimum: 1
@@ -152,7 +153,8 @@ spec:
                     items:
                       description: |-
                         SMTPEndpoint is one host:port pair in a backend's failover list.
-                        The driver tries endpoints in declared order and uses the first Ready one.
+                        Sends try endpoints in declared order, those the last probe found unready
+                        last, and use the first one that completes the handshake.
                       properties:
                         host:
                           minLength: 1

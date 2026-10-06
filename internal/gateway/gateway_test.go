@@ -522,3 +522,42 @@ func TestSend_HeaderRecipientOutsideEnvelope(t *testing.T) {
 		t.Fatal("a refused message must not use up the rate limit")
 	}
 }
+
+// #61: endpoints the last probe found unready are tried last; everything
+// else keeps its declared order.
+func TestPreferReadyEndpoints(t *testing.T) {
+	eps := []driver.SMTPEndpoint{{Host: "hang", Port: 25}, {Host: "ok", Port: 25}, {Host: "new", Port: 25}, {Host: "down", Port: 587}}
+	got := preferReadyEndpoints(eps, []sigv1.EndpointStatus{
+		{Host: "hang", Port: 25, Ready: false}, {Host: "ok", Port: 25, Ready: true}, {Host: "down", Port: 587, Ready: false},
+	})
+	var hosts []string
+	for _, ep := range got {
+		hosts = append(hosts, ep.Host)
+	}
+	if strings.Join(hosts, ",") != "ok,new,hang,down" {
+		t.Fatalf("got order %v", hosts)
+	}
+	if got := preferReadyEndpoints(eps, nil); len(got) != 4 || got[0].Host != "hang" {
+		t.Fatalf("without probe results the order must not change, got %+v", got)
+	}
+}
+
+// The driver gets the endpoints in probe order (#61).
+func TestSend_DriverGetsReadyEndpointsFirst(t *testing.T) {
+	be := readyBackend("relay", true)
+	be.Spec.SMTP.Endpoints = []sigv1.SMTPEndpoint{{Host: "hang", Port: 25}, {Host: "ok", Port: 25}}
+	be.Status.EndpointStatus = []sigv1.EndpointStatus{{Host: "hang", Port: 25}, {Host: "ok", Port: 25, Ready: true}}
+	d := &fakeDriver{}
+	g, _ := newGateway(t, d, testPolicy(), be)
+	var got []driver.SMTPEndpoint
+	g.NewDriver = func(cfg driver.Config) (driver.Driver, error) {
+		got = cfg.SMTP.Endpoints
+		return d, nil
+	}
+	if res := g.Send(context.Background(), request("app@team.example")); res.Status != StatusAccepted {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	if len(got) != 2 || got[0].Host != "ok" || got[1].Host != "hang" {
+		t.Fatalf("want ok before hang, got %+v", got)
+	}
+}

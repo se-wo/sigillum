@@ -154,7 +154,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - Namespace-scoped CRD `MailBackend` and cluster-scoped CRD `ClusterMailBackend`.
 - The spec has a `type` discriminator (`smtp` implemented, `microsoftGraph` **[v0.4.0]**; `gmail` planned for v0.4.0, `sendgrid` reserved in the schema enum).
 - For `type: smtp`: an `endpoints` list (at least one entry), `authType`, and `credentialsRef` (required unless `authType: NONE`).
-- `endpoints` is an ordered failover list; sends use the first Ready endpoint.
+- `endpoints` is an ordered failover list; sends use the first Ready endpoint. **[v0.4.0]** Endpoints the last probe found unready are tried last, and `connectionTimeoutSeconds` bounds the dial and the handshake (banner, `EHLO`, `STARTTLS`, `AUTH`) of each endpoint, so a relay that accepts connections and never answers costs one connection timeout before the next endpoint is tried, not the whole send budget. Once `MAIL FROM` is sent, a failure does not fail over (the relay may already have the message).
 - The validating webhook checks the spec **statically**: it rejects types without a registered driver, missing `smtp` block, empty endpoints, `insecureSkipVerify: true`, a missing `credentialsRef` when auth is required, a missing `credentialsRef.namespace` on `ClusterMailBackend`, and a cross-namespace `credentialsRef` on `MailBackend`.
 - The webhook does **not** probe reachability. Network calls during admission are slow, flaky, and break GitOps apply ordering (a backend could not be applied before its relay exists). Reachability is the controller's job and shows up in status.
 - The status subresource reflects: `Ready` condition (True if at least one endpoint is Ready), `capabilities` (declared by the driver), `endpointStatus` per endpoint, `lastProbeTime`, `observedGeneration`.
@@ -738,7 +738,7 @@ spec:
     - "*@example.com"            # not subdomains: list each domain the policies use
     - "*@billing.noreply.example.com"
   healthCheck:
-    enabled: true                # default true; false = assume Ready without probing
+    enabled: true                # default true; false = assume Ready without probing (clears endpointStatus)
     intervalSeconds: 60          # minimum 10, default 60
 status:
   capabilities:                  # declared by the driver at probe time
@@ -1012,7 +1012,7 @@ The problem `type` is `https://sigillum.dev/errors/<slug>`. The audit / metric `
 | `413` | `message-too-large` | Over `maxSizeBytes` or the 32 MiB ceiling | No |
 | `429` | `rate-limited` | US-2.2; `Retry-After` header | Yes, after `Retry-After` |
 | `422` | `upstream-rejected` | The relay permanently rejected this message (`5xx` to `MAIL`, `RCPT` or `DATA`) **[v0.3.0]** | No, not unchanged |
-| `502` | `upstream-error` | Upstream relay failed transiently (unreachable, `4xx`, or a handshake / TLS / relay-login problem on Sigillum's side) | Yes, with backoff |
+| `502` | `upstream-error` | Upstream relay failed transiently (unreachable, `4xx`, or a handshake / TLS / relay-login problem on Sigillum's side), or the send did not finish within the request budget (50 s, below the server's 60 s write timeout, so the client always gets an answer) | Yes, with backoff; after a timeout the relay may already have the message |
 | `503` | `backend-not-ready` | Backend missing, not Ready, invalid, or its config could not be resolved | Yes, with backoff |
 | `503` | `policy-invalid` | The matching policy breaks the admission rules (created without the webhook or by an older version) **[v0.4.0]** | Yes, once the policy is fixed |
 | `503` | `unavailable` | Redis rate-limit store unreachable (fail closed), or the TokenReview failed (v0.3.0); `Retry-After: 5` | Yes |

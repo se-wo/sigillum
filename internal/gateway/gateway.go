@@ -13,6 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -261,7 +263,7 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 		g.Audit.Record(ev)
 		return Result{Status: StatusBackendNotReady, Policy: p.Name, Detail: err.Error()}
 	}
-	backendKey, spec, secretNs, err := g.backendForPolicy(ctx, p)
+	backendKey, spec, status, secretNs, err := g.backendForPolicy(ctx, p)
 	if err != nil {
 		return notReady(err)
 	}
@@ -279,7 +281,7 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 		}
 	}
 
-	d, err := g.openDriver(ctx, backendKey, spec, secretNs)
+	d, err := g.openDriver(ctx, backendKey, spec, status, secretNs)
 	if err != nil {
 		return notReady(err)
 	}
@@ -420,51 +422,82 @@ func (g *Gateway) serviceAccountLabels(ctx context.Context, namespace, name stri
 }
 
 // backendForPolicy resolves the policy's BackendRef to a Ready backend and
-// returns its key, its spec and the namespace its credentials Secret
-// defaults to. Refuses to send if the referenced backend has Ready=False.
-func (g *Gateway) backendForPolicy(ctx context.Context, p *sigv1.MailPolicy) (string, *sigv1.BackendSpec, string, error) {
+// returns its key, its spec and status and the namespace its credentials
+// Secret defaults to. Refuses to send if the referenced backend has
+// Ready=False.
+func (g *Gateway) backendForPolicy(ctx context.Context, p *sigv1.MailPolicy) (string, *sigv1.BackendSpec, *sigv1.BackendStatus, string, error) {
 	switch p.Spec.BackendRef.Kind {
 	case sigv1.KindMailBackend:
 		var mb sigv1.MailBackend
 		if err := g.Reader.Get(ctx, types.NamespacedName{Namespace: p.Namespace, Name: p.Spec.BackendRef.Name}, &mb); err != nil {
-			return "", nil, "", fmt.Errorf("MailBackend %s/%s: %w", p.Namespace, p.Spec.BackendRef.Name, err)
+			return "", nil, nil, "", fmt.Errorf("MailBackend %s/%s: %w", p.Namespace, p.Spec.BackendRef.Name, err)
 		}
 		// The status may predate an update that made the spec invalid.
 		if verr := g.validity.check(&mb, func() error { return webhook.ValidateBackend(&mb) }); verr != nil {
-			return "", nil, "", fmt.Errorf("MailBackend %s/%s is invalid: %w", p.Namespace, p.Spec.BackendRef.Name, verr)
+			return "", nil, nil, "", fmt.Errorf("MailBackend %s/%s is invalid: %w", p.Namespace, p.Spec.BackendRef.Name, verr)
 		}
 		if !backendIsReady(&mb.Status) {
-			return "", nil, "", fmt.Errorf("MailBackend %s/%s is not Ready", p.Namespace, p.Spec.BackendRef.Name)
+			return "", nil, nil, "", fmt.Errorf("MailBackend %s/%s is not Ready", p.Namespace, p.Spec.BackendRef.Name)
 		}
-		return p.Namespace + "/" + mb.Name, &mb.Spec, mb.Namespace, nil
+		return p.Namespace + "/" + mb.Name, &mb.Spec, &mb.Status, mb.Namespace, nil
 	case sigv1.KindClusterMailBackend, "":
 		var cmb sigv1.ClusterMailBackend
 		if err := g.Reader.Get(ctx, types.NamespacedName{Name: p.Spec.BackendRef.Name}, &cmb); err != nil {
-			return "", nil, "", fmt.Errorf("ClusterMailBackend %s: %w", p.Spec.BackendRef.Name, err)
+			return "", nil, nil, "", fmt.Errorf("ClusterMailBackend %s: %w", p.Spec.BackendRef.Name, err)
 		}
 		if verr := g.validity.check(&cmb, func() error { return webhook.ValidateBackend(&cmb) }); verr != nil {
-			return "", nil, "", fmt.Errorf("ClusterMailBackend %s is invalid: %w", p.Spec.BackendRef.Name, verr)
+			return "", nil, nil, "", fmt.Errorf("ClusterMailBackend %s is invalid: %w", p.Spec.BackendRef.Name, verr)
 		}
 		if !backendIsReady(&cmb.Status) {
-			return "", nil, "", fmt.Errorf("ClusterMailBackend %s is not Ready", p.Spec.BackendRef.Name)
+			return "", nil, nil, "", fmt.Errorf("ClusterMailBackend %s is not Ready", p.Spec.BackendRef.Name)
 		}
-		return "/" + cmb.Name, &cmb.Spec, "", nil
+		return "/" + cmb.Name, &cmb.Spec, &cmb.Status, "", nil
 	default:
-		return "", nil, "", fmt.Errorf("unsupported backendRef.kind %q", p.Spec.BackendRef.Kind)
+		return "", nil, nil, "", fmt.Errorf("unsupported backendRef.kind %q", p.Spec.BackendRef.Kind)
 	}
 }
 
 // openDriver resolves a backend's credentials and builds its driver.
-func (g *Gateway) openDriver(ctx context.Context, backendKey string, spec *sigv1.BackendSpec, secretNs string) (driver.Driver, error) {
+func (g *Gateway) openDriver(ctx context.Context, backendKey string, spec *sigv1.BackendSpec, status *sigv1.BackendStatus, secretNs string) (driver.Driver, error) {
 	cfg, err := controller.ResolveBackendConfig(ctx, g.Reader, backendKey, spec, secretNs)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.SMTP != nil {
+		cfg.SMTP.Endpoints = preferReadyEndpoints(cfg.SMTP.Endpoints, status.EndpointStatus)
 	}
 	newDriver := g.NewDriver
 	if newDriver == nil {
 		newDriver = driver.New
 	}
 	return newDriver(cfg)
+}
+
+// preferReadyEndpoints moves the endpoints the last probe found unready to
+// the end, keeping the declared order otherwise. The driver tries endpoints
+// in order, so a stalled first endpoint would otherwise cost every message
+// a connection timeout before failover. Endpoints the probe has not seen
+// keep their place.
+func preferReadyEndpoints(eps []driver.SMTPEndpoint, probed []sigv1.EndpointStatus) []driver.SMTPEndpoint {
+	unready := map[string]bool{}
+	for _, st := range probed {
+		if !st.Ready {
+			unready[net.JoinHostPort(st.Host, strconv.Itoa(int(st.Port)))] = true
+		}
+	}
+	if len(unready) == 0 {
+		return eps
+	}
+	out := make([]driver.SMTPEndpoint, 0, len(eps))
+	var last []driver.SMTPEndpoint
+	for _, ep := range eps {
+		if unready[net.JoinHostPort(ep.Host, strconv.Itoa(int(ep.Port)))] {
+			last = append(last, ep)
+		} else {
+			out = append(out, ep)
+		}
+	}
+	return append(out, last...)
 }
 
 func backendIsReady(s *sigv1.BackendStatus) bool {

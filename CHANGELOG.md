@@ -103,6 +103,17 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- A relay endpoint that accepts connections but never answers no longer
+  blocks failover. `connectionTimeoutSeconds` now bounds the dial and the
+  handshake (banner, `EHLO`, `STARTTLS`, `AUTH`) of each endpoint, as its
+  description said; before, only the dial was bounded and the rest ran
+  under the whole 60 s send budget, so the next endpoint never got its
+  turn over SMTP and every REST send took 60 s. Endpoints the last probe
+  found unready are tried last. REST sends now finish within 50 s, below
+  the server's 60 s write timeout: before, a message delivered after the
+  timeout left the client with an empty reply, and a client that retried
+  sent it twice (Graph backends too). A send still running at the deadline
+  answers `502 upstream-error` (#61).
 - Without the admission webhook (`webhook.enabled: false`, as in the
   local-dev profile), a `MailPolicy`, `MailBackend` or `ClusterMailBackend`
   that the webhook would reject was admitted, shown as Ready and enforced

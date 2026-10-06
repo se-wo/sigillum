@@ -132,3 +132,24 @@ func TestErrorReadyConditionTruncatesMessage(t *testing.T) {
 		t.Fatalf("short message changed to %q", short)
 	}
 }
+
+// #61: with health checks off, results of an earlier probe are cleared;
+// the gateway orders endpoints by them and they would never be refreshed.
+func TestReconcileBackendClearsProbeResultsWhenProbesAreOff(t *testing.T) {
+	now := metav1.Now()
+	status := &sigv1.BackendStatus{
+		EndpointStatus: []sigv1.EndpointStatus{{Host: "relay", Port: 25, Ready: false}},
+		LastProbeTime:  &now,
+	}
+	spec := &sigv1.BackendSpec{Type: sigv1.BackendSMTP, SMTP: &sigv1.SMTPBackendSpec{
+		Endpoints: []sigv1.SMTPEndpoint{{Host: "relay", Port: 25}}, AuthType: sigv1.SMTPAuthNone,
+	}, HealthCheck: &sigv1.HealthCheckSpec{Enabled: false}}
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconcileBackend(context.Background(), c, "/relay", spec, status, 1, "", nil)
+	if status.EndpointStatus != nil || status.LastProbeTime != nil {
+		t.Fatalf("want probe results cleared, got %+v", status)
+	}
+	if ready := readyConditionOf(t, status.Conditions); ready.Status != metav1.ConditionTrue {
+		t.Fatalf("want Ready=True, got %+v", ready)
+	}
+}

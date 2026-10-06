@@ -52,7 +52,8 @@ const (
 )
 
 // SMTPEndpoint is one host:port pair in a backend's failover list.
-// The driver tries endpoints in declared order and uses the first Ready one.
+// Sends try endpoints in declared order, those the last probe found unready
+// last, and use the first one that completes the handshake.
 type SMTPEndpoint struct {
 	// +kubebuilder:validation:MinLength=1
 	Host string `json:"host"`
@@ -81,7 +82,8 @@ type SMTPBackendSpec struct {
 	// +optional
 	CredentialsRef *SecretReference `json:"credentialsRef,omitempty"`
 
-	// ConnectionTimeoutSeconds caps each dial / handshake attempt.
+	// ConnectionTimeoutSeconds caps the dial and the handshake (banner, EHLO,
+	// STARTTLS, AUTH) of each endpoint; then the next endpoint is tried.
 	// +kubebuilder:default=10
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=120

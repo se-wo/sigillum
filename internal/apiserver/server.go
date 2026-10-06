@@ -42,6 +42,16 @@ import (
 	_ "github.com/se-wo/sigillum/internal/driver/smtp"
 )
 
+// writeTimeout is the main server's WriteTimeout: once it expires the
+// connection is closed without a response. requestBudget bounds the work of
+// one request, so the handler always answers before that: a send still
+// running at the deadline gets a visible 502 instead of an empty reply
+// while the message may already be on its way (#61).
+const (
+	writeTimeout  = 60 * time.Second
+	requestBudget = writeTimeout - 10*time.Second
+)
+
 var scheme = runtime.NewScheme()
 
 func init() {
@@ -194,7 +204,7 @@ func init() {
 			Handler:           s.router,
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       60 * time.Second,
-			WriteTimeout:      60 * time.Second,
+			WriteTimeout:      writeTimeout,
 			IdleTimeout:       120 * time.Second,
 		}
 		metricsSrv := &http.Server{
