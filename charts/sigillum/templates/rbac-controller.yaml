@@ -112,6 +112,7 @@ subjects:
     name: {{ include "sigillum.controller.fullname" . }}
     namespace: {{ .Release.Namespace }}
 {{- range .Values.rbac.allowedSecretNamespaces }}
+{{- if include "sigillum.secretNamespacePresent" . }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -138,5 +139,6 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "sigillum.controller.fullname" $ }}
     namespace: {{ $.Release.Namespace }}
+{{- end }}
 {{- end }}
 {{- end }}

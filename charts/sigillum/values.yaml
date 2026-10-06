@@ -274,5 +274,9 @@ rbac:
   # allowedSecretNamespaces lists namespaces outside the release namespace from
   # which the api-server and controller are permitted to read Secrets. Required
   # for ClusterMailBackend credentials that live in a different namespace.
-  # Each entry renders a Role + RoleBinding in that namespace.
+  # Each entry renders a Role + RoleBinding in that namespace. An entry whose
+  # namespace does not exist is skipped (the Role appears once it does and you
+  # upgrade), so onboarding a team before its namespace exists, or offboarding
+  # one, does not fail helm install/upgrade. helm template (no cluster) still
+  # renders every entry for GitOps.
   allowedSecretNamespaces: []

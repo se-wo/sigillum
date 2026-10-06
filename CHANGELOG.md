@@ -109,6 +109,13 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- A namespace in `rbac.allowedSecretNamespaces` that does not exist (an
+  offboarded team's namespace, or one listed before it is created) no longer
+  fails `helm install`/`upgrade` with `namespaces "x" not found`. The
+  per-namespace Secret-reader Role is skipped while the namespace is absent
+  and created once it exists and the chart is upgraded; NOTES lists the
+  skipped ones. `helm template` (no cluster connection) still renders every
+  entry (#77).
 - A relay endpoint that accepts connections but never answers no longer
   blocks failover. `connectionTimeoutSeconds` now bounds the dial and the
   handshake (banner, `EHLO`, `STARTTLS`, `AUTH`) of each endpoint, as its

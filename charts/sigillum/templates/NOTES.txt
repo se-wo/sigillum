@@ -50,6 +50,19 @@ Secret's ca.crt. Renew the certificate before it expires, or the webhook
 WARNING: rateLimit.failOpen=true admits every message while Redis is
 unreachable, i.e. rate limits are not enforced during a Redis outage.
 {{- end }}
+{{- if lookup "v1" "Namespace" "" "" }}
+{{- $missing := list }}
+{{- range .Values.rbac.allowedSecretNamespaces }}
+{{- if not (lookup "v1" "Namespace" "" .) }}{{- $missing = append $missing . }}{{- end }}
+{{- end }}
+{{- if $missing }}
+
+WARNING: these rbac.allowedSecretNamespaces do not exist and were skipped, so
+Sigillum cannot read Secrets there yet: {{ join ", " $missing }}. The Role is
+created once the namespace exists and you upgrade; backends referencing
+Secrets there stay Ready=False until then.
+{{- end }}
+{{- end }}
 
 Quickstart:
 
