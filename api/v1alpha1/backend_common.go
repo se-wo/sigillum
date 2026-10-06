@@ -110,6 +110,16 @@ type MicrosoftGraphBackendSpec struct {
 	CredentialsRef SecretReference `json:"credentialsRef"`
 }
 
+// GmailBackendSpec is the shape of a gmail backend (SPEC US-6.2 stage 1):
+// a Google service account with domain-wide delegation for the scope
+// gmail.send. It sends as the From mailbox of each message, bounded by the
+// backend's allowedSenders, which is required for this type.
+type GmailBackendSpec struct {
+	// CredentialsRef points at the Secret holding the service account's
+	// JSON key under the key service_account.json.
+	CredentialsRef SecretReference `json:"credentialsRef"`
+}
+
 // SecretReference is a name (and optional namespace) reference to a
 // Kubernetes secret. ClusterMailBackend always sets Namespace; MailBackend
 // implicitly resolves to its own namespace if Namespace is empty.
@@ -149,6 +159,10 @@ type BackendSpec struct {
 	// MicrosoftGraph is required when type == microsoftGraph.
 	// +optional
 	MicrosoftGraph *MicrosoftGraphBackendSpec `json:"microsoftGraph,omitempty"`
+
+	// Gmail is required when type == gmail.
+	// +optional
+	Gmail *GmailBackendSpec `json:"gmail,omitempty"`
 
 	// HealthCheck controls periodic probing.
 	// +optional
@@ -263,6 +277,9 @@ const (
 	// GraphSecretClientSecretKey holds a microsoftGraph backend's client
 	// secret.
 	GraphSecretClientSecretKey = "client_secret"
+	// GmailSecretServiceAccountKey holds a gmail backend's service
+	// account JSON key.
+	GmailSecretServiceAccountKey = "service_account.json"
 )
 
 // avoid unused import warning in some builds

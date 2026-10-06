@@ -18,9 +18,9 @@ before forwarding through a `MailBackend` (SMTP) relay.
   sliding-window rate limits per minute, hour and day (in-memory or Redis
   for multi-replica deployments)
 - **Drivers:** SMTP (STARTTLS, PLAIN/LOGIN/CRAM-MD5); Microsoft Graph
-  (app-only `sendMail`, v0.4.0) for Microsoft 365 without SMTP AUTH. The
-  Gmail API is planned for v0.4.0; SendGrid is a reserved enum value, not
-  implemented.
+  (app-only `sendMail`, v0.4.0) for Microsoft 365 without SMTP AUTH; Gmail
+  API (service account with domain-wide delegation, v0.4.0) for Google
+  Workspace. SendGrid is a reserved enum value, not implemented.
 - **Observability:** structured slog (JSON), separate audit stream,
   Prometheus metrics with optional `ServiceMonitor`, OpenTelemetry tracing
 
@@ -319,9 +319,10 @@ test/e2e/                      # kind + Mailpit end-to-end suite
 Next up: Microsoft 365, Outlook.com and Gmail without passwords (v0.4.0,
 before Microsoft switches off SMTP AUTH with passwords and app passwords at
 the end of December 2026): OAuth (XOAUTH2) for the SMTP driver with a
-one-time sign-in for Outlook.com and a Gmail API driver for Google
-Workspace and personal Gmail. The daily limit, the sender allowlist per
-backend and the Microsoft Graph driver for Microsoft 365 are done. Then install without
+one-time sign-in for Outlook.com, and personal Gmail through the Gmail API.
+The daily limit, the sender allowlist per backend, the Microsoft Graph
+driver for Microsoft 365 and the Gmail API driver for Google Workspace are
+done. Then install without
 cert-manager, preflight and a `kubectl` plugin (including
 `credential create` / `rotate`), SMTPS on port 465, an OpenAPI
 description, dashboards and alerts (v0.5.0). Sigillum stays below 1.0

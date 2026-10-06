@@ -45,6 +45,16 @@ the version being prepared in the same pull request as the change.
   addresses or globs anchored on a domain; an empty list denies every
   sender and draws a warning. The Gmail and Microsoft 365 recipes pin
   their backend to the mailbox.
+- Gmail API backend (`type: gmail`) for Google Workspace: a service
+  account with domain-wide delegation for `gmail.send` sends as the `From`
+  mailbox through `users.messages.send`, without app passwords (US-6.2).
+  `spec.gmail.credentialsRef` names the Secret with `service_account.json`;
+  `allowedSenders` is required, since the delegation covers every user of
+  the domain. REST and the SMTP proxy both work, with the same envelope
+  rule as the Graph backend (`recipient_not_allowed` for a header
+  recipient outside the envelope). Messages up to 35 MB. The health check
+  acquires a token, so a broken key shows as not ready. Recipe
+  `examples/providers/google-workspace-gmail-api.yaml`.
 - Microsoft Graph backend (`type: microsoftGraph`) for Microsoft 365 work
   and school accounts, app-only with an Entra application and
   `POST /users/{From}/sendMail`, so it needs no SMTP AUTH and keeps working

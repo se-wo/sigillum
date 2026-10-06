@@ -547,6 +547,7 @@ Two paths, one per kind of account:
 - Error mapping: `429` and `5xx` are `ErrUpstreamTransient`; `400` and `403` (delegation missing, scope not granted) are `ErrUpstreamPermanent`.
 - The health check acquires a token, so a broken key or missing delegation shows up as `Ready=False`.
 - Implementation notes (row 9b): `oauth.GoogleServiceAccount` signs the RFC 7523 assertion (RS256, `iss` the account, `aud` the token endpoint, one hour, `sub` the mailbox) with the PKCS #8 RSA key of `service_account.json`; a key file whose `token_uri` is not Google's token endpoint is refused, since the signed assertion goes there. The driver sends `POST https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media` with the MIME message as `message/rfc822`, as the `From` mailbox, after `driver.BindToEnvelope` (row 9a); `200` is success and the message ID is the upstream ID. Tokens are cached per key file and mailbox and shared by every driver. A `401` drops the token and retries once; `429`, `408` and `5xx` are transient, other answers permanent with Gmail's status and message reduced to printable ASCII. A token request refused with `unauthorized_client` (no domain-wide delegation for the mailbox) is permanent. Messages above 35 MB are refused before any request. The health check acquires a token for the service account itself, so a broken or deleted key shows as `Ready=False`; a mailbox without delegation shows on its first send.
+- Spec (row 9c): `type: gmail` with `spec.gmail.credentialsRef` (key `service_account.json`). The webhook requires the block for `type: gmail` and refuses it on other types, refuses `spec.smtp` and `spec.microsoftGraph` on gmail backends, applies the usual `credentialsRef` namespace rules, and requires a non-empty `allowedSenders`: domain-wide delegation can act as any user of the domain, and the list is what bounds it (US-2.8). The recipe `examples/providers/google-workspace-gmail-api.yaml` limits the delegation to `gmail.send`.
 - Workspace caps sending at 2,000 messages per user and day, a personal Gmail account at about 500 recipients per day; the daily limit (US-2.7) protects both.
 - `MailBackend.spec.type` already accepts `gmail`; no CRD redesign is needed.
 
@@ -770,7 +771,7 @@ With `healthCheck.enabled: false` the backend is reported Ready without probing,
 | `smtp` | `username`, `password` |
 | `smtp` with `authType: XOAUTH2` [planned v0.4.0] | as the matching `microsoftGraph` or `gmail` mode below |
 | `microsoftGraph` app-only [v0.4.0] | `client_secret` (plus tenant / client ID in the spec) |
-| `gmail` service account [planned v0.4.0] | `service_account.json` |
+| `gmail` service account [v0.4.0] | `service_account.json` |
 | Delegated, Microsoft or Google [planned v0.4.0] | optional `refresh_token` from `sigillum oauth login`; `client_secret` for Google's desktop client (client ID in the spec). The controller keeps the current tokens in its own Secret `sigillum-oauth-<backend>` (US-6.3). |
 | `sendgrid` [backlog] | `api_key` |
 
@@ -1414,7 +1415,7 @@ The release is built as a sequence of small pull requests (§8.0, `CONTRIBUTING.
 | 8 | `sigillum oauth login` (authorization code, PKCE, loopback) | 5 | — | US-6.3 |
 | 9a | Envelope rule moved from the Graph driver to `driver.BindToEnvelope`, shared with the Gmail driver; no behaviour change (done) | — | — | US-6.1, US-6.2 |
 | 9b | Gmail API driver with a service account (`internal/driver/gmail`, JWT assertion in `internal/oauth`); not registered yet (done) | 2, 3, 9a | — | US-6.2 stage 1 |
-| 9c | `spec.gmail`, resolver, registration, webhook accepts `gmail` and requires `allowedSenders`; recipe | 9b | Google Workspace | US-6.2 stage 1 |
+| 9c | `spec.gmail`, resolver, registration, webhook accepts `gmail` and requires `allowedSenders`; recipe (done) | 9b | Google Workspace | US-6.2 stage 1 |
 | 10 | Gmail delegated; recipe `gmail-oauth.yaml` | 8, 9 | **Personal Gmail** without app password | US-6.2, US-6.3 |
 | 11 | `XOAUTH2` Google token sources | 7, 9 | Gmail over SMTP with OAuth | US-6.2 stage 2 |
 | 12 | Graph messages above 4 MB via draft and upload sessions (opt-in) | 4 | Large Graph messages | US-6.1 stage 1 |

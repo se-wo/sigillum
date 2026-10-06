@@ -77,3 +77,25 @@ func TestResolveBackendConfigMicrosoftGraph(t *testing.T) {
 		t.Fatal("type microsoftGraph without spec.microsoftGraph must be refused")
 	}
 }
+
+func TestResolveBackendConfigGmail(t *testing.T) {
+	sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "workspace", Namespace: "sigillum-system"},
+		Data: map[string][]byte{sigv1.GmailSecretServiceAccountKey: []byte(`{"type":"service_account"}`)}}
+	empty := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: "sigillum-system"}}
+	c := fake.NewClientBuilder().WithObjects(sec, empty).Build()
+	spec := func(name string) *sigv1.BackendSpec {
+		return &sigv1.BackendSpec{Type: sigv1.BackendGmail,
+			Gmail: &sigv1.GmailBackendSpec{CredentialsRef: sigv1.SecretReference{Name: name, Namespace: "sigillum-system"}}}
+	}
+	cfg, err := ResolveBackendConfig(context.Background(), c, "/workspace", spec("workspace"), "")
+	if err != nil || string(cfg.Gmail.ServiceAccountJSON) != `{"type":"service_account"}` {
+		t.Fatalf("got %+v, %v", cfg.Gmail, err)
+	}
+	if _, err := ResolveBackendConfig(context.Background(), c, "/workspace", spec("empty"), ""); err == nil ||
+		!strings.Contains(err.Error(), "service_account.json") {
+		t.Fatalf("want the missing key named, got %v", err)
+	}
+	if _, err := ResolveBackendConfig(context.Background(), c, "/workspace", &sigv1.BackendSpec{Type: sigv1.BackendGmail}, ""); err == nil {
+		t.Fatal("a gmail backend without spec.gmail must be refused")
+	}
+}

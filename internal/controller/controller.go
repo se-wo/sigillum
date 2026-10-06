@@ -28,6 +28,7 @@ import (
 	whv1 "github.com/se-wo/sigillum/internal/webhook"
 
 	// pull in the SMTP driver so the registry has it at startup
+	_ "github.com/se-wo/sigillum/internal/driver/gmail"
 	_ "github.com/se-wo/sigillum/internal/driver/graph"
 	_ "github.com/se-wo/sigillum/internal/driver/smtp"
 )

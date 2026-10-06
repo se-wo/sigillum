@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	_ "github.com/se-wo/sigillum/internal/driver/gmail" // registers type gmail
 	_ "github.com/se-wo/sigillum/internal/driver/graph" // registers type microsoftGraph
 	_ "github.com/se-wo/sigillum/internal/driver/smtp"  // registers type smtp
 )
@@ -122,5 +123,61 @@ func TestMailBackendValidator_MicrosoftGraph(t *testing.T) {
 	smtp.Spec.MicrosoftGraph = graphBackend(nil).Spec.MicrosoftGraph
 	if _, err := NewClusterMailBackendValidator().ValidateCreate(context.Background(), smtp); err == nil || !strings.Contains(err.Error(), "spec.microsoftGraph") {
 		t.Fatalf("want spec.microsoftGraph refused on smtp, got %v", err)
+	}
+}
+
+func gmailBackend(mutate func(*sigv1.BackendSpec)) *sigv1.ClusterMailBackend {
+	b := &sigv1.ClusterMailBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace"},
+		Spec: sigv1.BackendSpec{
+			Type:           sigv1.BackendGmail,
+			Gmail:          &sigv1.GmailBackendSpec{CredentialsRef: sigv1.SecretReference{Name: "workspace", Namespace: "sigillum-system"}},
+			AllowedSenders: []string{"noreply@example.com"},
+		},
+	}
+	if mutate != nil {
+		mutate(&b.Spec)
+	}
+	return b
+}
+
+func TestMailBackendValidator_Gmail(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*sigv1.BackendSpec)
+		wantErr string
+	}{
+		{name: "valid"},
+		{name: "missing block", mutate: func(s *sigv1.BackendSpec) { s.Gmail = nil }, wantErr: "spec.gmail"},
+		{name: "no namespace on a cluster backend", mutate: func(s *sigv1.BackendSpec) { s.Gmail.CredentialsRef.Namespace = "" },
+			wantErr: "gmail.credentialsRef.namespace"},
+		{name: "allowedSenders omitted", mutate: func(s *sigv1.BackendSpec) { s.AllowedSenders = nil }, wantErr: "spec.allowedSenders"},
+		{name: "allowedSenders empty", mutate: func(s *sigv1.BackendSpec) { s.AllowedSenders = []string{} }, wantErr: "spec.allowedSenders"},
+		{name: "smtp block as well", mutate: func(s *sigv1.BackendSpec) { s.SMTP = &sigv1.SMTPBackendSpec{} }, wantErr: "spec.smtp"},
+		{name: "graph block as well", mutate: func(s *sigv1.BackendSpec) { s.MicrosoftGraph = &sigv1.MicrosoftGraphBackendSpec{} },
+			wantErr: "spec.microsoftGraph"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewClusterMailBackendValidator().ValidateCreate(context.Background(), gmailBackend(tc.mutate))
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+
+	// The gmail block on other types is refused.
+	smtp := validClusterBackend(nil)
+	smtp.Spec.Gmail = gmailBackend(nil).Spec.Gmail
+	if _, err := NewClusterMailBackendValidator().ValidateCreate(context.Background(), smtp); err == nil || !strings.Contains(err.Error(), "spec.gmail") {
+		t.Fatalf("want spec.gmail refused on smtp, got %v", err)
+	}
+	// A namespaced MailBackend reads its own namespace only.
+	mb := &sigv1.MailBackend{ObjectMeta: metav1.ObjectMeta{Name: "workspace", Namespace: "team"}, Spec: gmailBackend(nil).Spec}
+	if _, err := NewMailBackendValidator().ValidateCreate(context.Background(), mb); err == nil || !strings.Contains(err.Error(), "cross-namespace") {
+		t.Fatalf("want cross-namespace refusal, got %v", err)
 	}
 }

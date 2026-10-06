@@ -67,6 +67,25 @@ spec:
                 items:
                   type: string
                 type: array
+              gmail:
+                description: Gmail is required when type == gmail.
+                properties:
+                  credentialsRef:
+                    description: |-
+                      CredentialsRef points at the Secret holding the service account's
+                      JSON key under the key service_account.json.
+                    properties:
+                      name:
+                        minLength: 1
+                        type: string
+                      namespace:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - credentialsRef
+                type: object
               healthCheck:
                 description: HealthCheck controls periodic probing.
                 properties:
