@@ -82,6 +82,20 @@ func ResolveBackendConfig(
 			return cfg, fmt.Errorf("credentials secret %s/%s has no key %s", sec.Namespace, sec.Name, sigv1.GraphSecretClientSecretKey)
 		}
 		cfg.Graph = &driver.GraphConfig{TenantID: g.TenantID, ClientID: g.ClientID, ClientSecret: secret}
+	case sigv1.BackendGmail:
+		g := spec.Gmail
+		if g == nil {
+			return cfg, fmt.Errorf("spec.gmail is required when type=gmail")
+		}
+		sec, err := credentialsSecret(ctx, c, "spec.gmail", g.CredentialsRef, secretFallbackNs)
+		if err != nil {
+			return cfg, err
+		}
+		key := sec.Data[sigv1.GmailSecretServiceAccountKey]
+		if len(key) == 0 {
+			return cfg, fmt.Errorf("credentials secret %s/%s has no key %s", sec.Namespace, sec.Name, sigv1.GmailSecretServiceAccountKey)
+		}
+		cfg.Gmail = &driver.GmailConfig{ServiceAccountJSON: key}
 	default:
 		return cfg, fmt.Errorf("backend type %q is not implemented", spec.Type)
 	}

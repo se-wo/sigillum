@@ -141,6 +141,11 @@ func (v *MailBackendValidator[T]) validate(obj runtime.Object) (admission.Warnin
 	if spec.Type == sigv1.BackendMicrosoftGraph {
 		allErrs = append(allErrs, v.validateGraph(specPath, spec, selfNs)...)
 	}
+	if spec.Type == sigv1.BackendGmail {
+		allErrs = append(allErrs, v.validateGmail(specPath, spec, selfNs)...)
+	} else if spec.Gmail != nil {
+		allErrs = append(allErrs, field.Forbidden(specPath.Child("gmail"), "only for type gmail"))
+	}
 
 	// A backend's sender list bounds every policy that uses it, so its
 	// entries follow the stricter rules of allowedRecipients: a glob must
@@ -188,6 +193,31 @@ func (v *MailBackendValidator[T]) validateGraph(specPath *field.Path, spec *sigv
 	}
 	if spec.SMTP != nil {
 		errs = append(errs, field.Forbidden(specPath.Child("smtp"), "only for type smtp"))
+	}
+	return errs
+}
+
+// validateGmail checks a gmail backend (SPEC US-6.2, US-2.8).
+func (v *MailBackendValidator[T]) validateGmail(specPath *field.Path, spec *sigv1.BackendSpec, selfNs string) field.ErrorList {
+	var errs field.ErrorList
+	if spec.Gmail == nil {
+		errs = append(errs, field.Required(specPath.Child("gmail"), "spec.gmail is required when type=gmail"))
+	} else {
+		errs = append(errs, v.validateCredentialsRef(specPath.Child("gmail", "credentialsRef"), spec.Gmail.CredentialsRef, selfNs)...)
+	}
+	// Domain-wide delegation can act as any user of the domain; the
+	// backend's list is what bounds it.
+	if len(spec.AllowedSenders) == 0 {
+		errs = append(errs, field.Required(specPath.Child("allowedSenders"),
+			"a gmail backend can send as any user its delegation covers; list the mailboxes it sends for"))
+	}
+	for _, f := range []struct {
+		set  bool
+		name string
+	}{{spec.SMTP != nil, "smtp"}, {spec.MicrosoftGraph != nil, "microsoftGraph"}} {
+		if f.set {
+			errs = append(errs, field.Forbidden(specPath.Child(f.name), "only for type "+f.name))
+		}
 	}
 	return errs
 }

@@ -1,0 +1,49 @@
+# Google Workspace via the Gmail API with a service account (SPEC US-6.2
+# stage 1).
+#
+# Sends with users.messages.send as the From mailbox, through domain-wide
+# delegation limited to the scope gmail.send (send only, no reading). No
+# app password and no user's password; nothing breaks when a user changes
+# theirs or leaves.
+#
+# 1. In a Google Cloud project: enable the Gmail API, create a service
+#    account and a JSON key for it (IAM & Admin > Service accounts > Keys).
+#    Note the account's numeric Unique ID (OAuth 2 client ID). Your
+#    organization policy may forbid key creation
+#    (iam.disableServiceAccountKeyCreation); an administrator can allow it
+#    for this project.
+#
+# 2. In the Workspace Admin console (super administrator): Security >
+#    Access and data control > API controls > Domain-wide delegation > Add
+#    new, with the Unique ID and only the scope
+#        https://www.googleapis.com/auth/gmail.send
+#    Domain-wide delegation lets the account send as ANY user of the
+#    domain; allowedSenders below is what bounds it in Sigillum, so keep the
+#    key out of other hands.
+#
+# 3. Store the key out of band and apply the backend:
+#
+#      kubectl -n sigillum-system create secret generic google-workspace-gmail-api \
+#        --from-file=service_account.json=key.json
+#
+#    allowedSenders is required for this backend type: the mailboxes
+#    Sigillum may send as, checked before Gmail is called. A mailbox that
+#    is listed but not covered by the delegation fails with a permanent
+#    error naming unauthorized_client.
+#
+# `kubectl get cmb` shows the backend not ready when the key no longer
+# works (deleted or disabled). Limits: 35 MB per message, 2,000 messages
+# per user and day: use the policy's rateLimits.messagesPerDay. Rotate the
+# key in the Secret before deleting the old one in Google Cloud.
+apiVersion: sigillum.dev/v1alpha1
+kind: ClusterMailBackend
+metadata:
+  name: google-workspace-gmail-api
+spec:
+  type: gmail
+  gmail:
+    credentialsRef:
+      name: google-workspace-gmail-api   # key service_account.json, created in step 3
+      namespace: sigillum-system
+  allowedSenders:
+    - noreply@example.com
