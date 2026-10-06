@@ -1015,7 +1015,7 @@ The problem `type` is `https://sigillum.dev/errors/<slug>`. The audit / metric `
 | `403` | `too-many-recipients` | Over `maxRecipients` | No |
 | `413` | `message-too-large` | Over `maxSizeBytes` or the 32 MiB ceiling | No |
 | `429` | `rate-limited` | US-2.2; `Retry-After` header | Yes, after `Retry-After` |
-| `422` | `upstream-rejected` | The relay permanently rejected this message (`5xx` to `MAIL`, `RCPT` or `DATA`) **[v0.3.0]** | No, not unchanged |
+| `422` | `upstream-rejected` | The relay permanently rejected this message (`5xx` to `MAIL`, `RCPT` or `DATA`), or capped the recipients of one transaction (`452 4.5.3`, **[v0.4.0]**) | No, not unchanged |
 | `502` | `upstream-error` | Upstream relay failed transiently (unreachable, `4xx`, or a handshake / TLS / relay-login problem on Sigillum's side), or the send did not finish within the request budget (50 s, below the server's 60 s write timeout, so the client always gets an answer) | Yes, with backoff; after a timeout the relay may already have the message |
 | `503` | `backend-not-ready` | Backend missing, not Ready, invalid, or its config could not be resolved | Yes, with backoff |
 | `503` | `policy-invalid` | The matching policy breaks the admission rules (created without the webhook or by an older version) **[v0.4.0]** | Yes, once the policy is fixed |

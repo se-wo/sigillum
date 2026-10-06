@@ -109,6 +109,12 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- A relay that caps the recipients of one transaction (`452 4.5.3 Too many
+  recipients`: Exchange Online, Amazon SES, Postfix `smtpd_recipient_limit`)
+  was treated as a transient error, so the message was retried forever and
+  never delivered. It is now permanent: REST `422 upstream-rejected`, SMTP
+  `554`, so the caller stops and sees the cause. Splitting the recipients
+  into several transactions is left to the sender (#62).
 - A namespace in `rbac.allowedSecretNamespaces` that does not exist (an
   offboarded team's namespace, or one listed before it is created) no longer
   fails `helm install`/`upgrade` with `namespaces "x" not found`. The

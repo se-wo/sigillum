@@ -97,6 +97,9 @@ func (f *fakeSMTP) serve(c net.Conn) {
 			case strings.HasPrefix(rcpt, "busy@"):
 				w("451 4.3.0 try later")
 				continue
+			case strings.HasPrefix(rcpt, "toomany@"):
+				w("452 4.5.3 Too many recipients")
+				continue
 			}
 			env.to = append(env.to, rcpt)
 			w("250 OK")
@@ -332,6 +335,26 @@ func TestSMTPDriver_UpstreamReplyClassification(t *testing.T) {
 	_, err = d.(driver.RawSender).SendRaw(context.Background(), "a@x.example", []string{"busy@x.example"}, raw)
 	if !errors.Is(err, driver.ErrUpstreamTransient) {
 		t.Fatalf("4xx must be transient, got %v", err)
+	}
+	// 452 4.5.3 (too many recipients) is permanent for this message: the
+	// same recipients fail the same way on every retry (#62).
+	_, err = d.(driver.RawSender).SendRaw(context.Background(), "a@x.example", []string{"toomany@x.example"}, raw)
+	if !errors.Is(err, driver.ErrUpstreamPermanent) {
+		t.Fatalf("452 4.5.3 must be permanent, got %v", err)
+	}
+}
+
+func TestIsTooManyRecipients(t *testing.T) {
+	for msg, want := range map[string]bool{
+		"4.5.3 Too many recipients": true,
+		"Too many recipients":       true,
+		"too many recipient":        true,
+		"4.2.2 Mailbox full":        false,
+		"4.3.0 try later":           false,
+	} {
+		if got := isTooManyRecipients(msg); got != want {
+			t.Errorf("isTooManyRecipients(%q) = %v, want %v", msg, got, want)
+		}
 	}
 }
 

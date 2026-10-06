@@ -11,6 +11,7 @@ import (
 	"net/smtp"
 	"net/textproto"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -345,6 +346,13 @@ func (a loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 // STARTTLS or AUTH (e.g. rotated relay credentials, "530 must issue
 // STARTTLS") is Sigillum's configuration problem: callers must queue and
 // retry rather than bounce while an operator fixes the backend.
+//
+// The one 4xx that is permanent for this message is "452 4.5.3 Too many
+// recipients": the relay caps the recipients of one transaction (Exchange
+// Online, SES, Postfix smtpd_recipient_limit), so the same message fails
+// the same way on every retry. It is classified permanent so the caller
+// stops retrying and sees the cause, instead of queueing forever. Splitting
+// the recipients into several transactions is left to the sender.
 func isTransient(err error) bool {
 	var de deliveryError
 	if !errors.As(err, &de) {
@@ -352,7 +360,18 @@ func isTransient(err error) bool {
 	}
 	var te *textproto.Error
 	if errors.As(err, &te) {
+		if te.Code == 452 && isTooManyRecipients(te.Msg) {
+			return false
+		}
 		return te.Code < 500
 	}
 	return true
+}
+
+// isTooManyRecipients reports whether a 452 reply is the "too many
+// recipients" signal: enhanced status code 4.5.3 (RFC 3463), or that text
+// for relays that omit the enhanced code.
+func isTooManyRecipients(msg string) bool {
+	m := strings.TrimSpace(msg)
+	return strings.HasPrefix(m, "4.5.3") || strings.Contains(strings.ToLower(m), "too many recipient")
 }
