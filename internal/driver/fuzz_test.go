@@ -1,4 +1,4 @@
-package graph
+package driver
 
 import (
 	"bytes"
@@ -8,17 +8,17 @@ import (
 	"testing"
 )
 
-// FuzzPrepare checks the envelope rule: whatever prepare accepts, Graph
-// delivers to exactly the envelope recipients, because To and Cc name only
-// envelope recipients and Bcc adds the rest.
-func FuzzPrepare(f *testing.F) {
+// FuzzBindToEnvelope checks the envelope rule: whatever BindToEnvelope
+// accepts, an API backend delivers to exactly the envelope recipients,
+// because To and Cc name only envelope recipients and Bcc adds the rest.
+func FuzzBindToEnvelope(f *testing.F) {
 	f.Add([]byte("From: a@contoso.com\r\nTo: b@example.com\r\n\r\nx\r\n"), "b@example.com,c@example.com")
 	f.Add([]byte("From: a@contoso.com\r\nTo: \"x, y\" <b@example.com>, c@example.com\r\nCc: =?utf-8?q?D?= <d@example.com>\r\n\r\nx"), "D@example.com,c@example.com,b@example.com")
 	f.Add([]byte("From: a@contoso.com\r\nTo: undisclosed-recipients:;\r\n\r\nx"), "b@example.com")
 	f.Add([]byte("From: a@contoso.com\r\nTo: b@example.com\r\nBcc: c@example.com\r\n\r\nx"), "b@example.com,c@example.com")
 	f.Fuzz(func(t *testing.T, raw []byte, envelopeList string) {
 		envelope := strings.Split(envelopeList, ",")
-		out, from, err := prepare(raw, envelope)
+		out, from, err := BindToEnvelope(raw, envelope)
 		if err != nil {
 			return
 		}
@@ -44,7 +44,7 @@ func FuzzPrepare(f *testing.F) {
 				continue
 			}
 			if err != nil {
-				t.Fatalf("%s does not parse after prepare: %v", field, err)
+				t.Fatalf("%s does not parse after BindToEnvelope: %v", field, err)
 			}
 			for _, a := range list {
 				key := strings.ToLower(a.Address)
