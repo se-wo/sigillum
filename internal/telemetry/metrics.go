@@ -58,4 +58,17 @@ var (
 		},
 		[]string{"transport", "auth_method", "reason"},
 	)
+
+	// UpstreamAuthFailuresTotal counts failures to authenticate to an
+	// upstream relay (a rotated or wrong password, an unsupported
+	// mechanism). A backend whose probe is Ready but whose sends fail here
+	// shows up as a rising count. Labelled by backend only; the mechanism
+	// is a backend property.
+	UpstreamAuthFailuresTotal = promauto.With(Registry).NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "sigillum_upstream_auth_failures_total",
+			Help: "Failures to authenticate to an upstream relay, by backend.",
+		},
+		[]string{"backend"},
+	)
 )

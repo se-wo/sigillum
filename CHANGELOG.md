@@ -38,6 +38,7 @@ the version being prepared in the same pull request as the change.
 
 ### Added
 
+- `sigillum_upstream_auth_failures_total{backend}` metric (see Fixed, #58).
 - `spec.smtp.caSecretRef` on `MailBackend` and `ClusterMailBackend`: PEM
   CA certificates (key `ca.crt` by default) trusted in addition to the
   system roots, for relays with a certificate from a private CA. Before,
@@ -109,6 +110,15 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- The backend health probe never checked authentication, so a relay that
+  does not offer the configured SASL mechanism (for example `CRAM-MD5`
+  against a relay that only offers `PLAIN`/`LOGIN`) showed `Ready=True`
+  while every send failed. The probe now checks the relay advertises the
+  configured `authType` in its `EHLO` `AUTH` list and reports
+  `Ready=False` otherwise. It does not authenticate (a wrong password
+  would otherwise risk locking the account out every probe interval); a
+  wrong or rotated password now increments the new
+  `sigillum_upstream_auth_failures_total` counter when sends fail (#58).
 - A relay that caps the recipients of one transaction (`452 4.5.3 Too many
   recipients`: Exchange Online, Amazon SES, Postfix `smtpd_recipient_limit`)
   was treated as a transient error, so the message was retried forever and

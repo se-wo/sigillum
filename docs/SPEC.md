@@ -158,6 +158,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - The validating webhook checks the spec **statically**: it rejects types without a registered driver, missing `smtp` block, empty endpoints, `insecureSkipVerify: true`, a missing `credentialsRef` when auth is required, a missing `credentialsRef.namespace` (or `caSecretRef.namespace`) on `ClusterMailBackend`, and a cross-namespace `credentialsRef` (or `caSecretRef`) on `MailBackend`.
 - The webhook does **not** probe reachability. Network calls during admission are slow, flaky, and break GitOps apply ordering (a backend could not be applied before its relay exists). Reachability is the controller's job and shows up in status.
 - The status subresource reflects: `Ready` condition (True if at least one endpoint is Ready), `capabilities` (declared by the driver), `endpointStatus` per endpoint, `lastProbeTime`, `observedGeneration`.
+- **[v0.4.0]** When `authType` is not `NONE`, the probe also checks that the relay advertises that SASL mechanism in its `EHLO` `AUTH` list (after `STARTTLS` where configured); if it does not, the endpoint is `Ready=False` with "relay does not offer AUTH `<mechanism>`". It does **not** authenticate, so it cannot lock the account out on a wrong password; a wrong or rotated password still passes the probe and surfaces as sends failing `535`, counted in `sigillum_upstream_auth_failures_total{backend}`.
 
 #### US-2.2 — Rate limiting **[v0.1.0 memory, v0.2.0 Redis]**
 **As a** platform engineer **I want** to cap how much mail a workload can send, **so that** one broken workload cannot disrupt mail for everyone.
@@ -367,6 +368,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
   | `sigillum_ratelimit_rejected_total` | Counter | `namespace`, `policy` | `429` / `421` rejections |
   | `sigillum_policy_denied_total` | Counter | `namespace`, `policy`, `reason` | Policy denials, plus `reason="backend_not_ready"` and `reason="policy_invalid"` |
   | `sigillum_auth_failures_total` **[v0.3.0]** | Counter | `transport`, `auth_method`, `reason` (`invalid_token`, `invalid_credentials`, `auth_rate_limited`, `auth_unavailable`) | Failed authentication attempts |
+  | `sigillum_upstream_auth_failures_total` **[v0.4.0]** | Counter | `backend` | Failures to authenticate to an upstream relay (wrong / rotated password, unsupported mechanism) |
   | `sigillum_credential_guard_ok` **[v0.3.0]** | Gauge (controller) | — | 1 while the credential Secret guard is verified (§4.10), 0 while the controller refuses to write credential Secrets |
   | `sigillum_backend_authorized` **[v0.4.0]** | Gauge (controller) | `backend` | 1 while a delegated backend (US-6.3) holds a working refresh token, 0 while it needs a new sign-in |
 

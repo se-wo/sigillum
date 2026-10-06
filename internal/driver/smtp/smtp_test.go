@@ -546,3 +546,93 @@ func TestSMTPDriver_CancelUnblocksSend(t *testing.T) {
 		t.Fatalf("cancellation must stop the send, took %v", elapsed)
 	}
 }
+
+// authAdvertisingServer greets and, on EHLO, advertises the given AUTH
+// mechanisms (empty = no AUTH line). Plaintext, for probe tests.
+func authAdvertisingServer(t *testing.T, mechs string) int32 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				w := func(s string) { _, _ = c.Write([]byte(s + "\r\n")) }
+				w("220 fake ESMTP")
+				for {
+					line, err := br.ReadString('\n')
+					if err != nil {
+						return
+					}
+					switch up := strings.ToUpper(strings.TrimSpace(line)); {
+					case strings.HasPrefix(up, "EHLO"), strings.HasPrefix(up, "HELO"):
+						if mechs != "" {
+							w("250-fake")
+							w("250 AUTH " + mechs)
+						} else {
+							w("250 fake")
+						}
+					case up == "QUIT":
+						w("221 bye")
+						return
+					default:
+						w("250 OK")
+					}
+				}
+			}(c)
+		}
+	}()
+	return int32(ln.Addr().(*net.TCPAddr).Port)
+}
+
+// #58: the probe is not Ready when the relay does not advertise the
+// configured SASL mechanism, and Ready when it does.
+func TestSMTPDriver_ProbeChecksAuthMechanism(t *testing.T) {
+	newD := func(port int32, auth string) driver.Driver {
+		d, err := driver.New(driver.Config{Type: driver.TypeSMTP, SMTP: &driver.SMTPConfig{
+			Endpoints: []driver.SMTPEndpoint{{Host: "127.0.0.1", Port: port, TLS: "none"}},
+			AuthType:  auth, Timeout: 3,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	// CRAM-MD5 configured, relay offers only PLAIN LOGIN -> not Ready.
+	h := newD(authAdvertisingServer(t, "PLAIN LOGIN"), "CRAM-MD5").HealthCheck(context.Background())
+	if h[0].Ready || !strings.Contains(h[0].Message, "does not offer AUTH CRAM-MD5") {
+		t.Fatalf("want not Ready naming the missing mechanism, got %+v", h[0])
+	}
+	// PLAIN configured and offered -> Ready.
+	if h := newD(authAdvertisingServer(t, "PLAIN LOGIN"), "PLAIN").HealthCheck(context.Background()); !h[0].Ready {
+		t.Fatalf("want Ready when PLAIN is offered, got %+v", h[0])
+	}
+	// Relay advertises no AUTH at all, auth required -> not Ready.
+	if h := newD(authAdvertisingServer(t, ""), "PLAIN").HealthCheck(context.Background()); h[0].Ready {
+		t.Fatalf("want not Ready when the relay offers no AUTH, got %+v", h[0])
+	}
+	// authType NONE never checks AUTH -> Ready.
+	if h := newD(authAdvertisingServer(t, ""), "NONE").HealthCheck(context.Background()); !h[0].Ready {
+		t.Fatalf("want Ready for authType NONE, got %+v", h[0])
+	}
+}
+
+func TestAuthMechOffered(t *testing.T) {
+	if !authMechOffered("PLAIN LOGIN CRAM-MD5", "cram-md5") {
+		t.Fatal("case-insensitive match expected")
+	}
+	if authMechOffered("PLAIN LOGIN", "CRAM-MD5") {
+		t.Fatal("CRAM-MD5 is not in the list")
+	}
+	if authMechOffered("", "PLAIN") {
+		t.Fatal("empty list offers nothing")
+	}
+}

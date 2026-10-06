@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/se-wo/sigillum/internal/driver"
+	"github.com/se-wo/sigillum/internal/telemetry"
 )
 
 const driverHelo = "sigillum"
@@ -104,7 +105,30 @@ func (d *Driver) probeEndpoint(ctx context.Context, ep driver.SMTPEndpoint) driv
 			return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: false, Message: err.Error()}
 		}
 	}
+	// The relay must offer the configured SASL mechanism, or every send
+	// fails the AUTH it never advertised. Checked without authenticating,
+	// so the probe cannot lock the account out (#58). Wrong or rotated
+	// passwords still pass here; they show up in
+	// sigillum_upstream_auth_failures_total when sends fail.
+	if at := d.cfg.SMTP.AuthType; at != "" && at != "NONE" {
+		offered, mechs := c.Extension("AUTH")
+		if !offered || !authMechOffered(mechs, at) {
+			return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: false,
+				Message: fmt.Sprintf("relay does not offer AUTH %s (offers %q)", at, mechs)}
+		}
+	}
 	return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: true}
+}
+
+// authMechOffered reports whether the configured mechanism appears in the
+// relay's space-separated EHLO AUTH list, case-insensitively.
+func authMechOffered(advertised, mechanism string) bool {
+	for _, m := range strings.Fields(advertised) {
+		if strings.EqualFold(m, mechanism) {
+			return true
+		}
+	}
+	return false
 }
 
 // Send writes msg to the first endpoint that accepts the handshake. If every
@@ -217,6 +241,7 @@ func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, from strin
 		}
 		if auth != nil {
 			if err := c.Auth(auth); err != nil {
+				telemetry.UpstreamAuthFailuresTotal.WithLabelValues(d.cfg.BackendKey).Inc()
 				return err
 			}
 		}
