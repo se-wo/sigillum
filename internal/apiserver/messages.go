@@ -91,6 +91,24 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bound the bodies held at once before reading this one (see
+	// bodyBudget). Callers are authenticated by now, so anonymous clients
+	// cannot take up the budget.
+	release, ok := s.bodies.reserve(ctx, r)
+	if !ok {
+		s.gw.Reject(ev, "busy")
+		w.Header().Set("Retry-After", "5")
+		problem.Write(w, problem.Problem{
+			Type:      problem.TypeBase + problem.TypeUnavailable,
+			Title:     "Too many large requests in progress",
+			Status:    http.StatusServiceUnavailable,
+			Detail:    "the api-server is already holding its limit of request bodies; retry later",
+			MessageID: msgID,
+		})
+		return
+	}
+	defer release()
+
 	// rejectPayload answers 4xx for a request that never reached the
 	// pipeline and still leaves an audit record.
 	rejectPayload := func(p problem.Problem) {

@@ -48,7 +48,15 @@ the version being prepared in the same pull request as the change.
   or a domain literal (`user@[192.0.2.1]`). `blockedDomains` compared the
   string and let them pass, and a relay with SMTPUTF8 delivered to the
   blocked domain. Address domains must now be ASCII host names on the REST
-  and SMTP paths and in policy evaluation (GHSA-xxxx-xxxx-xxxx).
+  and SMTP paths and in policy evaluation.
+- Any workload allowed to send could get the REST api-server OOM-killed,
+  dropping every in-flight request of every tenant, with a few concurrent
+  large requests: each held about four copies of its body (up to 32 MiB)
+  and nothing bounded how many ran at once. Bodies held at once are now
+  bounded per pod (`api.maxInflightBodyBytes`, default 32 MiB, reserved
+  by `Content-Length` before the body is read); a request that finds no
+  room within 10 s gets a retryable `503`. The chart sets `GOMEMLIMIT` to
+  the container's memory limit.
 
 ### Added
 
