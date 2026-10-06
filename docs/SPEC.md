@@ -546,6 +546,7 @@ Two paths, one per kind of account:
 - Messages up to 35 MB go through the upload endpoint; Gmail's own message size limit applies.
 - Error mapping: `429` and `5xx` are `ErrUpstreamTransient`; `400` and `403` (delegation missing, scope not granted) are `ErrUpstreamPermanent`.
 - The health check acquires a token, so a broken key or missing delegation shows up as `Ready=False`.
+- Implementation notes (row 9b): `oauth.GoogleServiceAccount` signs the RFC 7523 assertion (RS256, `iss` the account, `aud` the token endpoint, one hour, `sub` the mailbox) with the PKCS #8 RSA key of `service_account.json`; a key file whose `token_uri` is not Google's token endpoint is refused, since the signed assertion goes there. The driver sends `POST https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media` with the MIME message as `message/rfc822`, as the `From` mailbox, after `driver.BindToEnvelope` (row 9a); `200` is success and the message ID is the upstream ID. Tokens are cached per key file and mailbox and shared by every driver. A `401` drops the token and retries once; `429`, `408` and `5xx` are transient, other answers permanent with Gmail's status and message reduced to printable ASCII. A token request refused with `unauthorized_client` (no domain-wide delegation for the mailbox) is permanent. Messages above 35 MB are refused before any request. The health check acquires a token for the service account itself, so a broken or deleted key shows as `Ready=False`; a mailbox without delegation shows on its first send.
 - Workspace caps sending at 2,000 messages per user and day, a personal Gmail account at about 500 recipients per day; the daily limit (US-2.7) protects both.
 - `MailBackend.spec.type` already accepts `gmail`; no CRD redesign is needed.
 
@@ -1412,7 +1413,7 @@ The release is built as a sequence of small pull requests (§8.0, `CONTRIBUTING.
 | 7 | `XOAUTH2` app-only for Microsoft 365 (`SMTP.SendAsApp`) | 3, 6 | Microsoft 365 over SMTP without a password | US-6.1 stage 2 |
 | 8 | `sigillum oauth login` (authorization code, PKCE, loopback) | 5 | — | US-6.3 |
 | 9a | Envelope rule moved from the Graph driver to `driver.BindToEnvelope`, shared with the Gmail driver; no behaviour change (done) | — | — | US-6.1, US-6.2 |
-| 9b | Gmail API driver with a service account (`internal/driver/gmail`, JWT assertion in `internal/oauth`); not registered yet | 2, 3, 9a | — | US-6.2 stage 1 |
+| 9b | Gmail API driver with a service account (`internal/driver/gmail`, JWT assertion in `internal/oauth`); not registered yet (done) | 2, 3, 9a | — | US-6.2 stage 1 |
 | 9c | `spec.gmail`, resolver, registration, webhook accepts `gmail` and requires `allowedSenders`; recipe | 9b | Google Workspace | US-6.2 stage 1 |
 | 10 | Gmail delegated; recipe `gmail-oauth.yaml` | 8, 9 | **Personal Gmail** without app password | US-6.2, US-6.3 |
 | 11 | `XOAUTH2` Google token sources | 7, 9 | Gmail over SMTP with OAuth | US-6.2 stage 2 |

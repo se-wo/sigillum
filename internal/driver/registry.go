@@ -13,6 +13,14 @@ type Config struct {
 	BackendKey string // namespace/name or /name (for cluster-scoped) — used in metric labels
 	SMTP       *SMTPConfig
 	Graph      *GraphConfig
+	Gmail      *GmailConfig
+}
+
+// GmailConfig is the parsed shape of a gmail backend with a Google service
+// account and domain-wide delegation (SPEC US-6.2 stage 1).
+type GmailConfig struct {
+	// ServiceAccountJSON is the account's JSON key file.
+	ServiceAccountJSON []byte
 }
 
 // GraphConfig is the parsed shape of a microsoftGraph backend: an Entra ID
