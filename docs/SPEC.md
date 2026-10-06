@@ -527,6 +527,7 @@ Two paths, one per kind of account:
 - Everything else is the existing SMTP driver: envelope, raw relay, endpoint failover, health checks. Personal Outlook.com accounts have far lower daily limits than business mailboxes; the daily limit (US-2.7) protects them.
 - The SASL `user=` value is the mailbox address, set in the backend spec. It is required for `XOAUTH2`; the ID token's `preferred_username` is only a display hint. Microsoft access tokens are issued for one resource, so a token for Graph cannot authenticate SMTP and the reverse; a backend uses one of the two.
 - The same `authType` serves Google (US-6.2 stage 2) with a Google token source.
+- Implementation notes (row 6a): the driver gets the mailbox as `Username` and a token source (`oauth.Source`); delegated backends will hand it the access token the broker stored, app-only ones a client-credentials `Cache`. It asks the source once per send, before connecting, and uses that token for every endpoint of the failover list. The initial response is `user=<mailbox>\x01auth=Bearer <token>\x01\x01`; the mailbox must be visible ASCII and the token an RFC 6750 `b64token`, because `\x01` is the separator, and an expired token is not sent. Like `PLAIN`, the token is only sent over TLS (or to localhost), and only to a relay that offers `AUTH XOAUTH2`. A rejected token gets the relay's JSON error challenge, an empty response and then `535`; the error names the challenge's status and scope, and is transient like any other `AUTH` failure, since the sign-in is broken, not the message. A token source error is permanent if the token endpoint's answer is (`invalid_client`, §4.5), transient otherwise (a token not stored yet, the provider unreachable). The health check acquires a token first, as the Graph driver does; without one every endpoint is reported not ready with the token error.
 
 *Workarounds until v0.4.0* (recipes in `examples/providers/`): a Microsoft 365 inbound connector for SMTP relay (static egress IP, outbound port 25); Azure Communication Services Email over SMTP, authenticated with an Entra application's client secret; High Volume Email (`smtp-hve.office365.com`, Basic auth until September 2028, internal recipients only); or a mailbox with SMTP AUTH still enabled, as a bridge until the end of December 2026.
 
@@ -1072,7 +1073,7 @@ type RawSender interface {
 - The token endpoint must be `https`, redirects are never followed (the secret goes only to the configured endpoint), and a Microsoft tenant must be a tenant ID or domain before it becomes part of the URL. The answer is limited to 1 MiB, the access token must be an RFC 6750 `b64token` (it ends up in `Authorization` headers and SASL `XOAUTH2` strings), `expires_in` is capped at 24 hours (5 minutes if missing), and the provider's error text is reduced to printable ASCII. `Token` values print without the token.
 - `internal/oauth/oauthtest` is a fake token endpoint for the tests of the drivers that use it.
 
-Drivers register a factory per type in a process-wide registry. The webhook rejects backend types without a registered factory. The SMTP driver supports STARTTLS and implicit TLS, `PLAIN` / `LOGIN` / `CRAM-MD5`, and MIME multipart assembly.
+Drivers register a factory per type in a process-wide registry. The webhook rejects backend types without a registered factory. The SMTP driver supports STARTTLS and implicit TLS, `PLAIN` / `LOGIN` / `CRAM-MD5` (and `XOAUTH2` internally, not accepted by the webhook before row 6b of §8.3), and MIME multipart assembly.
 
 **Capability matrix** (target picture; implemented are the `smtp` row and `send` for `microsoftGraph` [v0.4.0]; `send` for `gmail` is planned for v0.4.0):
 
@@ -1414,7 +1415,9 @@ The release is built as a sequence of small pull requests (§8.0, `CONTRIBUTING.
 | 4b | `spec.microsoftGraph` (tenant, client ID, credentials), resolver, driver registration, webhook accepts `microsoftGraph` and requires `allowedSenders`; audit reason `recipient_not_allowed` for the envelope rule; recipe (done) | 4a | Microsoft 365 work accounts | US-6.1 stage 1 |
 | 5a | Credential Secret guard admits OAuth token Secrets (label, owner, keys, release namespace) (done) | — | — | US-6.3, §4.10 |
 | 5b | Refresh-token source, token Secret and broker in the controller, `sigillum_backend_authorized`; no provider yet (done) | 3, 5a | — | US-6.3 |
-| 6 | `authType: XOAUTH2` on the SMTP driver with device code sign-in (`smtp-mail.outlook.com`); recipe `outlook-com.yaml` | 2, 5 | **Outlook.com** | US-6.1 stage 2, US-6.3 |
+| 6a | `XOAUTH2` SASL in the SMTP driver, access token from a token source; not reachable yet (done) | 3 | — | US-6.1 stage 2 |
+| 6b | `authType: XOAUTH2` with a delegated Microsoft sign-in: spec fields, broker wired into the backend reconciler (`Authorized`, `Ready`), access token from the token Secret on the send path, chart permissions, webhook accepts it; the refresh token comes from the credentials Secret | 6a, 5 | Outlook.com, with a refresh token obtained outside Sigillum | US-6.1 stage 2, US-6.3 |
+| 6c | Device code sign-in run by the controller (`AuthorizationPending`, `sigillum.dev/authorize`); recipe `outlook-com.yaml` | 6b | **Outlook.com** | US-6.3 |
 | 7 | `XOAUTH2` app-only for Microsoft 365 (`SMTP.SendAsApp`) | 3, 6 | Microsoft 365 over SMTP without a password | US-6.1 stage 2 |
 | 8 | `sigillum oauth login` (authorization code, PKCE, loopback) | 5 | — | US-6.3 |
 | 9 | Gmail API driver, service account; webhook accepts `gmail`; recipe | 2, 3 | Google Workspace | US-6.2 stage 1 |
@@ -1423,7 +1426,7 @@ The release is built as a sequence of small pull requests (§8.0, `CONTRIBUTING.
 | 12 | Graph messages above 4 MB via draft and upload sessions (opt-in) | 4 | Large Graph messages | US-6.1 stage 1 |
 | 13 | Release: real-account checks (`docs/RELEASE-CHECKS.md`), version bump | all | v0.4.0 | §8.0 |
 
-A backend type, `authType` or field is accepted by the webhook only from the pull request that makes it work, so `main` stays releasable after every merge. If the deadline gets tight, 11 and 12 move to v0.4.1 or v0.5.0; 1 to 6 are the minimum for Microsoft 365 and Outlook.com, and 7 for work accounts that must stay on SMTP. Rows 4 and 6 do not depend on each other and can be reviewed in parallel. Rows 4 and 5 turned out too large for one pull request each: 4 is split into the driver (4a) and its activation (4b), 5 into the guard extension (5a) and the broker (5b); "4" and "5" in the dependency column mean both parts.
+A backend type, `authType` or field is accepted by the webhook only from the pull request that makes it work, so `main` stays releasable after every merge. If the deadline gets tight, 11 and 12 move to v0.4.1 or v0.5.0; 1 to 6 are the minimum for Microsoft 365 and Outlook.com, and 7 for work accounts that must stay on SMTP. Rows 4 and 6 do not depend on each other and can be reviewed in parallel. Rows 4, 5 and 6 turned out too large for one pull request each: 4 is split into the driver (4a) and its activation (4b), 5 into the guard extension (5a) and the broker (5b), 6 into the SASL mechanism (6a), its activation with a refresh token from the credentials Secret (6b) and the device code sign-in (6c); "4", "5" and "6" in the dependency column mean all parts.
 
 ### 8.4 v0.5.0 — Easy to run, easy to debug
 

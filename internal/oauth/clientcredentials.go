@@ -186,6 +186,12 @@ func (e *expiresIn) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// ValidAccessToken reports whether s can be used as an access token: an
+// RFC 6750 b64token, which is safe in Authorization headers and SASL
+// XOAUTH2 strings. Tokens from a token endpoint are checked already; this
+// is for tokens from elsewhere, such as a Secret.
+func ValidAccessToken(s string) bool { return isB64Token(s) }
+
 // isB64Token reports whether s matches b64token of RFC 6750 §2.1:
 // 1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"=".
 func isB64Token(s string) bool {

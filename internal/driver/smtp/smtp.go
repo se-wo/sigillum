@@ -1,5 +1,5 @@
 // Package smtp implements the SMTP backend driver. It supports STARTTLS,
-// implicit TLS and plaintext, with PLAIN, LOGIN and CRAM-MD5 SASL.
+// implicit TLS and plaintext, with PLAIN, LOGIN, CRAM-MD5 and XOAUTH2 SASL.
 package smtp
 
 import (
@@ -31,6 +31,14 @@ func init() {
 		if len(cfg.SMTP.Endpoints) == 0 {
 			return nil, errors.New("smtp: at least one endpoint required")
 		}
+		if cfg.SMTP.AuthType == AuthXOAUTH2 {
+			if cfg.SMTP.Tokens == nil {
+				return nil, errors.New("smtp: XOAUTH2 needs a token source")
+			}
+			if !validSASLUser(cfg.SMTP.Username) {
+				return nil, errors.New("smtp: XOAUTH2 needs the mailbox address as username")
+			}
+		}
 		return &Driver{cfg: cfg}, nil
 	})
 }
@@ -55,10 +63,20 @@ func (d *Driver) Close() error { return nil }
 
 // HealthCheck dials each endpoint and runs HELO/EHLO + STARTTLS where
 // configured. Auth is intentionally not exercised — failing auth would
-// mask the underlying TCP/TLS state we want to advertise.
+// mask the underlying TCP/TLS state we want to advertise. With XOAUTH2 it
+// first acquires an access token, like the Graph driver, so a backend
+// without one is not Ready; every endpoint then reports the token error.
 func (d *Driver) HealthCheck(ctx context.Context) []driver.EndpointHealth {
 	out := make([]driver.EndpointHealth, 0, len(d.cfg.SMTP.Endpoints))
+	var tokenErr error
+	if d.cfg.SMTP.AuthType == AuthXOAUTH2 {
+		_, tokenErr = d.accessToken(ctx)
+	}
 	for _, ep := range d.cfg.SMTP.Endpoints {
+		if tokenErr != nil {
+			out = append(out, driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Message: "XOAUTH2 access token: " + tokenErr.Error()})
+			continue
+		}
 		out = append(out, d.probeEndpoint(ctx, ep))
 	}
 	d.mu.Lock()
@@ -136,10 +154,18 @@ func (d *Driver) SendRaw(ctx context.Context, envelopeFrom string, recipients []
 }
 
 func (d *Driver) sendBody(ctx context.Context, from string, rcpts []string, body []byte, msgID string) (*driver.SendResult, error) {
+	// One token for every endpoint of this send.
+	var token string
+	if d.cfg.SMTP.AuthType == AuthXOAUTH2 {
+		var err error
+		if token, err = d.accessToken(ctx); err != nil {
+			return nil, tokenError(err)
+		}
+	}
 	var lastErr error
 	transient := true
 	for _, ep := range d.cfg.SMTP.Endpoints {
-		if err := d.sendVia(ctx, ep, from, rcpts, body); err != nil {
+		if err := d.sendVia(ctx, ep, token, from, rcpts, body); err != nil {
 			lastErr = err
 			if !isTransient(err) {
 				transient = false
@@ -165,7 +191,7 @@ func (d *Driver) sendBody(ctx context.Context, from string, rcpts []string, body
 	return nil, fmt.Errorf("%w: %v", driver.ErrUpstreamPermanent, lastErr)
 }
 
-func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, from string, rcpts []string, body []byte) error {
+func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, token, from string, rcpts []string, body []byte) error {
 	timeout := time.Duration(d.cfg.SMTP.Timeout) * time.Second
 	if timeout == 0 {
 		timeout = 10 * time.Second
@@ -207,15 +233,23 @@ func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, from strin
 			return err
 		}
 	}
-	if d.cfg.SMTP.AuthType != "" && d.cfg.SMTP.AuthType != "NONE" {
+	switch d.cfg.SMTP.AuthType {
+	case "", "NONE":
+	case AuthXOAUTH2:
+		var rejected string
+		if err := c.Auth(xoauth2Auth{username: d.cfg.SMTP.Username, token: token, rejected: &rejected}); err != nil {
+			if rejected != "" {
+				return fmt.Errorf("%w (XOAUTH2 %s)", err, rejected)
+			}
+			return err
+		}
+	default:
 		auth, err := buildAuth(d.cfg.SMTP.AuthType, d.cfg.SMTP.Username, d.cfg.SMTP.Password, ep.Host)
 		if err != nil {
 			return err
 		}
-		if auth != nil {
-			if err := c.Auth(auth); err != nil {
-				return err
-			}
+		if err := c.Auth(auth); err != nil {
+			return err
 		}
 	}
 	// From here on the relay is judging the message itself, so a 5xx
