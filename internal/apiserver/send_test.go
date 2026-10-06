@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 	"github.com/se-wo/sigillum/internal/apiserver/auth"
 	"github.com/se-wo/sigillum/internal/audit"
+	"github.com/se-wo/sigillum/internal/driver"
 	"github.com/se-wo/sigillum/internal/gateway"
 	"github.com/se-wo/sigillum/internal/policy"
 	"github.com/se-wo/sigillum/internal/policy/ratelimit"
@@ -384,5 +386,79 @@ func TestAuthMiddleware_TokenReviewOutageIs503(t *testing.T) {
 	}
 	if len(sink.events) != 1 || sink.events[0].Reason != "auth_unavailable" {
 		t.Fatalf("want one auth_unavailable audit record, got %+v", sink.events)
+	}
+}
+
+// deadlineDriver records the deadline of the context it is given and
+// blocks until that context ends, like a relay that never answers.
+type deadlineDriver struct {
+	deadline time.Time
+	seen     chan struct{}
+}
+
+func (d *deadlineDriver) Type() driver.Type                                   { return driver.TypeSMTP }
+func (d *deadlineDriver) Capabilities() []driver.Capability                   { return nil }
+func (d *deadlineDriver) HealthCheck(context.Context) []driver.EndpointHealth { return nil }
+func (d *deadlineDriver) Close() error                                        { return nil }
+func (d *deadlineDriver) Send(ctx context.Context, _ *driver.Message) (*driver.SendResult, error) {
+	d.deadline, _ = ctx.Deadline()
+	close(d.seen)
+	<-ctx.Done()
+	return nil, fmt.Errorf("%w: %v", driver.ErrUpstreamTransient, ctx.Err())
+}
+
+// #61: a send must end, with a response, before the server's WriteTimeout
+// closes the connection; otherwise a message delivered late leaves the
+// client with an empty reply and it sends the message again.
+func TestHandleSendMessage_DeadlineBelowWriteTimeout(t *testing.T) {
+	if requestBudget >= writeTimeout {
+		t.Fatalf("requestBudget %v must be below writeTimeout %v", requestBudget, writeTimeout)
+	}
+	cmb := &sigv1.ClusterMailBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "relay"},
+		Spec: sigv1.BackendSpec{Type: sigv1.BackendSMTP, SMTP: &sigv1.SMTPBackendSpec{
+			Endpoints: []sigv1.SMTPEndpoint{{Host: "relay", Port: 25}}, AuthType: sigv1.SMTPAuthNone,
+		}},
+		Status: sigv1.BackendStatus{Conditions: []metav1.Condition{{
+			Type: sigv1.ConditionReady, Status: metav1.ConditionTrue, Reason: "Test", LastTransitionTime: metav1.Now(),
+		}}},
+	}
+	mp := &sigv1.MailPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "team"},
+		Spec: sigv1.MailPolicySpec{
+			Subjects:   []sigv1.PolicySubject{{ServiceAccount: &sigv1.ServiceAccountSubject{Name: "mailer"}}},
+			BackendRef: sigv1.BackendRef{Name: "relay", Kind: sigv1.KindClusterMailBackend},
+		},
+	}
+	s, _ := newTestServer(cmb, mp)
+	d := &deadlineDriver{seen: make(chan struct{})}
+	s.gw.NewDriver = func(driver.Config) (driver.Driver, error) { return d, nil }
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"from":"a@team.example","to":["b@x.example"],"body":{"text":"x"}}`))
+	r.Header.Set("Content-Type", "application/json")
+	ctx, cancel := context.WithCancel(withSubject(r.Context(), subject{Namespace: "team", ServiceAccount: "mailer"}))
+	r = r.WithContext(ctx)
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	start := time.Now()
+	go func() { s.handleSendMessage(w, r); close(done) }()
+	// Stand in for the deadline instead of waiting 50 s: end the request
+	// as soon as the driver has seen it.
+	select {
+	case <-d.seen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the send never reached the driver")
+	}
+	cancel()
+	<-done
+	if d.deadline.IsZero() {
+		t.Fatal("the driver must get a context with a deadline")
+	}
+	if got := d.deadline.Sub(start); got > requestBudget+time.Second || got < requestBudget-5*time.Second {
+		t.Fatalf("deadline %v after the request, want about %v", got, requestBudget)
+	}
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("an unfinished send must answer 502, got %d %s", w.Code, w.Body.String())
 	}
 }

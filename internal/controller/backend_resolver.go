@@ -3,6 +3,7 @@ package controller
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -67,6 +68,13 @@ func ResolveBackendConfig(
 			smtpCfg.Username = string(sec.Data[sigv1.SMTPSecretUsernameKey])
 			smtpCfg.Password = string(sec.Data[sigv1.SMTPSecretPasswordKey])
 		}
+		if ref := spec.SMTP.CASecretRef; ref != nil {
+			pool, err := caPool(ctx, c, *ref, secretFallbackNs)
+			if err != nil {
+				return cfg, err
+			}
+			smtpCfg.RootCAs = pool
+		}
 		cfg.SMTP = smtpCfg
 	case sigv1.BackendMicrosoftGraph:
 		g := spec.MicrosoftGraph
@@ -92,7 +100,37 @@ func ResolveBackendConfig(
 // is the namespace of a namespaced MailBackend, empty for a
 // ClusterMailBackend; field names the spec block in errors.
 func credentialsSecret(ctx context.Context, c client.Reader, field string, ref sigv1.SecretReference, secretFallbackNs string) (*corev1.Secret, error) {
-	ns := ref.Namespace
+	return backendSecret(ctx, c, field+".credentialsRef", "credentials", ref.Name, ref.Namespace, secretFallbackNs)
+}
+
+// caPool returns the system roots plus the PEM certificates that
+// spec.smtp.caSecretRef names (#57).
+func caPool(ctx context.Context, c client.Reader, ref sigv1.CASecretReference, secretFallbackNs string) (*x509.CertPool, error) {
+	sec, err := backendSecret(ctx, c, "spec.smtp.caSecretRef", "CA", ref.Name, ref.Namespace, secretFallbackNs)
+	if err != nil {
+		return nil, err
+	}
+	key := ref.Key
+	if key == "" {
+		key = "ca.crt"
+	}
+	pem, ok := sec.Data[key]
+	if !ok {
+		return nil, fmt.Errorf("CA secret %s/%s has no key %s", sec.Namespace, sec.Name, key)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("CA secret %s/%s: key %s holds no PEM certificate", sec.Namespace, sec.Name, key)
+	}
+	return pool, nil
+}
+
+// backendSecret loads a Secret a backend references at refPath.
+func backendSecret(ctx context.Context, c client.Reader, refPath, what, name, refNs, secretFallbackNs string) (*corev1.Secret, error) {
+	ns := refNs
 	if secretFallbackNs != "" {
 		// A namespaced MailBackend may only use Secrets of its own
 		// namespace. The webhook enforces this too, but it can be
@@ -100,19 +138,19 @@ func credentialsSecret(ctx context.Context, c client.Reader, field string, ref s
 		// MailBackend at the relay credentials in the release
 		// namespace and send them to an endpoint of its choice.
 		if ns != "" && ns != secretFallbackNs {
-			return nil, fmt.Errorf("%s.credentialsRef.namespace %q must be empty or the backend's own namespace %q", field, ns, secretFallbackNs)
+			return nil, fmt.Errorf("%s.namespace %q must be empty or the backend's own namespace %q", refPath, ns, secretFallbackNs)
 		}
 		ns = secretFallbackNs
 	}
 	if ns == "" {
-		return nil, fmt.Errorf("%s.credentialsRef.namespace must be set on cluster-scoped backends", field)
+		return nil, fmt.Errorf("%s.namespace must be set on cluster-scoped backends", refPath)
 	}
 	var sec corev1.Secret
-	if err := c.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: ns}, &sec); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &sec); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("credentials secret %s/%s not found", ns, ref.Name)
+			return nil, fmt.Errorf("%s secret %s/%s not found", what, ns, name)
 		}
-		return nil, fmt.Errorf("failed to load credentials secret %s/%s: %w", ns, ref.Name, err)
+		return nil, fmt.Errorf("failed to load %s secret %s/%s: %w", what, ns, name, err)
 	}
 	return &sec, nil
 }

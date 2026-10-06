@@ -154,8 +154,8 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - Namespace-scoped CRD `MailBackend` and cluster-scoped CRD `ClusterMailBackend`.
 - The spec has a `type` discriminator (`smtp` implemented, `microsoftGraph` **[v0.4.0]**; `gmail` planned for v0.4.0, `sendgrid` reserved in the schema enum).
 - For `type: smtp`: an `endpoints` list (at least one entry), `authType`, and `credentialsRef` (required unless `authType: NONE`).
-- `endpoints` is an ordered failover list; sends use the first Ready endpoint.
-- The validating webhook checks the spec **statically**: it rejects types without a registered driver, missing `smtp` block, empty endpoints, `insecureSkipVerify: true`, a missing `credentialsRef` when auth is required, a missing `credentialsRef.namespace` on `ClusterMailBackend`, and a cross-namespace `credentialsRef` on `MailBackend`.
+- `endpoints` is an ordered failover list; sends use the first Ready endpoint. **[v0.4.0]** Endpoints the last probe found unready are tried last, and `connectionTimeoutSeconds` bounds the dial and the handshake (banner, `EHLO`, `STARTTLS`, `AUTH`) of each endpoint, so a relay that accepts connections and never answers costs one connection timeout before the next endpoint is tried, not the whole send budget. Once `MAIL FROM` is sent, a failure does not fail over (the relay may already have the message).
+- The validating webhook checks the spec **statically**: it rejects types without a registered driver, missing `smtp` block, empty endpoints, `insecureSkipVerify: true`, a missing `credentialsRef` when auth is required, a missing `credentialsRef.namespace` (or `caSecretRef.namespace`) on `ClusterMailBackend`, and a cross-namespace `credentialsRef` (or `caSecretRef`) on `MailBackend`.
 - The webhook does **not** probe reachability. Network calls during admission are slow, flaky, and break GitOps apply ordering (a backend could not be applied before its relay exists). Reachability is the controller's job and shows up in status.
 - The status subresource reflects: `Ready` condition (True if at least one endpoint is Ready), `capabilities` (declared by the driver), `endpointStatus` per endpoint, `lastProbeTime`, `observedGeneration`.
 
@@ -734,11 +734,15 @@ spec:
       namespace: sigillum-system
     connectionTimeoutSeconds: 10 # 1–120, default 10
     heloDomain: sigillum         # optional, default "sigillum"
+    caSecretRef:                 # [v0.4.0] optional: PEM CA certificates trusted in addition to the system roots
+      name: corporate-ca         # namespace rules as for credentialsRef
+      namespace: sigillum-system
+      key: ca.crt                # default ca.crt
   allowedSenders:                # [v0.4.0] optional for smtp; the backend sends only for these (US-2.8)
     - "*@example.com"            # not subdomains: list each domain the policies use
     - "*@billing.noreply.example.com"
   healthCheck:
-    enabled: true                # default true; false = assume Ready without probing
+    enabled: true                # default true; false = assume Ready without probing (clears endpointStatus)
     intervalSeconds: 60          # minimum 10, default 60
 status:
   capabilities:                  # declared by the driver at probe time
@@ -758,7 +762,7 @@ status:
   observedGeneration: 1
 ```
 
-`endpoints[].insecureSkipVerify` exists in the schema but the webhook rejects `true`.
+`endpoints[].insecureSkipVerify` exists in the schema but the webhook rejects `true` (and so do the controller and the gateway, §4.3.2). **[v0.4.0]** For a relay whose certificate comes from a private CA, `smtp.caSecretRef` names a Secret key with PEM CA certificates; they are trusted in addition to the system roots, for this backend only, by the probe and by every send (STARTTLS and implicit TLS). The Secret follows the rules of `credentialsRef`: a `ClusterMailBackend` names its namespace, which must be the release namespace or one in `rbac.allowedSecretNamespaces`; a `MailBackend` uses its own namespace. A missing Secret, key or certificate makes the backend `Ready=False` (`InvalidConfiguration`). The webhook warns when no endpoint uses TLS.
 
 With `healthCheck.enabled: false` the backend is reported Ready without probing, and `status.capabilities` stays empty.
 
@@ -921,7 +925,7 @@ Controller behavior in generated mode:
 **Base path:** `/v1`
 **Content type:** `application/json`, or `multipart/form-data` for attachments (US-1.3)
 **Auth:** `Authorization: Bearer <ServiceAccount token>` with audience `sigillum`
-**Transport:** plain HTTP on port 8443 by default, expecting TLS from the mesh or a gateway. Native TLS when `SIGILLUM_TLS_CERT` / `SIGILLUM_TLS_KEY` are set (chart `api.tls.secretName`).
+**Transport:** plain HTTP on port 8443 by default, expecting TLS from the mesh or a gateway. Native TLS when `SIGILLUM_TLS_CERT` / `SIGILLUM_TLS_KEY` are set (chart `api.tls.secretName`). **[v0.4.0]** The files are checked every 10 s and a renewed certificate is used for new connections without a restart (the kubelet updates a mounted Secret within about a minute); a pair that does not load keeps the previous one in use and logs a warning. The same applies to the SMTP proxy's certificate (`smtp.tls.secretName`).
 
 #### 4.4.1 POST /v1/messages **[v0.1.0]**
 
@@ -1012,7 +1016,7 @@ The problem `type` is `https://sigillum.dev/errors/<slug>`. The audit / metric `
 | `413` | `message-too-large` | Over `maxSizeBytes` or the 32 MiB ceiling | No |
 | `429` | `rate-limited` | US-2.2; `Retry-After` header | Yes, after `Retry-After` |
 | `422` | `upstream-rejected` | The relay permanently rejected this message (`5xx` to `MAIL`, `RCPT` or `DATA`) **[v0.3.0]** | No, not unchanged |
-| `502` | `upstream-error` | Upstream relay failed transiently (unreachable, `4xx`, or a handshake / TLS / relay-login problem on Sigillum's side) | Yes, with backoff |
+| `502` | `upstream-error` | Upstream relay failed transiently (unreachable, `4xx`, or a handshake / TLS / relay-login problem on Sigillum's side), or the send did not finish within the request budget (50 s, below the server's 60 s write timeout, so the client always gets an answer) | Yes, with backoff; after a timeout the relay may already have the message |
 | `503` | `backend-not-ready` | Backend missing, not Ready, invalid, or its config could not be resolved | Yes, with backoff |
 | `503` | `policy-invalid` | The matching policy breaks the admission rules (created without the webhook or by an older version) **[v0.4.0]** | Yes, once the policy is fixed |
 | `503` | `unavailable` | Redis rate-limit store unreachable (fail closed), or the TokenReview failed (v0.3.0); `Retry-After: 5` | Yes |

@@ -446,3 +446,80 @@ func TestSMTPDriver_StalledRelayHonoursDeadlineAndDoesNotFailOver(t *testing.T) 
 		t.Fatalf("a lost final reply is transient, got %v", err)
 	}
 }
+
+// silentServer accepts connections and never sends the 220 banner, like a
+// hung relay or a load balancer with no healthy backend behind it (#61).
+func silentServer(t *testing.T) int32 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done); _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { <-done; _ = c.Close() }()
+		}
+	}()
+	_, p, _ := net.SplitHostPort(ln.Addr().String())
+	var n int
+	fmt.Sscanf(p, "%d", &n)
+	return int32(n)
+}
+
+// A relay that accepts the connection and never greets costs one
+// connectionTimeoutSeconds, not the whole send budget, and the next
+// endpoint delivers.
+func TestSMTPDriver_SilentEndpointFailsOverWithinConnectionTimeout(t *testing.T) {
+	second := newFakeSMTP(t)
+	defer second.close()
+	d, err := driver.New(driver.Config{Type: driver.TypeSMTP, SMTP: &driver.SMTPConfig{
+		Endpoints: []driver.SMTPEndpoint{
+			{Host: "127.0.0.1", Port: silentServer(t), TLS: "none"},
+			{Host: "127.0.0.1", Port: second.port(), TLS: "none"},
+		},
+		AuthType: "NONE", Timeout: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := d.(driver.RawSender).SendRaw(ctx, "a@x.example", []string{"b@x.example"}, []byte("Subject: x\r\n\r\nbody\r\n")); err != nil {
+		t.Fatalf("want failover to the second endpoint, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("a silent endpoint must cost about connectionTimeoutSeconds (1 s), took %v", elapsed)
+	}
+	if _, ok := second.lastEnvelope(); !ok {
+		t.Fatal("second endpoint should have received the message")
+	}
+}
+
+// Cancelling the caller's context (the REST client went away) unblocks a
+// conversation that has no deadline of its own.
+func TestSMTPDriver_CancelUnblocksSend(t *testing.T) {
+	stalled, _ := stallingServer(t)
+	d, err := driver.New(driver.Config{Type: driver.TypeSMTP, SMTP: &driver.SMTPConfig{
+		Endpoints: []driver.SMTPEndpoint{{Host: "127.0.0.1", Port: stalled, TLS: "none"}},
+		AuthType:  "NONE", Timeout: 5,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(300*time.Millisecond, cancel)
+	start := time.Now()
+	if _, err := d.(driver.RawSender).SendRaw(ctx, "a@x.example", []string{"b@x.example"}, []byte("Subject: x\r\n\r\nbody\r\n")); err == nil {
+		t.Fatal("want an error after cancellation")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("cancellation must stop the send, took %v", elapsed)
+	}
+}

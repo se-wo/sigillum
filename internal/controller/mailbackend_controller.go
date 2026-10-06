@@ -84,6 +84,9 @@ func reconcileBackend(
 	}
 
 	if !probeEnabled {
+		// Results of an earlier probe would go stale, and the gateway
+		// orders endpoints by them.
+		status.EndpointStatus, status.LastProbeTime = nil, nil
 		status.Conditions = setCondition(status.Conditions, metav1.Condition{
 			Type:               sigv1.ConditionReady,
 			Status:             metav1.ConditionTrue,

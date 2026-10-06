@@ -38,6 +38,12 @@ the version being prepared in the same pull request as the change.
 
 ### Added
 
+- `spec.smtp.caSecretRef` on `MailBackend` and `ClusterMailBackend`: PEM
+  CA certificates (key `ca.crt` by default) trusted in addition to the
+  system roots, for relays with a certificate from a private CA. Before,
+  such a relay only worked with `tls: none`, which sends the relay
+  password in cleartext. The Secret follows the namespace rules of
+  `credentialsRef`; the probe and every send use it (#57).
 - `MailPolicy.spec.rateLimits.messagesPerDay`: a sliding 24-hour cap per
   policy, next to the per-minute and per-hour caps, to keep one workload
   from using up the daily quota of the upstream mailbox (US-2.7). With a
@@ -103,6 +109,23 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- A relay endpoint that accepts connections but never answers no longer
+  blocks failover. `connectionTimeoutSeconds` now bounds the dial and the
+  handshake (banner, `EHLO`, `STARTTLS`, `AUTH`) of each endpoint, as its
+  description said; before, only the dial was bounded and the rest ran
+  under the whole 60 s send budget, so the next endpoint never got its
+  turn over SMTP and every REST send took 60 s. Endpoints the last probe
+  found unready are tried last. REST sends now finish within 50 s, below
+  the server's 60 s write timeout: before, a message delivered after the
+  timeout left the client with an empty reply, and a client that retried
+  sent it twice (Graph backends too). A send still running at the deadline
+  answers `502 upstream-error` (#61).
+- The api-server and the SMTP proxy now pick up a renewed TLS certificate
+  (`api.tls.secretName`, `smtp.tls.secretName`) within about a minute,
+  without a restart. Before, they read it once at startup and kept
+  serving the old certificate until it expired, so every certificate
+  renewal (cert-manager renews after 60 of 90 days by default) ended in
+  failed TLS handshakes unless the pods had been restarted (#75).
 - Without the admission webhook (`webhook.enabled: false`, as in the
   local-dev profile), a `MailPolicy`, `MailBackend` or `ClusterMailBackend`
   that the webhook would reject was admitted, shown as Ready and enforced

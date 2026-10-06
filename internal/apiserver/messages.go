@@ -63,7 +63,8 @@ type responseBody struct {
 //	body decode -> address parse -> gateway.Send (policy, rate limit,
 //	backend, audit) -> map Result to 202 / RFC-7807 problem.
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), requestBudget)
+	defer cancel()
 	msgID := uuid.NewString()
 	subject, authenticated := SubjectFrom(ctx)
 	// ev accumulates what is known about the request so that every early

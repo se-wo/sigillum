@@ -2,8 +2,16 @@ package controller
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -76,4 +84,62 @@ func TestResolveBackendConfigMicrosoftGraph(t *testing.T) {
 	if _, err := ResolveBackendConfig(context.Background(), c, "/m365", &sigv1.BackendSpec{Type: sigv1.BackendMicrosoftGraph}, ""); err == nil {
 		t.Fatal("type microsoftGraph without spec.microsoftGraph must be refused")
 	}
+}
+
+// #57: caSecretRef adds PEM CA certificates to the roots; it follows the
+// namespace rules of credentialsRef.
+func TestResolveBackendConfigCASecretRef(t *testing.T) {
+	ca := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "corp-ca", Namespace: "sigillum-system"},
+		Data: map[string][]byte{"ca.crt": testCAPEM(t), "bundle.pem": testCAPEM(t), "junk": []byte("not a certificate")}}
+	teamCA := ca.DeepCopy()
+	teamCA.Namespace = "team"
+	c := fake.NewClientBuilder().WithObjects(ca, teamCA).Build()
+	ctx := context.Background()
+	spec := func(ref sigv1.CASecretReference) *sigv1.BackendSpec {
+		s := smtpSpec(nil)
+		s.SMTP.AuthType = sigv1.SMTPAuthNone
+		s.SMTP.CASecretRef = &ref
+		return s
+	}
+
+	for _, key := range []string{"", "bundle.pem"} {
+		cfg, err := ResolveBackendConfig(ctx, c, "/b", spec(sigv1.CASecretReference{Name: "corp-ca", Namespace: "sigillum-system", Key: key}), "")
+		if err != nil || cfg.SMTP.RootCAs == nil {
+			t.Fatalf("key %q: want a root pool, got %v", key, err)
+		}
+	}
+	for _, tc := range []struct {
+		ref      sigv1.CASecretReference
+		fallback string
+		want     string
+	}{
+		{sigv1.CASecretReference{Name: "corp-ca", Namespace: "sigillum-system", Key: "missing"}, "", "has no key missing"},
+		{sigv1.CASecretReference{Name: "corp-ca", Namespace: "sigillum-system", Key: "junk"}, "", "holds no PEM certificate"},
+		{sigv1.CASecretReference{Name: "absent", Namespace: "sigillum-system"}, "", "CA secret sigillum-system/absent not found"},
+		{sigv1.CASecretReference{Name: "corp-ca"}, "", "caSecretRef.namespace must be set"},
+		{sigv1.CASecretReference{Name: "corp-ca", Namespace: "sigillum-system"}, "team", "own namespace"},
+	} {
+		if _, err := ResolveBackendConfig(ctx, c, "x", spec(tc.ref), tc.fallback); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%+v: want %q, got %v", tc.ref, tc.want, err)
+		}
+	}
+	if cfg, err := ResolveBackendConfig(ctx, c, "team/b", spec(sigv1.CASecretReference{Name: "corp-ca"}), "team"); err != nil || cfg.SMTP.RootCAs == nil {
+		t.Fatalf("MailBackend: its own namespace's CA must resolve, got %v", err)
+	}
+}
+
+// testCAPEM returns a self-signed CA certificate in PEM.
+func testCAPEM(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Corp CA"},
+		NotBefore: time.Now(), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }

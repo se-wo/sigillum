@@ -36,7 +36,8 @@ func init() {
 }
 
 // Driver implements driver.Driver against one or more SMTP submission relays.
-// Endpoints are tried in declaration order and the first one to accept the
+// Endpoints are tried in the order of the config (the gateway moves those
+// the last probe found unready to the end) and the first one to accept the
 // HELO/AUTH handshake handles the message.
 type Driver struct {
 	cfg driver.Config
@@ -73,15 +74,11 @@ func (d *Driver) HealthCheck(ctx context.Context) []driver.EndpointHealth {
 }
 
 func (d *Driver) probeEndpoint(ctx context.Context, ep driver.SMTPEndpoint) driver.EndpointHealth {
-	addr := net.JoinHostPort(ep.Host, strconv.Itoa(int(ep.Port)))
-	timeout := time.Duration(d.cfg.SMTP.Timeout) * time.Second
-	if timeout == 0 {
-		timeout = 10 * time.Second
-	}
+	timeout := d.connectTimeout()
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	conn, err := dial(dialCtx, ep, timeout)
+	conn, err := d.dial(dialCtx, ep)
 	if err != nil {
 		return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: false, Message: err.Error()}
 	}
@@ -102,12 +99,10 @@ func (d *Driver) probeEndpoint(ctx context.Context, ep driver.SMTPEndpoint) driv
 		if !ok {
 			return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: false, Message: "server does not advertise STARTTLS"}
 		}
-		tlsCfg := &tls.Config{ServerName: ep.Host, InsecureSkipVerify: ep.InsecureSkipVerify}
-		if err := c.StartTLS(tlsCfg); err != nil {
+		if err := c.StartTLS(d.tlsConfig(ep)); err != nil {
 			return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: false, Message: err.Error()}
 		}
 	}
-	_ = addr
 	return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: true}
 }
 
@@ -166,25 +161,33 @@ func (d *Driver) sendBody(ctx context.Context, from string, rcpts []string, body
 }
 
 func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, from string, rcpts []string, body []byte) error {
-	timeout := time.Duration(d.cfg.SMTP.Timeout) * time.Second
-	if timeout == 0 {
-		timeout = 10 * time.Second
+	// The dial and the handshake (banner, EHLO, STARTTLS, AUTH) get
+	// connectionTimeoutSeconds; only the message itself gets the rest of
+	// the send budget. A relay that accepts the connection and then stalls
+	// must cost one connection timeout, not the whole budget, so the next
+	// endpoint still gets its turn.
+	sendDeadline := time.Now().Add(defaultSendTimeout)
+	if dl, ok := ctx.Deadline(); ok {
+		sendDeadline = dl
 	}
-	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	handshakeDeadline := time.Now().Add(d.connectTimeout())
+	if sendDeadline.Before(handshakeDeadline) {
+		handshakeDeadline = sendDeadline
+	}
+	dialCtx, cancel := context.WithDeadline(ctx, handshakeDeadline)
 	defer cancel()
 
-	conn, err := dial(dialCtx, ep, timeout)
+	conn, err := d.dial(dialCtx, ep)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	// Bound the whole conversation, not just the dial: a relay that accepts
-	// the connection and then stalls must not block the caller forever.
-	deadline := time.Now().Add(defaultSendTimeout)
-	if dl, ok := ctx.Deadline(); ok {
-		deadline = dl
-	}
-	if err := conn.SetDeadline(deadline); err != nil {
+	// net/smtp does not watch the context; a cancelled caller (the REST
+	// client went away, the proxy shuts down) unblocks it through the
+	// connection deadline.
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stop()
+	if err := conn.SetDeadline(handshakeDeadline); err != nil {
 		return err
 	}
 
@@ -202,8 +205,7 @@ func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, from strin
 		if !ok {
 			return fmt.Errorf("server does not advertise STARTTLS")
 		}
-		tlsCfg := &tls.Config{ServerName: ep.Host, InsecureSkipVerify: ep.InsecureSkipVerify}
-		if err := c.StartTLS(tlsCfg); err != nil {
+		if err := c.StartTLS(d.tlsConfig(ep)); err != nil {
 			return err
 		}
 	}
@@ -217,6 +219,15 @@ func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, from strin
 				return err
 			}
 		}
+	}
+	if err := conn.SetDeadline(sendDeadline); err != nil {
+		return err
+	}
+	// A cancellation that raced with the line above had its deadline
+	// overwritten; ctx.Err is set before the AfterFunc runs, so checking
+	// after the write catches it.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	// From here on the relay is judging the message itself, so a 5xx
 	// reply means retrying the same message cannot succeed.
@@ -249,14 +260,36 @@ type deliveryError struct{ err error }
 func (e deliveryError) Error() string { return e.err.Error() }
 func (e deliveryError) Unwrap() error { return e.err }
 
-func dial(ctx context.Context, ep driver.SMTPEndpoint, timeout time.Duration) (net.Conn, error) {
+// dial connects to ep; ctx bounds the TCP connect and, for implicit TLS,
+// the TLS handshake.
+func (d *Driver) dial(ctx context.Context, ep driver.SMTPEndpoint) (net.Conn, error) {
 	addr := net.JoinHostPort(ep.Host, strconv.Itoa(int(ep.Port)))
-	d := net.Dialer{Timeout: timeout}
 	if ep.TLS == "tls" {
-		tlsCfg := &tls.Config{ServerName: ep.Host, InsecureSkipVerify: ep.InsecureSkipVerify}
-		return tls.DialWithDialer(&d, "tcp", addr, tlsCfg)
+		td := tls.Dialer{Config: d.tlsConfig(ep)}
+		return td.DialContext(ctx, "tcp", addr)
 	}
-	return d.DialContext(ctx, "tcp", addr)
+	var nd net.Dialer
+	return nd.DialContext(ctx, "tcp", addr)
+}
+
+// tlsConfig verifies ep's certificate against the backend's roots
+// (spec.smtp.caSecretRef plus the system roots), or the system roots.
+func (d *Driver) tlsConfig(ep driver.SMTPEndpoint) *tls.Config {
+	return &tls.Config{
+		ServerName:         ep.Host,
+		RootCAs:            d.cfg.SMTP.RootCAs,
+		InsecureSkipVerify: ep.InsecureSkipVerify, //nolint:gosec // refused by the webhook, the controller and the gateway
+		MinVersion:         tls.VersionTLS12,
+	}
+}
+
+// connectTimeout is connectionTimeoutSeconds: the budget of one dial plus
+// handshake.
+func (d *Driver) connectTimeout() time.Duration {
+	if d.cfg.SMTP.Timeout > 0 {
+		return time.Duration(d.cfg.SMTP.Timeout) * time.Second
+	}
+	return 10 * time.Second
 }
 
 func buildAuth(mech, username, password, host string) (smtp.Auth, error) {

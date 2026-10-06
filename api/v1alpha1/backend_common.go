@@ -52,7 +52,8 @@ const (
 )
 
 // SMTPEndpoint is one host:port pair in a backend's failover list.
-// The driver tries endpoints in declared order and uses the first Ready one.
+// Sends try endpoints in declared order, those the last probe found unready
+// last, and use the first one that completes the handshake.
 type SMTPEndpoint struct {
 	// +kubebuilder:validation:MinLength=1
 	Host string `json:"host"`
@@ -61,7 +62,9 @@ type SMTPEndpoint struct {
 	Port int32 `json:"port"`
 	// +kubebuilder:default=starttls
 	TLS SMTPTLSMode `json:"tls,omitempty"`
-	// InsecureSkipVerify disables TLS certificate verification. Off by default.
+	// InsecureSkipVerify is rejected when true: TLS certificate verification
+	// cannot be disabled. To trust a relay certificate from a private CA, set
+	// spec.smtp.caSecretRef.
 	// +optional
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 }
@@ -81,7 +84,8 @@ type SMTPBackendSpec struct {
 	// +optional
 	CredentialsRef *SecretReference `json:"credentialsRef,omitempty"`
 
-	// ConnectionTimeoutSeconds caps each dial / handshake attempt.
+	// ConnectionTimeoutSeconds caps the dial and the handshake (banner, EHLO,
+	// STARTTLS, AUTH) of each endpoint; then the next endpoint is tried.
 	// +kubebuilder:default=10
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=120
@@ -90,6 +94,27 @@ type SMTPBackendSpec struct {
 	// HeloDomain is sent in the SMTP HELO/EHLO command. Defaults to "sigillum".
 	// +optional
 	HeloDomain string `json:"heloDomain,omitempty"`
+
+	// CASecretRef names PEM CA certificates that are trusted, in addition to
+	// the system roots, when verifying this backend's relays (STARTTLS and
+	// implicit TLS): for relays with a certificate from a private CA. The
+	// namespace rules of credentialsRef apply.
+	// +optional
+	CASecretRef *CASecretReference `json:"caSecretRef,omitempty"`
+}
+
+// CASecretReference names a Secret key that holds PEM CA certificates.
+type CASecretReference struct {
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// Namespace of the Secret. Required on ClusterMailBackend; a MailBackend
+	// always uses its own namespace.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+	// Key holding the certificates. Defaults to ca.crt.
+	// +kubebuilder:default=ca.crt
+	// +optional
+	Key string `json:"key,omitempty"`
 }
 
 // MicrosoftGraphBackendSpec is the shape of a microsoftGraph backend (SPEC

@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"crypto/x509"
 	"fmt"
 	"sync"
 )
@@ -33,6 +34,8 @@ type SMTPConfig struct {
 	Password  string
 	Timeout   int32
 	Helo      string
+	// RootCAs verifies the relays' certificates; nil means the system roots.
+	RootCAs *x509.CertPool
 }
 
 // SMTPEndpoint mirrors the API type but is local to driver to avoid a hard

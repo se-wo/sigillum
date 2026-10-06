@@ -77,6 +77,9 @@ spec:
     credentialsRef:
       name: corporate-smtp-credentials
       namespace: sigillum-system
+    # optional, for a relay certificate from a private CA: PEM CA
+    # certificates trusted in addition to the system roots (key ca.crt)
+    # caSecretRef: { name: corporate-ca, namespace: sigillum-system }
   # optional: the relay sends only for these. "*@example.com" does not
   # cover subdomains, so list every domain the policies use.
   allowedSenders: ["*@example.com", "*@billing.example.com", "*@monitoring.example.com"]
