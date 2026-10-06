@@ -22,6 +22,7 @@ const (
 	TypeUpstreamError     = "upstream-error"
 	TypeUpstreamRejected  = "upstream-rejected"
 	TypeBackendNotReady   = "backend-not-ready"
+	TypePolicyInvalid     = "policy-invalid"
 	TypeNotImplemented    = "not-implemented"
 	TypeShuttingDown      = "shutting-down"
 	TypeUnavailable       = "unavailable"

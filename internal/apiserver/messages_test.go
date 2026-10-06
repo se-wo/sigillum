@@ -7,7 +7,10 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"strings"
 	"testing"
+
+	"github.com/se-wo/sigillum/internal/driver"
 )
 
 type testAttachment struct {
@@ -105,6 +108,80 @@ func TestParseMultipartMessage_BadJSON(t *testing.T) {
 	_, _, err := parseMultipartMessage(r, 32*1024*1024)
 	if err == nil {
 		t.Fatal("expected error for bad JSON in data part")
+	}
+}
+
+func TestParseMultipartMessage_UnknownFieldInData(t *testing.T) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	_ = w.WriteField("data", `{"from":"a@x.example","to":["b@x.example"],"text":"hi"}`)
+	w.Close()
+
+	r, _ := http.NewRequest(http.MethodPost, "/v1/messages", &buf)
+	r.Header.Set("Content-Type", w.FormDataContentType())
+
+	_, _, err := parseMultipartMessage(r, 32*1024*1024)
+	if err == nil || !strings.Contains(err.Error(), "did you mean body.text?") {
+		t.Fatalf("want an unknown-field error with a hint, got %v", err)
+	}
+}
+
+// A misplaced message field sent as a plain form field is refused rather
+// than mailed as a file named after it; any other plain form field is
+// still an attachment.
+func TestParseMultipartMessage_FormFields(t *testing.T) {
+	parse := func(fields ...string) ([]driver.Attachment, error) {
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		_ = w.WriteField("data", `{"from":"a@x.example","to":["b@x.example"]}`)
+		for i := 0; i+1 < len(fields); i += 2 {
+			_ = w.WriteField(fields[i], fields[i+1])
+		}
+		w.Close()
+		r, _ := http.NewRequest(http.MethodPost, "/v1/messages", &buf)
+		r.Header.Set("Content-Type", w.FormDataContentType())
+		_, atts, err := parseMultipartMessage(r, 32*1024*1024)
+		return atts, err
+	}
+	if _, err := parse("text", "Hello"); err == nil || !strings.Contains(err.Error(), "did you mean body.text in the data part?") {
+		t.Fatalf("text field: want a hint, got %v", err)
+	}
+	if _, err := parse("Subject", "Hi"); err == nil || !strings.Contains(err.Error(), "belongs in the data part") {
+		t.Fatalf("subject field: want a refusal, got %v", err)
+	}
+	if _, err := parse("data", `{}`); err == nil || !strings.Contains(err.Error(), "more than one data part") {
+		t.Fatalf("second data part: want a refusal, got %v", err)
+	}
+	atts, err := parse("report", "content")
+	if err != nil || len(atts) != 1 || atts[0].Filename != "report" || string(atts[0].Content) != "content" {
+		t.Fatalf("plain field: want one attachment, got %+v, %v", atts, err)
+	}
+}
+
+// Base64 attachments in the data part are sent along with the file parts.
+func TestParseMultipartMessage_AttachmentsInData(t *testing.T) {
+	body, ct := buildMultipartBody(t, map[string]any{
+		"from": "a@x.example", "to": []string{"b@x.example"}, "body": map[string]string{"text": "see attached"},
+		"attachments": []map[string]string{{"filename": "inv.pdf", "contentBase64": "JVBERg=="}},
+	}, []testAttachment{{name: "r.txt", ct: "text/plain", content: []byte("x")}})
+	r, _ := http.NewRequest(http.MethodPost, "/v1/messages", body)
+	r.Header.Set("Content-Type", ct)
+	_, atts, err := parseMultipartMessage(r, 32*1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(atts) != 2 || atts[0].Filename != "inv.pdf" || string(atts[0].Content) != "%PDF" || atts[1].Filename != "r.txt" {
+		t.Fatalf("want inv.pdf from data and r.txt, got %+v", atts)
+	}
+
+	body, ct = buildMultipartBody(t, map[string]any{
+		"from": "a@x.example", "to": []string{"b@x.example"},
+		"attachments": []map[string]string{{"filename": "a\r\nb", "contentBase64": "eA=="}},
+	}, nil)
+	r, _ = http.NewRequest(http.MethodPost, "/v1/messages", body)
+	r.Header.Set("Content-Type", ct)
+	if _, _, err := parseMultipartMessage(r, 32*1024*1024); err == nil {
+		t.Fatal("want a CRLF filename in the data part refused")
 	}
 }
 

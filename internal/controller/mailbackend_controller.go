@@ -10,6 +10,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	"github.com/se-wo/sigillum/internal/webhook"
 )
 
 // MailBackendReconciler reconciles a namespace-scoped MailBackend.
@@ -30,7 +31,8 @@ func (r *MailBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	requeue := reconcileBackend(ctx, r.Client, req.NamespacedName.String(), &mb.Spec, &mb.Status, mb.Generation, mb.Namespace)
+	requeue := reconcileBackend(ctx, r.Client, req.NamespacedName.String(), &mb.Spec, &mb.Status, mb.Generation, mb.Namespace,
+		webhook.ValidateBackend(&mb))
 	if err := r.Status().Update(ctx, &mb); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -44,7 +46,10 @@ func (r *MailBackendReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // reconcileBackend is shared between MailBackend and ClusterMailBackend.
-// It mutates status in place and returns the requeue interval.
+// It mutates status in place and returns the requeue interval (0: none).
+// invalid is the admission error of the backend, if any
+// (webhook.ValidateBackend): such a backend is never Ready, whether or not
+// the webhook admitted it.
 func reconcileBackend(
 	ctx context.Context,
 	c client.Client,
@@ -53,6 +58,7 @@ func reconcileBackend(
 	status *sigv1.BackendStatus,
 	generation int64,
 	secretFallbackNs string,
+	invalid error,
 ) time.Duration {
 	// Default health-check cadence per SPEC §4.3.1.
 	probeInterval := 60 * time.Second
@@ -60,6 +66,15 @@ func reconcileBackend(
 		probeInterval = time.Duration(spec.HealthCheck.IntervalSeconds) * time.Second
 	}
 	probeEnabled := spec.HealthCheck == nil || spec.HealthCheck.Enabled
+
+	if invalid != nil {
+		// Nothing is probed, so results of an earlier probe would contradict
+		// the condition. Only a spec change (a new reconcile) can fix this.
+		status.EndpointStatus, status.Capabilities, status.LastProbeTime = nil, nil, nil
+		status.Conditions = setCondition(status.Conditions, errorReadyCondition(generation, sigv1.ReasonInvalidConfiguration, invalid.Error()))
+		status.ObservedGeneration = generation
+		return 0
+	}
 
 	cfg, err := ResolveBackendConfig(ctx, c, key, spec, secretFallbackNs)
 	if err != nil {

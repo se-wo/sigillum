@@ -1,4 +1,44 @@
 {{- if and .Values.controller.enabled .Values.webhook.enabled }}
+{{- /*
+Without cert-manager the controller serves the webhook with an existing
+Secret, and the API server must trust its issuer: caBundle comes from
+webhook.certificate.caBundle, else the Secret's ca.crt, else the caBundle
+already on this object (set by hand or another injector). A webhook without
+either (failurePolicy Fail) would block every Sigillum resource, so the
+install fails instead.
+
+lookup returns nothing without a cluster connection (helm template, client-
+side dry run): the list of Secrets in the release namespace is only empty
+then, so it tells the two cases apart. A lookup Helm is not allowed to make
+aborts the render, so only reads Helm's own work needs are made: Secrets in
+the release namespace (its release storage) and this object.
+*/}}
+{{- $cert := .Values.webhook.certificate }}
+{{- $caBundle := "" }}
+{{- if not $cert.useCertManager }}
+{{- $caBundle = $cert.caBundle | default "" }}
+{{- $secretName := include "sigillum.webhook.secretName" . }}
+{{- if lookup "v1" "Secret" .Release.Namespace "" }}
+{{- $secret := lookup "v1" "Secret" .Release.Namespace $secretName }}
+{{- if not $secret }}
+{{- fail (printf "the admission webhook (webhook.enabled=true) needs a serving certificate, but webhook.certificate.useCertManager=false and Secret %s/%s does not exist. Install cert-manager and set webhook.certificate.useCertManager=true, or create the Secret (tls.crt, tls.key, and ca.crt or webhook.certificate.caBundle) first, or set webhook.enabled=false" .Release.Namespace $secretName) }}
+{{- end }}
+{{- if not $caBundle }}
+{{- $caBundle = dig "data" "ca.crt" "" $secret }}
+{{- end }}
+{{- if not $caBundle }}
+{{- $live := lookup "admissionregistration.k8s.io/v1" "ValidatingWebhookConfiguration" "" (include "sigillum.fullname" .) }}
+{{- range (dig "webhooks" (list) $live) }}
+{{- if not $caBundle }}
+{{- $caBundle = dig "clientConfig" "caBundle" "" . }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if not $caBundle }}
+{{- fail (printf "the API server cannot trust the admission webhook: webhook.certificate.useCertManager=false, webhook.certificate.caBundle is empty and Secret %s/%s has no ca.crt. Set webhook.certificate.caBundle to the base64-encoded PEM of the CA that issued tls.crt (for a self-signed certificate, tls.crt itself), or set webhook.enabled=false" .Release.Namespace $secretName) }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
@@ -14,6 +54,9 @@ webhooks:
     sideEffects: {{ .Values.webhook.sideEffects }}
     failurePolicy: {{ .Values.webhook.failurePolicy }}
     clientConfig:
+      {{- with $caBundle }}
+      caBundle: {{ . }}
+      {{- end }}
       service:
         name: {{ include "sigillum.webhook.serviceName" . }}
         namespace: {{ .Release.Namespace }}
@@ -30,6 +73,9 @@ webhooks:
     sideEffects: {{ .Values.webhook.sideEffects }}
     failurePolicy: {{ .Values.webhook.failurePolicy }}
     clientConfig:
+      {{- with $caBundle }}
+      caBundle: {{ . }}
+      {{- end }}
       service:
         name: {{ include "sigillum.webhook.serviceName" . }}
         namespace: {{ .Release.Namespace }}
@@ -46,6 +92,9 @@ webhooks:
     sideEffects: {{ .Values.webhook.sideEffects }}
     failurePolicy: {{ .Values.webhook.failurePolicy }}
     clientConfig:
+      {{- with $caBundle }}
+      caBundle: {{ . }}
+      {{- end }}
       service:
         name: {{ include "sigillum.webhook.serviceName" . }}
         namespace: {{ .Release.Namespace }}
@@ -62,6 +111,9 @@ webhooks:
     sideEffects: {{ .Values.webhook.sideEffects }}
     failurePolicy: {{ .Values.webhook.failurePolicy }}
     clientConfig:
+      {{- with $caBundle }}
+      caBundle: {{ . }}
+      {{- end }}
       service:
         name: {{ include "sigillum.webhook.serviceName" . }}
         namespace: {{ .Release.Namespace }}

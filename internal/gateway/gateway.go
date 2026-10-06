@@ -27,9 +27,15 @@ import (
 	"github.com/se-wo/sigillum/internal/audit"
 	"github.com/se-wo/sigillum/internal/controller"
 	"github.com/se-wo/sigillum/internal/driver"
+	// The gateway builds drivers through the registry, and the backend
+	// validity check accepts only registered types; register them here
+	// rather than rely on a transport importing them.
+	_ "github.com/se-wo/sigillum/internal/driver/graph"
+	_ "github.com/se-wo/sigillum/internal/driver/smtp"
 	"github.com/se-wo/sigillum/internal/policy"
 	"github.com/se-wo/sigillum/internal/policy/ratelimit"
 	"github.com/se-wo/sigillum/internal/telemetry"
+	"github.com/se-wo/sigillum/internal/webhook"
 )
 
 // Auth methods, as logged in the authMethod field (US-4.2).
@@ -113,6 +119,10 @@ const (
 	// StatusUnavailable: a Sigillum dependency (e.g. the Redis rate-limit
 	// store) is down. Retryable; not the caller's fault.
 	StatusUnavailable
+	// StatusPolicyInvalid: the matching policy breaks the admission rules
+	// (admitted without the webhook, or by an older version). Not the
+	// caller's fault; retryable once the policy is fixed.
+	StatusPolicyInvalid
 )
 
 // Result is the outcome of Send.
@@ -142,6 +152,8 @@ type Gateway struct {
 	// NewDriver builds a driver from a resolved backend config; defaults to
 	// driver.New. Overridable in tests.
 	NewDriver func(driver.Config) (driver.Driver, error)
+
+	validity validityCache
 }
 
 // Send runs one message through the pipeline.
@@ -199,7 +211,25 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 	if policy.NeedsSALabels(policies) {
 		caller.SALabels, caller.SALabelsKnown = g.serviceAccountLabels(evalCtx, id.Namespace, id.ServiceAccount)
 	}
-	decision := policy.Evaluate(policy.Match(policies, caller), view)
+	matched := policy.Match(policies, caller)
+	// A policy the webhook would reject is refused, not enforced with
+	// whatever its malformed entries happen to match ("*" in
+	// allowedRecipients would allow everyone). The controller reports the
+	// reason in its Ready condition.
+	if matched != nil {
+		if verr := g.validity.check(matched, func() error { return webhook.ValidateMailPolicy(matched) }); verr != nil {
+			evalSpan.SetAttributes(attribute.String("sigillum.policy", matched.Name),
+				attribute.Bool("sigillum.allowed", false), attribute.String("sigillum.deny_reason", "policy_invalid"))
+			evalSpan.End()
+			telemetry.PolicyDeniedTotal.WithLabelValues(id.Namespace, matched.Name, "policy_invalid").Inc()
+			logger.Warn("policy invalid", "policy", matched.Name, "err", verr)
+			ev.Policy, ev.Decision, ev.Reason = matched.Name, audit.DecisionReject, "policy_invalid"
+			g.Audit.Record(ev)
+			return Result{Status: StatusPolicyInvalid, Policy: matched.Name,
+				Detail: fmt.Sprintf("MailPolicy %q is invalid; its Ready condition names the problem", matched.Name)}
+		}
+	}
+	decision := policy.Evaluate(matched, view)
 	evalSpan.SetAttributes(attribute.String("sigillum.policy", nameOf(decision.Policy)),
 		attribute.Bool("sigillum.allowed", decision.Allowed))
 	if !decision.Allowed {
@@ -399,6 +429,10 @@ func (g *Gateway) backendForPolicy(ctx context.Context, p *sigv1.MailPolicy) (st
 		if err := g.Reader.Get(ctx, types.NamespacedName{Namespace: p.Namespace, Name: p.Spec.BackendRef.Name}, &mb); err != nil {
 			return "", nil, "", fmt.Errorf("MailBackend %s/%s: %w", p.Namespace, p.Spec.BackendRef.Name, err)
 		}
+		// The status may predate an update that made the spec invalid.
+		if verr := g.validity.check(&mb, func() error { return webhook.ValidateBackend(&mb) }); verr != nil {
+			return "", nil, "", fmt.Errorf("MailBackend %s/%s is invalid: %w", p.Namespace, p.Spec.BackendRef.Name, verr)
+		}
 		if !backendIsReady(&mb.Status) {
 			return "", nil, "", fmt.Errorf("MailBackend %s/%s is not Ready", p.Namespace, p.Spec.BackendRef.Name)
 		}
@@ -407,6 +441,9 @@ func (g *Gateway) backendForPolicy(ctx context.Context, p *sigv1.MailPolicy) (st
 		var cmb sigv1.ClusterMailBackend
 		if err := g.Reader.Get(ctx, types.NamespacedName{Name: p.Spec.BackendRef.Name}, &cmb); err != nil {
 			return "", nil, "", fmt.Errorf("ClusterMailBackend %s: %w", p.Spec.BackendRef.Name, err)
+		}
+		if verr := g.validity.check(&cmb, func() error { return webhook.ValidateBackend(&cmb) }); verr != nil {
+			return "", nil, "", fmt.Errorf("ClusterMailBackend %s is invalid: %w", p.Spec.BackendRef.Name, verr)
 		}
 		if !backendIsReady(&cmb.Status) {
 			return "", nil, "", fmt.Errorf("ClusterMailBackend %s is not Ready", p.Spec.BackendRef.Name)

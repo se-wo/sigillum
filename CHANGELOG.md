@@ -26,6 +26,15 @@ the version being prepared in the same pull request as the change.
   rollout, that controller reports the guard as changed and writes no
   generated credential Secrets (`SecretsManaged=False`) until the other
   side is updated; it re-checks every 30 s.
+- REST: `POST /v1/messages` now rejects unknown JSON fields and messages
+  without content with `400 invalid-payload` (see Changed). Check that
+  clients send only the documented fields.
+- Policies and backends are now checked against the admission rules
+  outside the webhook too (see Fixed). One created without the webhook,
+  or admitted by an older version with laxer rules, turns `Ready=False`
+  (`InvalidConfiguration`) and is no longer used: after the upgrade, run
+  `kubectl get mailpolicies,mailbackends,clustermailbackends -A` and fix
+  any that are not Ready.
 
 ### Added
 
@@ -60,6 +69,28 @@ the version being prepared in the same pull request as the change.
 
 ### Changed
 
+- Chart: `helm install` and `helm upgrade` fail with an explanation when
+  the admission webhook is enabled (the default) without cert-manager
+  (`webhook.certificate.useCertManager=false`, the default) and the
+  serving-certificate Secret does not exist, or nothing names the CA that
+  issued it. Before, the release installed "successfully", the controller
+  crash-looped, and the webhook (`failurePolicy: Fail`) rejected every
+  Sigillum resource in the cluster. Without cert-manager the chart now sets
+  the webhook's `caBundle` from the new `webhook.certificate.caBundle`, else
+  from `ca.crt` in the Secret, else keeps the one already on the object.
+  The checks need a cluster connection, so `helm template` skips them
+  (GitOps renders without cert-manager set `webhook.certificate.caBundle`);
+  the NOTES warn whenever cert-manager is off, and the controller waits for
+  a missing Secret instead of crash-looping (#40).
+- REST: unknown fields in the JSON body (or the multipart `data` part)
+  answer `400 invalid-payload` naming the field, with a hint for common
+  slips (`did you mean body.text?`), and a message needs a non-blank
+  `body.text` or `body.html`, or a non-empty attachment. Before, both were
+  accepted with `202`, so a top-level `"text"` delivered an empty
+  message. In a multipart request, Base64 `attachments` in the `data`
+  part are now sent (they were dropped), and a plain form field named like
+  a message field (`text`, `subject`, …) is refused instead of being
+  mailed as a file (#42).
 - `Retry-After` (REST) is the wait until every full window has room
   again, not only the shortest one; a caller retrying then is no longer
   rejected by the hourly or daily window right after.
@@ -72,6 +103,16 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- Without the admission webhook (`webhook.enabled: false`, as in the
+  local-dev profile), a `MailPolicy`, `MailBackend` or `ClusterMailBackend`
+  that the webhook would reject was admitted, shown as Ready and enforced
+  with whatever its malformed entries matched: `allowedRecipients: ["*"]`
+  allowed every recipient. The controller now applies the webhook's rules
+  and reports violations as `Ready=False` (`InvalidConfiguration`); the
+  gateway refuses a request whose matching policy is invalid with
+  `503 policy-invalid` (SMTP `451`, reason `policy_invalid`) instead of
+  enforcing it, and treats an invalid backend as not ready, naming the
+  field errors (#41).
 - A message now leaves a rate-limit window the moment it is as old as the
   window. Before, a caller retrying exactly after `Retry-After` could be
   rejected once more.

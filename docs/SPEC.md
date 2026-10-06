@@ -365,7 +365,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
   | `sigillum_message_size_bytes` | Histogram | `namespace`, `policy`, `backend` | Accepted messages only, size as in §4.4.4 |
   | `sigillum_backend_duration_seconds` | Histogram | `namespace`, `policy`, `backend`, `result` | Duration of the upstream send |
   | `sigillum_ratelimit_rejected_total` | Counter | `namespace`, `policy` | `429` / `421` rejections |
-  | `sigillum_policy_denied_total` | Counter | `namespace`, `policy`, `reason` | Policy denials, plus `reason="backend_not_ready"` |
+  | `sigillum_policy_denied_total` | Counter | `namespace`, `policy`, `reason` | Policy denials, plus `reason="backend_not_ready"` and `reason="policy_invalid"` |
   | `sigillum_auth_failures_total` **[v0.3.0]** | Counter | `transport`, `auth_method`, `reason` (`invalid_token`, `invalid_credentials`, `auth_rate_limited`, `auth_unavailable`) | Failed authentication attempts |
   | `sigillum_credential_guard_ok` **[v0.3.0]** | Gauge (controller) | — | 1 while the credential Secret guard is verified (§4.10), 0 while the controller refuses to write credential Secrets |
   | `sigillum_backend_authorized` **[v0.4.0]** | Gauge (controller) | `backend` | 1 while a delegated backend (US-6.3) holds a working refresh token, 0 while it needs a new sign-in |
@@ -429,7 +429,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - **CRD upgrades:** Helm installs `crds/` on first install only and never upgrades or deletes them. Upgrades apply `config/crd/bases/` (or the chart's `crds/`) explicitly, for example with `kubectl apply --server-side` or an Argo CD application. The CRD-migration runbook (§5.7) documents this.
 - **CRD version check [v0.3.0]:** an outdated CRD makes the API server prune fields it does not know, which only warns a server-side apply. A MailPolicy restricted by `allowedRecipients` alone would then allow every recipient that is not blocked, and one with `messagesPerDay` **[v0.4.0]** would have no daily cap, and a backend's `allowedSenders` **[v0.4.0]** would no longer bound its senders. Every component therefore reads the published OpenAPI v3 schemas at startup (readable by every authenticated client, no RBAC) and exits with an error naming the missing kinds and fields if a field the version relies on is absent. It retries for 30 s because the API server publishes a changed CRD a few seconds late. A failed rollout leaves the old pods serving. `--skip-crd-check` turns the check off for clusters that hide the OpenAPI endpoint.
 - No runtime configuration outside Kubernetes resources (no init scripts).
-- The admission webhook needs a serving certificate: either cert-manager (`webhook.certificate.useCertManager=true`) or an existing secret.
+- The admission webhook needs a serving certificate: either cert-manager (`webhook.certificate.useCertManager=true`) or an existing secret, whose issuing CA the API server must trust: `webhook.certificate.caBundle`, else `ca.crt` in the secret, else the `caBundle` already on the `ValidatingWebhookConfiguration`. **[v0.4.0]** `helm install` and `helm upgrade` fail with an explanation when the webhook is enabled without cert-manager and the secret does not exist or no CA is known: the controller could not start, or the API server could not call the webhook, and the webhook (`failurePolicy: Fail`) would reject every Sigillum resource in the cluster. The checks need a cluster connection (they read only Secrets in the release namespace, which Helm's release storage reads anyway, and the chart's own webhook configuration), so `helm template` skips them; GitOps renders without cert-manager set `webhook.certificate.caBundle`. The NOTES warn whenever cert-manager is off. Without a certificate, `webhook.enabled: false` keeps the rules: the controller and the gateway apply them too (§4.3.2).
 
 #### US-5.2 — High availability **[v0.2.0]**
 **As a** platform engineer **I want** to run Sigillum highly available, **so that** a pod failure does not interrupt mail.
@@ -826,6 +826,8 @@ status:
 
 Webhook validation (in addition to the schema): at least one subject; exactly one matcher per subject; `serviceAccount.name` set; selectors non-empty and valid; `backendRef.name` set and `kind` known; no empty `allowedSenders` entries; recipient domains are bare domains; `allowedRecipients` entries are plain addresses without routing local parts, or globs anchored on a bare domain.
 
+**Validation without the webhook [v0.4.0]:** the same rules for `MailPolicy`, `MailBackend` and `ClusterMailBackend` also run outside admission, because a resource can exist that the webhook never saw: with `webhook.enabled: false` (the local-dev profile), or admitted by an older version with laxer rules. The controller reports a violation as `Ready=False` with reason `InvalidConfiguration` and the field errors in the message, and the gateway never enforces such a resource with whatever its malformed entries happen to match (`*` in `allowedRecipients` would otherwise allow every recipient). A request whose matching policy is invalid is refused with `503 policy-invalid` (SMTP `451`, audit and metric reason `policy_invalid`); a lower-priority policy does not take over. An invalid backend counts as not ready (`503 backend-not-ready`, the detail names the field errors), also while its status still shows the last probe; the controller does not probe it, clears the results of earlier probes and re-checks it only when its spec changes. Condition messages are cut at 4 KiB.
+
 `status.matchedSubjects` exists in the schema but is never populated **[gap G-4]**. Its intended meaning (number of ServiceAccounts in the namespace the policy currently matches) needs a decision before it is implemented or removed.
 
 #### 4.3.3 MailQuota (namespace-scoped) **[backlog]**
@@ -951,7 +953,10 @@ Request:
 ```
 
 Rules:
+- Unknown fields are rejected (`400`), in the JSON body and in the `data` part of a multipart request, so a misplaced field cannot be dropped silently: a top-level `text` would otherwise send an empty message. The `detail` names the field and, for common slips, the intended one (`did you mean body.text?`).
 - At least one recipient across `to`, `cc`, `bcc`.
+- The message needs content: a non-blank `body.text` or `body.html`, or a non-empty attachment (`400` otherwise).
+- Multipart: the `data` part holds the JSON object above (Base64 `attachments` in it are sent too); every other part is a file attachment, named after its filename or its form name. A part without a filename that is named like a message field (`subject`, `text`, …) is refused, since it belongs in `data`.
 - Addresses are RFC 5322 (display names allowed, subject to US-2.3); local parts follow US-2.4.
 - `disposition` is `attachment` (default) or `inline`.
 - `headers`:
@@ -998,7 +1003,7 @@ The problem `type` is `https://sigillum.dev/errors/<slug>`. The audit / metric `
 | Status | Problem slug | Meaning | Retry? |
 |---|---|---|---|
 | `202` | — | Accepted by the backend | — |
-| `400` | `invalid-payload` | Malformed JSON / multipart, invalid address or header, no recipient | No, fix the request |
+| `400` | `invalid-payload` | Malformed JSON / multipart, unknown field, invalid address or header, no recipient, no content | No, fix the request |
 | `401` | `invalid-token` | Missing, invalid, expired or wrong-audience token | No, fix the token |
 | `403` | `no-policy-matched` | No policy matches the caller | No |
 | `403` | `sender-not-allowed` | US-2.3 | No |
@@ -1008,7 +1013,8 @@ The problem `type` is `https://sigillum.dev/errors/<slug>`. The audit / metric `
 | `429` | `rate-limited` | US-2.2; `Retry-After` header | Yes, after `Retry-After` |
 | `422` | `upstream-rejected` | The relay permanently rejected this message (`5xx` to `MAIL`, `RCPT` or `DATA`) **[v0.3.0]** | No, not unchanged |
 | `502` | `upstream-error` | Upstream relay failed transiently (unreachable, `4xx`, or a handshake / TLS / relay-login problem on Sigillum's side) | Yes, with backoff |
-| `503` | `backend-not-ready` | Backend missing, not Ready, or its config could not be resolved | Yes, with backoff |
+| `503` | `backend-not-ready` | Backend missing, not Ready, invalid, or its config could not be resolved | Yes, with backoff |
+| `503` | `policy-invalid` | The matching policy breaks the admission rules (created without the webhook or by an older version) **[v0.4.0]** | Yes, once the policy is fixed |
 | `503` | `unavailable` | Redis rate-limit store unreachable (fail closed), or the TokenReview failed (v0.3.0); `Retry-After: 5` | Yes |
 | `503` | `shutting-down` | Replica is draining | Yes, immediately |
 | `501` | `not-implemented` | Reserved for operations the backend's capabilities do not cover [future] | No |
@@ -1148,7 +1154,7 @@ One JSON object per line. Field names are a public contract; SIEM pipelines key 
 | `decision` | string | `accept` or `reject` |
 | `reason` | string | Rejection reason (omitted on accept), see below |
 
-Rejection reasons: `missing_token`, `invalid_token`, `invalid_credentials`, `auth_rate_limited`, `auth_unavailable`, `auth_required`, `pod_ip_unresolved`, `shutting_down`, `busy`, `null_sender`, `invalid_payload`, `message_too_large`, `no_policy_matched`, `sender_not_allowed`, `recipient_not_allowed`, `too_many_recipients`, `backend_not_ready`, `rate_limited`, `ratelimit_unavailable`, `upstream_error`, `upstream_rejected`. (`upstream_rejected` replaces `upstream_error` for permanent rejections since v0.3.0, on both transports.)
+Rejection reasons: `missing_token`, `invalid_token`, `invalid_credentials`, `auth_rate_limited`, `auth_unavailable`, `auth_required`, `pod_ip_unresolved`, `shutting_down`, `busy`, `null_sender`, `invalid_payload`, `message_too_large`, `no_policy_matched`, `sender_not_allowed`, `recipient_not_allowed`, `too_many_recipients`, `backend_not_ready`, `policy_invalid`, `rate_limited`, `ratelimit_unavailable`, `upstream_error`, `upstream_rejected`. (`upstream_rejected` replaces `upstream_error` for permanent rejections since v0.3.0, on both transports.)
 
 The record never contains subject, body, attachment content, header values other than addresses, tokens or passwords.
 

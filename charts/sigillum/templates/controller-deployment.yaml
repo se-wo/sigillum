@@ -87,10 +87,11 @@ spec:
           {{- end }}
       {{- if .Values.webhook.enabled }}
       volumes:
+        # Not optional: while the Secret is missing the pod waits with a
+        # FailedMount event instead of crash-looping.
         - name: webhook-tls
           secret:
             secretName: {{ include "sigillum.webhook.secretName" . }}
-            optional: true
       {{- end }}
       {{- with .Values.controller.nodeSelector }}
       nodeSelector: {{- toYaml . | nindent 8 }}

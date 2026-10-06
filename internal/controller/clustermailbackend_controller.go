@@ -8,6 +8,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	"github.com/se-wo/sigillum/internal/webhook"
 )
 
 // ClusterMailBackendReconciler reconciles a cluster-scoped ClusterMailBackend.
@@ -25,7 +26,8 @@ func (r *ClusterMailBackendReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.Get(ctx, req.NamespacedName, &cmb); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	requeue := reconcileBackend(ctx, r.Client, "/"+req.Name, &cmb.Spec, &cmb.Status, cmb.Generation, "")
+	requeue := reconcileBackend(ctx, r.Client, "/"+req.Name, &cmb.Spec, &cmb.Status, cmb.Generation, "",
+		webhook.ValidateBackend(&cmb))
 	if err := r.Status().Update(ctx, &cmb); err != nil {
 		return ctrl.Result{}, err
 	}

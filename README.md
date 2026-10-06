@@ -39,6 +39,14 @@ helm install sigillum ./charts/sigillum \
   --set webhook.certificate.useCertManager=true
 ```
 
+Without cert-manager, add `--set webhook.enabled=false` instead: the
+controller and the gateway then apply the admission rules themselves (see
+[`examples/local-dev/`](examples/local-dev/)). To keep the webhook with your
+own certificate, create the Secret `sigillum-webhook-tls` (`tls.crt`,
+`tls.key`, and `ca.crt` or `--set webhook.certificate.caBundle=<base64 CA
+PEM>`) first. A webhook without a trusted certificate would block every
+Sigillum resource, so `helm install` refuses it.
+
 ## Quickstart
 
 Point Sigillum at an SMTP relay and authorize a workload to send mail through it.
