@@ -463,6 +463,9 @@ func TestRoutingRecipientsAreRefused(t *testing.T) {
 		"attacker%evil.example@x.example",
 		"evil.example!attacker@x.example",
 		`"attacker@evil.example"@x.example`,
+		"u@evïl.example",       // U-label of a blocked xn-- domain
+		"u@ｃompetitor.example", // fullwidth c maps to c
+		"u@[192.0.2.1]",        // domain literal
 	} {
 		sender := &stubSender{}
 		c := authed(t, startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{}}))

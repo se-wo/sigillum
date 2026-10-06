@@ -35,10 +35,17 @@ func ValidatePlainAddress(s string) error {
 // The local part must be a dot-atom made of RFC 5322 atext without '%' and
 // '!'. Non-ASCII bytes (SMTPUTF8 local parts) carry no routing semantics and
 // are accepted.
+//
+// The domain must be an ASCII host name (ValidateDomain): recipient
+// restrictions compare it as a string, while an MTA routes the DNS name a
+// Unicode spelling maps to, or the IP of a domain literal.
 func ValidateMailbox(addr string) error {
 	at := strings.LastIndexByte(addr, '@')
 	if at <= 0 || at == len(addr)-1 {
 		return fmt.Errorf("%q is not a plain mailbox address", addr)
+	}
+	if err := ValidateDomain(addr[at+1:]); err != nil {
+		return fmt.Errorf("%q: %w", addr, err)
 	}
 	local := addr[:at]
 	if strings.HasPrefix(local, ".") || strings.HasSuffix(local, ".") || strings.Contains(local, "..") {
@@ -47,6 +54,35 @@ func ValidateMailbox(addr string) error {
 	for i := 0; i < len(local); i++ {
 		if !localPartByte(local[i]) {
 			return fmt.Errorf("%q: character %q is not allowed in the local part", addr, local[i])
+		}
+	}
+	return nil
+}
+
+// ValidateDomain accepts an ASCII host name: dot-separated labels of
+// letters, digits and '-', not starting or ending with '-', at most 63
+// bytes each. An internationalized domain is accepted in its A-label form
+// (xn--...). Refused are U-labels and other Unicode spellings, which IDNA
+// maps onto a different ASCII name than the one policies compare ("evïl"
+// is xn--evl-yla; a fullwidth "ｃ" or the ideographic full stop map to "c"
+// and "."), invisible characters, and domain literals ("[10.0.0.1]"), which
+// route to an address without any domain to check.
+func ValidateDomain(d string) error {
+	if len(d) == 0 || len(d) > 253 {
+		return errors.New("domain must be 1 to 253 characters")
+	}
+	for _, label := range strings.Split(d, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return fmt.Errorf("domain %q: labels must be 1 to 63 characters", d)
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return fmt.Errorf("domain %q: labels must not start or end with '-'", d)
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-') {
+				return fmt.Errorf("domain %q must be an ASCII host name; write an internationalized domain in its xn-- form", d)
+			}
 		}
 	}
 	return nil

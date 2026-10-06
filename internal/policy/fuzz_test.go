@@ -21,6 +21,8 @@ func FuzzValidatePlainAddress(f *testing.F) {
 		"a@contoso.com (comment)",
 		"<a@contoso.com>",
 		"a@[127.0.0.1]",
+		"u@evïl.example",
+		"u@ｃompetitor.example",
 		"",
 	} {
 		f.Add(s)
@@ -38,6 +40,13 @@ func FuzzValidatePlainAddress(f *testing.F) {
 		local := s[:strings.LastIndexByte(s, '@')]
 		if strings.ContainsAny(local, "%!@\"\\ <>()") {
 			t.Fatalf("ValidatePlainAddress(%q) accepted a local part with routing syntax", s)
+		}
+		// The domain is compared as a string against blockedDomains, so it
+		// must be the ASCII name an MTA routes, not a spelling of one.
+		for _, c := range []byte(s[strings.LastIndexByte(s, '@')+1:]) {
+			if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-' || c == '.') {
+				t.Fatalf("ValidatePlainAddress(%q) accepted a domain that is not an ASCII host name", s)
+			}
 		}
 	})
 }
