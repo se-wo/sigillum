@@ -36,6 +36,7 @@ import (
 	"github.com/se-wo/sigillum/internal/kubecache"
 	"github.com/se-wo/sigillum/internal/policy/ratelimit"
 	"github.com/se-wo/sigillum/internal/telemetry"
+	"github.com/se-wo/sigillum/internal/tlsreload"
 
 	// pull in the SMTP driver so the registry has it at startup
 	_ "github.com/se-wo/sigillum/internal/driver/graph"
@@ -207,6 +208,13 @@ func init() {
 			WriteTimeout:      writeTimeout,
 			IdleTimeout:       120 * time.Second,
 		}
+		// The certificate is re-read when its files change, so a renewed
+		// Secret takes effect without a restart (#75).
+		tlsCfg, err := tlsreload.FromEnv(ctx, logger)
+		if err != nil {
+			return err
+		}
+		mainSrv.TLSConfig = tlsCfg
 		metricsSrv := &http.Server{
 			Addr:              metricsAddr,
 			Handler:           metricsHandler(),
@@ -215,7 +223,7 @@ func init() {
 
 		errCh := make(chan error, 2)
 		go func() {
-			logger.Info("api-server listening", "addr", addr)
+			logger.Info("api-server listening", "addr", addr, "tls", tlsCfg != nil)
 			err := serve(mainSrv)
 			if err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errCh <- err
@@ -350,10 +358,8 @@ func bearerToken(h string) string {
 
 // serve dispatches between TLS and plaintext based on env config.
 func serve(s *http.Server) error {
-	cert := os.Getenv("SIGILLUM_TLS_CERT")
-	key := os.Getenv("SIGILLUM_TLS_KEY")
-	if cert != "" && key != "" {
-		return s.ListenAndServeTLS(cert, key)
+	if s.TLSConfig != nil {
+		return s.ListenAndServeTLS("", "")
 	}
 	return s.ListenAndServe()
 }

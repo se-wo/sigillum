@@ -114,6 +114,12 @@ the version being prepared in the same pull request as the change.
   timeout left the client with an empty reply, and a client that retried
   sent it twice (Graph backends too). A send still running at the deadline
   answers `502 upstream-error` (#61).
+- The api-server and the SMTP proxy now pick up a renewed TLS certificate
+  (`api.tls.secretName`, `smtp.tls.secretName`) within about a minute,
+  without a restart. Before, they read it once at startup and kept
+  serving the old certificate until it expired, so every certificate
+  renewal (cert-manager renews after 60 of 90 days by default) ended in
+  failed TLS handshakes unless the pods had been restarted (#75).
 - Without the admission webhook (`webhook.enabled: false`, as in the
   local-dev profile), a `MailPolicy`, `MailBackend` or `ClusterMailBackend`
   that the webhook would reject was admitted, shown as Ready and enforced

@@ -35,6 +35,7 @@ import (
 	"github.com/se-wo/sigillum/internal/kubecache"
 	"github.com/se-wo/sigillum/internal/policy/ratelimit"
 	"github.com/se-wo/sigillum/internal/telemetry"
+	"github.com/se-wo/sigillum/internal/tlsreload"
 
 	// pull in the SMTP driver so the registry has it at startup
 	_ "github.com/se-wo/sigillum/internal/driver/graph"
@@ -273,13 +274,11 @@ func Run(logger *slog.Logger) error {
 		}
 	}()
 
-	var tlsCfg *tls.Config
-	if cert, key := os.Getenv("SIGILLUM_TLS_CERT"), os.Getenv("SIGILLUM_TLS_KEY"); cert != "" && key != "" {
-		pair, err := tls.LoadX509KeyPair(cert, key)
-		if err != nil {
-			return fmt.Errorf("load STARTTLS certificate: %w", err)
-		}
-		tlsCfg = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
+	// Re-read when its files change, so a renewed Secret takes effect
+	// without a restart (#75).
+	tlsCfg, err := tlsreload.FromEnv(ctx, logger)
+	if err != nil {
+		return fmt.Errorf("load STARTTLS certificate: %w", err)
 	}
 	if o.has(ModeCredential) && tlsCfg == nil && !o.AllowInsecureCredentialAuth {
 		logger.Warn("auth mode credential is enabled without a STARTTLS certificate: AUTH PLAIN/LOGIN will not be offered " +

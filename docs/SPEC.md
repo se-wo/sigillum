@@ -921,7 +921,7 @@ Controller behavior in generated mode:
 **Base path:** `/v1`
 **Content type:** `application/json`, or `multipart/form-data` for attachments (US-1.3)
 **Auth:** `Authorization: Bearer <ServiceAccount token>` with audience `sigillum`
-**Transport:** plain HTTP on port 8443 by default, expecting TLS from the mesh or a gateway. Native TLS when `SIGILLUM_TLS_CERT` / `SIGILLUM_TLS_KEY` are set (chart `api.tls.secretName`).
+**Transport:** plain HTTP on port 8443 by default, expecting TLS from the mesh or a gateway. Native TLS when `SIGILLUM_TLS_CERT` / `SIGILLUM_TLS_KEY` are set (chart `api.tls.secretName`). **[v0.4.0]** The files are checked every 10 s and a renewed certificate is used for new connections without a restart (the kubelet updates a mounted Secret within about a minute); a pair that does not load keeps the previous one in use and logs a warning. The same applies to the SMTP proxy's certificate (`smtp.tls.secretName`).
 
 #### 4.4.1 POST /v1/messages **[v0.1.0]**
 
