@@ -38,6 +38,9 @@ the version being prepared in the same pull request as the change.
 
 ### Added
 
+- `sigillum_smtp_messages_in_flight{namespace}` metric and the
+  `smtp.maxConcurrentPerTenant` setting (see Fixed, #73).
+- `sigillum_upstream_auth_failures_total{backend}` metric (see Fixed, #58).
 - `spec.smtp.caSecretRef` on `MailBackend` and `ClusterMailBackend`: PEM
   CA certificates (key `ca.crt` by default) trusted in addition to the
   system roots, for relays with a certificate from a private CA. Before,
@@ -109,6 +112,45 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- The controller stopped its validating webhook server immediately on
+  SIGTERM while the pod was still in the webhook Service endpoints, so with
+  one replica and `failurePolicy: Fail` every admission request during a
+  rollout (`helm upgrade`, `rollout restart`, a GitOps sync that applies
+  CRs while the controller rolls) failed for the API server's webhook
+  timeout. The controller now fails readiness and keeps the webhook
+  serving for `controller.shutdownDelay` before shutting down, as the
+  api-server and SMTP proxy already do. Webhooks set `timeoutSeconds`
+  (`webhook.timeoutSeconds`, default 10); run `controller.replicas: 2`
+  with the webhook enabled for a second backend during rollouts (#74).
+- One tenant's slow or hung relay could hold every SMTP relay slot
+  (`smtp.maxConcurrentMessages`, shared across tenants) and stall every
+  other tenant. A per-tenant cap (`smtp.maxConcurrentPerTenant`, default
+  half the global cap) now bounds the messages one namespace relays at
+  once, acquired before the global slot so a tenant at its cap holds no
+  global slot others need. The new `sigillum_smtp_messages_in_flight`
+  gauge reports it per namespace (#73).
+- The backend health probe never checked authentication, so a relay that
+  does not offer the configured SASL mechanism (for example `CRAM-MD5`
+  against a relay that only offers `PLAIN`/`LOGIN`) showed `Ready=True`
+  while every send failed. The probe now checks the relay advertises the
+  configured `authType` in its `EHLO` `AUTH` list and reports
+  `Ready=False` otherwise. It does not authenticate (a wrong password
+  would otherwise risk locking the account out every probe interval); a
+  wrong or rotated password now increments the new
+  `sigillum_upstream_auth_failures_total` counter when sends fail (#58).
+- A relay that caps the recipients of one transaction (`452 4.5.3 Too many
+  recipients`: Exchange Online, Amazon SES, Postfix `smtpd_recipient_limit`)
+  was treated as a transient error, so the message was retried forever and
+  never delivered. It is now permanent: REST `422 upstream-rejected`, SMTP
+  `554`, so the caller stops and sees the cause. Splitting the recipients
+  into several transactions is left to the sender (#62).
+- A namespace in `rbac.allowedSecretNamespaces` that does not exist (an
+  offboarded team's namespace, or one listed before it is created) no longer
+  fails `helm install`/`upgrade` with `namespaces "x" not found`. The
+  per-namespace Secret-reader Role is skipped while the namespace is absent
+  and created once it exists and the chart is upgraded; NOTES lists the
+  skipped ones. `helm template` (no cluster connection) still renders every
+  entry (#77).
 - A relay endpoint that accepts connections but never answers no longer
   blocks failover. `connectionTimeoutSeconds` now bounds the dial and the
   handshake (banner, `EHLO`, `STARTTLS`, `AUTH`) of each endpoint, as its

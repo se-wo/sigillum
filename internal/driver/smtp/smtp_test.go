@@ -97,6 +97,9 @@ func (f *fakeSMTP) serve(c net.Conn) {
 			case strings.HasPrefix(rcpt, "busy@"):
 				w("451 4.3.0 try later")
 				continue
+			case strings.HasPrefix(rcpt, "toomany@"):
+				w("452 4.5.3 Too many recipients")
+				continue
 			}
 			env.to = append(env.to, rcpt)
 			w("250 OK")
@@ -333,6 +336,26 @@ func TestSMTPDriver_UpstreamReplyClassification(t *testing.T) {
 	if !errors.Is(err, driver.ErrUpstreamTransient) {
 		t.Fatalf("4xx must be transient, got %v", err)
 	}
+	// 452 4.5.3 (too many recipients) is permanent for this message: the
+	// same recipients fail the same way on every retry (#62).
+	_, err = d.(driver.RawSender).SendRaw(context.Background(), "a@x.example", []string{"toomany@x.example"}, raw)
+	if !errors.Is(err, driver.ErrUpstreamPermanent) {
+		t.Fatalf("452 4.5.3 must be permanent, got %v", err)
+	}
+}
+
+func TestIsTooManyRecipients(t *testing.T) {
+	for msg, want := range map[string]bool{
+		"4.5.3 Too many recipients": true,
+		"Too many recipients":       true,
+		"too many recipient":        true,
+		"4.2.2 Mailbox full":        false,
+		"4.3.0 try later":           false,
+	} {
+		if got := isTooManyRecipients(msg); got != want {
+			t.Errorf("isTooManyRecipients(%q) = %v, want %v", msg, got, want)
+		}
+	}
 }
 
 // rejectingServer greets with a 5xx, as a misconfigured or hostile relay would.
@@ -521,5 +544,95 @@ func TestSMTPDriver_CancelUnblocksSend(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("cancellation must stop the send, took %v", elapsed)
+	}
+}
+
+// authAdvertisingServer greets and, on EHLO, advertises the given AUTH
+// mechanisms (empty = no AUTH line). Plaintext, for probe tests.
+func authAdvertisingServer(t *testing.T, mechs string) int32 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				w := func(s string) { _, _ = c.Write([]byte(s + "\r\n")) }
+				w("220 fake ESMTP")
+				for {
+					line, err := br.ReadString('\n')
+					if err != nil {
+						return
+					}
+					switch up := strings.ToUpper(strings.TrimSpace(line)); {
+					case strings.HasPrefix(up, "EHLO"), strings.HasPrefix(up, "HELO"):
+						if mechs != "" {
+							w("250-fake")
+							w("250 AUTH " + mechs)
+						} else {
+							w("250 fake")
+						}
+					case up == "QUIT":
+						w("221 bye")
+						return
+					default:
+						w("250 OK")
+					}
+				}
+			}(c)
+		}
+	}()
+	return int32(ln.Addr().(*net.TCPAddr).Port)
+}
+
+// #58: the probe is not Ready when the relay does not advertise the
+// configured SASL mechanism, and Ready when it does.
+func TestSMTPDriver_ProbeChecksAuthMechanism(t *testing.T) {
+	newD := func(port int32, auth string) driver.Driver {
+		d, err := driver.New(driver.Config{Type: driver.TypeSMTP, SMTP: &driver.SMTPConfig{
+			Endpoints: []driver.SMTPEndpoint{{Host: "127.0.0.1", Port: port, TLS: "none"}},
+			AuthType:  auth, Timeout: 3,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	// CRAM-MD5 configured, relay offers only PLAIN LOGIN -> not Ready.
+	h := newD(authAdvertisingServer(t, "PLAIN LOGIN"), "CRAM-MD5").HealthCheck(context.Background())
+	if h[0].Ready || !strings.Contains(h[0].Message, "does not offer AUTH CRAM-MD5") {
+		t.Fatalf("want not Ready naming the missing mechanism, got %+v", h[0])
+	}
+	// PLAIN configured and offered -> Ready.
+	if h := newD(authAdvertisingServer(t, "PLAIN LOGIN"), "PLAIN").HealthCheck(context.Background()); !h[0].Ready {
+		t.Fatalf("want Ready when PLAIN is offered, got %+v", h[0])
+	}
+	// Relay advertises no AUTH at all, auth required -> not Ready.
+	if h := newD(authAdvertisingServer(t, ""), "PLAIN").HealthCheck(context.Background()); h[0].Ready {
+		t.Fatalf("want not Ready when the relay offers no AUTH, got %+v", h[0])
+	}
+	// authType NONE never checks AUTH -> Ready.
+	if h := newD(authAdvertisingServer(t, ""), "NONE").HealthCheck(context.Background()); !h[0].Ready {
+		t.Fatalf("want Ready for authType NONE, got %+v", h[0])
+	}
+}
+
+func TestAuthMechOffered(t *testing.T) {
+	if !authMechOffered("PLAIN LOGIN CRAM-MD5", "cram-md5") {
+		t.Fatal("case-insensitive match expected")
+	}
+	if authMechOffered("PLAIN LOGIN", "CRAM-MD5") {
+		t.Fatal("CRAM-MD5 is not in the list")
+	}
+	if authMechOffered("", "PLAIN") {
+		t.Fatal("empty list offers nothing")
 	}
 }

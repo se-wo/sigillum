@@ -410,3 +410,45 @@ func TestChartRejectsInvalidCredentialValues(t *testing.T) {
 		}
 	}
 }
+
+// #77: a helm template render (no cluster connection) still creates a
+// Secret-reader Role in every listed namespace, so GitOps renders are
+// unchanged. The cluster-connected skip of a missing namespace needs a
+// live API server and is covered by the manual kind validation.
+func TestChartSecretNamespacesRenderedWithoutCluster(t *testing.T) {
+	objs := render(t, "--set", "smtp.enabled=true", "--set", "rbac.allowedSecretNamespaces={team-a,team-b}")
+	for _, comp := range []string{"t-sigillum-api", "t-sigillum-controller", "t-sigillum-smtp"} {
+		for _, ns := range []string{"team-a", "team-b"} {
+			name := comp + "-secret-reader"
+			found := false
+			for i := range objs {
+				if objs[i].GetKind() == "Role" && objs[i].GetName() == name && objs[i].GetNamespace() == ns {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("Role %s in namespace %s not rendered offline", name, ns)
+			}
+		}
+	}
+}
+
+// #74: the controller drains on SIGTERM (--shutdown-delay) and every
+// webhook has a bounded timeout, so a controller rollout does not fail
+// admission requests for the API server's full default timeout.
+func TestChartControllerDrainAndWebhookTimeout(t *testing.T) {
+	objs := render(t)
+	if a := args(t, objs, "t-sigillum-controller"); a["shutdown-delay"] == "" {
+		t.Fatal("controller must pass --shutdown-delay")
+	}
+	var vwc admv1.ValidatingWebhookConfiguration
+	into(t, find(objs, "ValidatingWebhookConfiguration", ""), &vwc)
+	if len(vwc.Webhooks) == 0 {
+		t.Fatal("no webhooks rendered")
+	}
+	for _, w := range vwc.Webhooks {
+		if w.TimeoutSeconds == nil || *w.TimeoutSeconds != 10 {
+			t.Fatalf("webhook %s: want timeoutSeconds 10, got %v", w.Name, w.TimeoutSeconds)
+		}
+	}
+}

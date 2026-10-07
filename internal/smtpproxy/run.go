@@ -67,6 +67,7 @@ type Options struct {
 	AuthTimeout                 time.Duration
 	SendTimeout                 time.Duration
 	MaxConcurrent               int
+	MaxConcurrentPerTenant      int
 	ShutdownTimeout             time.Duration
 	ShutdownDelay               time.Duration
 	TokenAudience               string
@@ -100,6 +101,7 @@ func ParseFlags(args []string) (*Options, error) {
 	fs.DurationVar(&o.AuthTimeout, "auth-timeout", 10*time.Second, "timeout for TokenReview and pod lookups")
 	fs.DurationVar(&o.SendTimeout, "send-timeout", 60*time.Second, "timeout for relaying one message (rate limiter and upstream)")
 	fs.IntVar(&o.MaxConcurrent, "max-concurrent-messages", 4, "messages buffered and relayed at once; each may hold up to --max-message-bytes in memory (0 = unlimited)")
+	fs.IntVar(&o.MaxConcurrentPerTenant, "max-concurrent-per-tenant", 0, "messages one tenant (namespace) relays at once, so one slow relay cannot take every slot; 0 = derive from --max-concurrent-messages (half, at least 1); applies only when --max-concurrent-messages > 0")
 	fs.DurationVar(&o.ShutdownTimeout, "shutdown-timeout", 25*time.Second, "graceful shutdown deadline")
 	fs.DurationVar(&o.ShutdownDelay, "shutdown-delay", 5*time.Second, "after SIGTERM, keep accepting connections with readiness failing for this long before draining (a preStop delay)")
 	fs.StringVar(&o.TokenAudience, "token-audience", "sigillum", "expected audience in projected ServiceAccount tokens")
@@ -206,6 +208,14 @@ func Run(logger *slog.Logger) error {
 	backend := &Backend{Logger: logger, AuthTimeout: o.AuthTimeout, SendTimeout: o.SendTimeout}
 	if o.MaxConcurrent > 0 {
 		backend.Slots = make(chan struct{}, o.MaxConcurrent)
+		perTenant := o.MaxConcurrentPerTenant
+		if perTenant <= 0 {
+			perTenant = (o.MaxConcurrent + 1) / 2
+		}
+		if perTenant > o.MaxConcurrent {
+			perTenant = o.MaxConcurrent
+		}
+		backend.Tenants = newTenantLimiter(perTenant)
 	}
 	if o.has(ModeOAuthBearer) {
 		clientset, err := kubernetes.NewForConfig(cfg)

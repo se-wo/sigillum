@@ -28,7 +28,7 @@ spec:
     spec:
       serviceAccountName: {{ include "sigillum.controller.fullname" . }}
       automountServiceAccountToken: true
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: {{ .Values.controller.terminationGracePeriodSeconds | default 30 }}
       securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: sigillum
@@ -41,6 +41,7 @@ spec:
             - --webhook-port={{ .Values.controller.webhookPort }}
             - --leader-elect={{ .Values.controller.leaderElect }}
             - --webhook-cert-dir=/etc/sigillum/webhook-tls
+            - --shutdown-delay={{ .Values.controller.shutdownDelay | default "5s" }}
             {{- if not .Values.webhook.enabled }}
             - --disable-webhook=true
             {{- end }}

@@ -206,3 +206,16 @@ explicit smtp.allowInsecureAuth: true (null, the default, does not count).
 {{- define "sigillum.smtp.allowInsecureCredentialAuth" -}}
 {{- and (kindIs "bool" .Values.smtp.allowInsecureAuth) .Values.smtp.allowInsecureAuth -}}
 {{- end }}
+
+{{/*
+Renders "true" when a Secret-reader Role should be created for namespace .:
+when the namespace exists, or when there is no cluster connection (helm
+template, client-side dry run) so GitOps renders keep every entry. A missing
+namespace is skipped rather than failing helm install/upgrade (#77). The
+empty-name Namespace lookup is the connection probe: empty without a cluster.
+*/}}
+{{- define "sigillum.secretNamespacePresent" -}}
+{{- if or (not (lookup "v1" "Namespace" "" "")) (lookup "v1" "Namespace" "" .) -}}
+true
+{{- end -}}
+{{- end -}}

@@ -44,6 +44,7 @@ subjects:
     name: {{ include "sigillum.smtp.fullname" . }}
     namespace: {{ .Release.Namespace }}
 {{- range (prepend .Values.rbac.allowedSecretNamespaces $.Release.Namespace) }}
+{{- if include "sigillum.secretNamespacePresent" . }}
 ---
 # Backend credentials: same namespace scoping as the api-server.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -71,5 +72,6 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "sigillum.smtp.fullname" $ }}
     namespace: {{ $.Release.Namespace }}
+{{- end }}
 {{- end }}
 {{- end }}

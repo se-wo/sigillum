@@ -53,6 +53,7 @@ webhooks:
     admissionReviewVersions: [v1]
     sideEffects: {{ .Values.webhook.sideEffects }}
     failurePolicy: {{ .Values.webhook.failurePolicy }}
+    timeoutSeconds: {{ .Values.webhook.timeoutSeconds | default 10 }}
     clientConfig:
       {{- with $caBundle }}
       caBundle: {{ . }}
@@ -72,6 +73,7 @@ webhooks:
     admissionReviewVersions: [v1]
     sideEffects: {{ .Values.webhook.sideEffects }}
     failurePolicy: {{ .Values.webhook.failurePolicy }}
+    timeoutSeconds: {{ .Values.webhook.timeoutSeconds | default 10 }}
     clientConfig:
       {{- with $caBundle }}
       caBundle: {{ . }}
@@ -91,6 +93,7 @@ webhooks:
     admissionReviewVersions: [v1]
     sideEffects: {{ .Values.webhook.sideEffects }}
     failurePolicy: {{ .Values.webhook.failurePolicy }}
+    timeoutSeconds: {{ .Values.webhook.timeoutSeconds | default 10 }}
     clientConfig:
       {{- with $caBundle }}
       caBundle: {{ . }}
@@ -110,6 +113,7 @@ webhooks:
     admissionReviewVersions: [v1]
     sideEffects: {{ .Values.webhook.sideEffects }}
     failurePolicy: {{ .Values.webhook.failurePolicy }}
+    timeoutSeconds: {{ .Values.webhook.timeoutSeconds | default 10 }}
     clientConfig:
       {{- with $caBundle }}
       caBundle: {{ . }}

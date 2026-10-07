@@ -11,10 +11,12 @@ import (
 	"net/smtp"
 	"net/textproto"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/se-wo/sigillum/internal/driver"
+	"github.com/se-wo/sigillum/internal/telemetry"
 )
 
 const driverHelo = "sigillum"
@@ -103,7 +105,30 @@ func (d *Driver) probeEndpoint(ctx context.Context, ep driver.SMTPEndpoint) driv
 			return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: false, Message: err.Error()}
 		}
 	}
+	// The relay must offer the configured SASL mechanism, or every send
+	// fails the AUTH it never advertised. Checked without authenticating,
+	// so the probe cannot lock the account out (#58). Wrong or rotated
+	// passwords still pass here; they show up in
+	// sigillum_upstream_auth_failures_total when sends fail.
+	if at := d.cfg.SMTP.AuthType; at != "" && at != "NONE" {
+		offered, mechs := c.Extension("AUTH")
+		if !offered || !authMechOffered(mechs, at) {
+			return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: false,
+				Message: fmt.Sprintf("relay does not offer AUTH %s (offers %q)", at, mechs)}
+		}
+	}
 	return driver.EndpointHealth{Host: ep.Host, Port: ep.Port, Ready: true}
+}
+
+// authMechOffered reports whether the configured mechanism appears in the
+// relay's space-separated EHLO AUTH list, case-insensitively.
+func authMechOffered(advertised, mechanism string) bool {
+	for _, m := range strings.Fields(advertised) {
+		if strings.EqualFold(m, mechanism) {
+			return true
+		}
+	}
+	return false
 }
 
 // Send writes msg to the first endpoint that accepts the handshake. If every
@@ -216,6 +241,7 @@ func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, from strin
 		}
 		if auth != nil {
 			if err := c.Auth(auth); err != nil {
+				telemetry.UpstreamAuthFailuresTotal.WithLabelValues(d.cfg.BackendKey).Inc()
 				return err
 			}
 		}
@@ -345,6 +371,13 @@ func (a loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 // STARTTLS or AUTH (e.g. rotated relay credentials, "530 must issue
 // STARTTLS") is Sigillum's configuration problem: callers must queue and
 // retry rather than bounce while an operator fixes the backend.
+//
+// The one 4xx that is permanent for this message is "452 4.5.3 Too many
+// recipients": the relay caps the recipients of one transaction (Exchange
+// Online, SES, Postfix smtpd_recipient_limit), so the same message fails
+// the same way on every retry. It is classified permanent so the caller
+// stops retrying and sees the cause, instead of queueing forever. Splitting
+// the recipients into several transactions is left to the sender.
 func isTransient(err error) bool {
 	var de deliveryError
 	if !errors.As(err, &de) {
@@ -352,7 +385,18 @@ func isTransient(err error) bool {
 	}
 	var te *textproto.Error
 	if errors.As(err, &te) {
+		if te.Code == 452 && isTooManyRecipients(te.Msg) {
+			return false
+		}
 		return te.Code < 500
 	}
 	return true
+}
+
+// isTooManyRecipients reports whether a 452 reply is the "too many
+// recipients" signal: enhanced status code 4.5.3 (RFC 3463), or that text
+// for relays that omit the enhanced code.
+func isTooManyRecipients(msg string) bool {
+	m := strings.TrimSpace(msg)
+	return strings.HasPrefix(m, "4.5.3") || strings.Contains(strings.ToLower(m), "too many recipient")
 }

@@ -157,7 +157,9 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - `endpoints` is an ordered failover list; sends use the first Ready endpoint. **[v0.4.0]** Endpoints the last probe found unready are tried last, and `connectionTimeoutSeconds` bounds the dial and the handshake (banner, `EHLO`, `STARTTLS`, `AUTH`) of each endpoint, so a relay that accepts connections and never answers costs one connection timeout before the next endpoint is tried, not the whole send budget. Once `MAIL FROM` is sent, a failure does not fail over (the relay may already have the message).
 - The validating webhook checks the spec **statically**: it rejects types without a registered driver, missing `smtp` block, empty endpoints, `insecureSkipVerify: true`, a missing `credentialsRef` when auth is required, a missing `credentialsRef.namespace` (or `caSecretRef.namespace`) on `ClusterMailBackend`, and a cross-namespace `credentialsRef` (or `caSecretRef`) on `MailBackend`.
 - The webhook does **not** probe reachability. Network calls during admission are slow, flaky, and break GitOps apply ordering (a backend could not be applied before its relay exists). Reachability is the controller's job and shows up in status.
+- **[v0.4.0]** On SIGTERM the controller fails readiness and keeps its webhook server answering for `controller.shutdownDelay` before shutting down, so the pod leaves the webhook Service endpoints before it stops; otherwise, with one replica and `failurePolicy: Fail`, admission requests during a rollout fail for the API server's webhook timeout. Each webhook sets `timeoutSeconds` (chart `webhook.timeoutSeconds`, default 10); run `controller.replicas: 2` with `webhook.enabled` so a second backend serves during a rollout.
 - The status subresource reflects: `Ready` condition (True if at least one endpoint is Ready), `capabilities` (declared by the driver), `endpointStatus` per endpoint, `lastProbeTime`, `observedGeneration`.
+- **[v0.4.0]** When `authType` is not `NONE`, the probe also checks that the relay advertises that SASL mechanism in its `EHLO` `AUTH` list (after `STARTTLS` where configured); if it does not, the endpoint is `Ready=False` with "relay does not offer AUTH `<mechanism>`". It does **not** authenticate, so it cannot lock the account out on a wrong password; a wrong or rotated password still passes the probe and surfaces as sends failing `535`, counted in `sigillum_upstream_auth_failures_total{backend}`.
 
 #### US-2.2 — Rate limiting **[v0.1.0 memory, v0.2.0 Redis]**
 **As a** platform engineer **I want** to cap how much mail a workload can send, **so that** one broken workload cannot disrupt mail for everyone.
@@ -367,6 +369,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
   | `sigillum_ratelimit_rejected_total` | Counter | `namespace`, `policy` | `429` / `421` rejections |
   | `sigillum_policy_denied_total` | Counter | `namespace`, `policy`, `reason` | Policy denials, plus `reason="backend_not_ready"` and `reason="policy_invalid"` |
   | `sigillum_auth_failures_total` **[v0.3.0]** | Counter | `transport`, `auth_method`, `reason` (`invalid_token`, `invalid_credentials`, `auth_rate_limited`, `auth_unavailable`) | Failed authentication attempts |
+  | `sigillum_upstream_auth_failures_total` **[v0.4.0]** | Counter | `backend` | Failures to authenticate to an upstream relay (wrong / rotated password, unsupported mechanism) |
   | `sigillum_credential_guard_ok` **[v0.3.0]** | Gauge (controller) | — | 1 while the credential Secret guard is verified (§4.10), 0 while the controller refuses to write credential Secrets |
   | `sigillum_backend_authorized` **[v0.4.0]** | Gauge (controller) | `backend` | 1 while a delegated backend (US-6.3) holds a working refresh token, 0 while it needs a new sign-in |
 
@@ -1015,7 +1018,7 @@ The problem `type` is `https://sigillum.dev/errors/<slug>`. The audit / metric `
 | `403` | `too-many-recipients` | Over `maxRecipients` | No |
 | `413` | `message-too-large` | Over `maxSizeBytes` or the 32 MiB ceiling | No |
 | `429` | `rate-limited` | US-2.2; `Retry-After` header | Yes, after `Retry-After` |
-| `422` | `upstream-rejected` | The relay permanently rejected this message (`5xx` to `MAIL`, `RCPT` or `DATA`) **[v0.3.0]** | No, not unchanged |
+| `422` | `upstream-rejected` | The relay permanently rejected this message (`5xx` to `MAIL`, `RCPT` or `DATA`), or capped the recipients of one transaction (`452 4.5.3`, **[v0.4.0]**) | No, not unchanged |
 | `502` | `upstream-error` | Upstream relay failed transiently (unreachable, `4xx`, or a handshake / TLS / relay-login problem on Sigillum's side), or the send did not finish within the request budget (50 s, below the server's 60 s write timeout, so the client always gets an answer) | Yes, with backoff; after a timeout the relay may already have the message |
 | `503` | `backend-not-ready` | Backend missing, not Ready, invalid, or its config could not be resolved | Yes, with backoff |
 | `503` | `policy-invalid` | The matching policy breaks the admission rules (created without the webhook or by an older version) **[v0.4.0]** | Yes, once the policy is fixed |
@@ -1102,7 +1105,7 @@ Drivers register a factory per type in a process-wide registry. The webhook reje
 - **Message rules** (checked at the end of `DATA`): exactly one `From` field holding exactly one address; at most one `Sender` field (holding exactly one address) and at most one `Reply-To` field; no `Resent-*` fields; display names per US-2.3. Violations answer `550 5.6.0`.
 - **Policy input:** header `From`, envelope sender and `Sender` against `allowedSenders`; the envelope recipients (`RCPT TO`, not the `To`/`Cc` headers) and `Reply-To` against `recipientRestrictions`.
 - **Relay:** the message is relayed byte-for-byte via the driver's `RawSender`, with a prepended `Received` header carrying the Sigillum message ID and the protocol per RFC 3848 (`ESMTP`, `ESMTPA` when authenticated, `ESMTPS`/`ESMTPSA` over STARTTLS). `Bcc:` header fields are removed before relaying.
-- **Limits:** `--max-message-bytes` (default 32 MiB) and `--max-recipients` (default 100) are hard ceilings; policies enforce lower limits. `--max-concurrent-messages` (default 4) bounds memory use per pod; excess messages wait up to `--send-timeout` and then get `451 4.3.2`.
+- **Limits:** `--max-message-bytes` (default 32 MiB) and `--max-recipients` (default 100) are hard ceilings; policies enforce lower limits. `--max-concurrent-messages` (default 4) bounds memory use per pod; excess messages wait up to `--send-timeout` and then get `451 4.3.2`. **[v0.4.0]** `--max-concurrent-per-tenant` (default: half of `--max-concurrent-messages`, at least 1) caps the messages one tenant (namespace) relays at once, acquired before the global slot, so one tenant's slow or hung relay cannot hold every slot and stall the others. Messages over a tenant's cap wait (holding no global slot) and then get `451 4.3.2`. `sigillum_smtp_messages_in_flight{namespace}` exposes the per-tenant count.
 - Pod lookup for `podip` uses an informer cache of pods.
 - Otherwise the same gateway pipeline as REST (§4.2).
 

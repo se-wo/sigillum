@@ -109,6 +109,12 @@ smtp:
   #   (authModes credential; at most two run at once)
   # + about 64 MiB for the process and its informer caches.
   maxConcurrentMessages: 4
+  # Messages one tenant (namespace) relays at once, so one tenant's slow or
+  # hung relay cannot hold every slot and stall the others. 0 derives it
+  # from maxConcurrentMessages (half, at least 1). Messages over a tenant's
+  # cap wait up to sendTimeout, then get a retryable 451, without holding a
+  # global slot other tenants need.
+  maxConcurrentPerTenant: 0
   sendTimeout: 60s
   shutdownDelay: 5s
   shutdownTimeout: 25s
@@ -139,6 +145,16 @@ controller:
   probePort: 8081
   webhookPort: 9443
   leaderElect: true
+  # On SIGTERM the controller fails readiness and keeps the webhook server
+  # answering for shutdownDelay so the pod leaves the webhook Service
+  # endpoints before it stops; otherwise, with one replica and
+  # webhook.failurePolicy Fail, admission requests in that window fail.
+  # Keep shutdownDelay below terminationGracePeriodSeconds.
+  shutdownDelay: 5s
+  terminationGracePeriodSeconds: 30
+  # With webhook.enabled, run 2 replicas so a second webhook backend serves
+  # while one rolls (leader election still runs the reconcilers on one).
+  # The default is 1; raise it (and keep the PDB) for production.
   resources:
     requests:
       cpu: 50m
@@ -190,6 +206,9 @@ webhook:
   enabled: true
   failurePolicy: Fail
   sideEffects: None
+  # Bounds how long the API server waits for the webhook (1-30). A low value
+  # shortens the stall for clients if a webhook pod is briefly unreachable.
+  timeoutSeconds: 10
   certificate:
     # When useCertManager=true the chart creates an Issuer + Certificate that
     # writes into webhook.certificate.secretName.
@@ -274,5 +293,9 @@ rbac:
   # allowedSecretNamespaces lists namespaces outside the release namespace from
   # which the api-server and controller are permitted to read Secrets. Required
   # for ClusterMailBackend credentials that live in a different namespace.
-  # Each entry renders a Role + RoleBinding in that namespace.
+  # Each entry renders a Role + RoleBinding in that namespace. An entry whose
+  # namespace does not exist is skipped (the Role appears once it does and you
+  # upgrade), so onboarding a team before its namespace exists, or offboarding
+  # one, does not fail helm install/upgrade. helm template (no cluster) still
+  # renders every entry for GitOps.
   allowedSecretNamespaces: []
