@@ -5,10 +5,15 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -71,6 +76,7 @@ func init() {
 			credentialSMTPHost   string
 			credentialSMTPPort   int
 			skipCRDCheck         bool
+			shutdownDelay        time.Duration
 		)
 		fs := flag.NewFlagSet("controller", flag.ContinueOnError)
 		// --mode is consumed by the entrypoint; accept it here so Parse does
@@ -83,6 +89,7 @@ func init() {
 		fs.StringVar(&leaderElectionID, "leader-elect-id", "sigillum-controller.sigillum.dev", "leader election lock name")
 		fs.StringVar(&webhookCertDir, "webhook-cert-dir", "/etc/sigillum/webhook-tls", "directory holding webhook tls.crt and tls.key")
 		fs.BoolVar(&disableWebhook, "disable-webhook", false, "disable the validating webhook server")
+		fs.DurationVar(&shutdownDelay, "shutdown-delay", 5*time.Second, "on SIGTERM, fail readiness and keep the webhook server running for this long before shutting down, so the pod leaves the webhook Service endpoints first")
 		fs.StringVar(&clusterName, "cluster-name", "", "cluster name added to every log line (US-4.5)")
 		fs.StringVar(&secretNamespaces, "secret-namespaces", "", "comma-separated namespaces whose Secrets may be read (backend credentials); default: the pod's namespace")
 		fs.BoolVar(&credentialsGenerated, "credentials-generated", false, "issue generated MailCredential passwords into Secrets; needs the credential Secret guard, POD_NAMESPACE and the ServiceAccount name (the chart sets all of them)")
@@ -216,11 +223,61 @@ func init() {
 		if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
 			return err
 		}
+		// On SIGTERM the webhook server must keep answering while the pod is
+		// removed from the Service endpoints; otherwise, with one replica and
+		// failurePolicy Fail, every admission request in that window fails
+		// (#74). Readiness fails as soon as draining starts, and the manager
+		// (which stops the webhook server) is not shut down until a drain
+		// delay has passed.
+		var draining atomic.Bool
+		if err := mgr.AddReadyzCheck("drain", func(*http.Request) error {
+			if draining.Load() {
+				return errors.New("draining")
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
 		if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
 			return err
 		}
 		setupLog.Info("starting controller manager", "credentials_generated", credentialsGenerated,
 			"credential_exclude_namespaces", credentialExclude)
-		return mgr.Start(ctrl.SetupSignalHandler())
+		return mgr.Start(drainContext(shutdownDelay, func() {
+			draining.Store(true)
+			setupLog.Info("draining: failing readiness, keeping the webhook up", "delay", shutdownDelay.String())
+		}))
 	}
+}
+
+// drainContext returns a context cancelled a drain delay after the first
+// SIGINT/SIGTERM. onSignal runs immediately on that signal (to fail
+// readiness) while the manager, and with it the webhook server, keeps
+// running until the delay passes, so the pod leaves the Service endpoints
+// before the webhook stops answering. A second signal cancels at once; a
+// third forces exit, matching controller-runtime's own handler.
+func drainContext(delay time.Duration, onSignal func()) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan os.Signal, 3)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		drainOnSignal(ch, delay, onSignal, cancel)
+		<-ch
+		os.Exit(1)
+	}()
+	return ctx
+}
+
+// drainOnSignal waits for the first signal, runs onSignal, then cancels
+// after delay (or at once on a second signal). Split out for testing.
+func drainOnSignal(ch <-chan os.Signal, delay time.Duration, onSignal, cancel func()) {
+	<-ch
+	onSignal()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ch:
+		}
+	}
+	cancel()
 }

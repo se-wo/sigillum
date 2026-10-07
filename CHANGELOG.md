@@ -112,6 +112,16 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- The controller stopped its validating webhook server immediately on
+  SIGTERM while the pod was still in the webhook Service endpoints, so with
+  one replica and `failurePolicy: Fail` every admission request during a
+  rollout (`helm upgrade`, `rollout restart`, a GitOps sync that applies
+  CRs while the controller rolls) failed for the API server's webhook
+  timeout. The controller now fails readiness and keeps the webhook
+  serving for `controller.shutdownDelay` before shutting down, as the
+  api-server and SMTP proxy already do. Webhooks set `timeoutSeconds`
+  (`webhook.timeoutSeconds`, default 10); run `controller.replicas: 2`
+  with the webhook enabled for a second backend during rollouts (#74).
 - One tenant's slow or hung relay could hold every SMTP relay slot
   (`smtp.maxConcurrentMessages`, shared across tenants) and stall every
   other tenant. A per-tenant cap (`smtp.maxConcurrentPerTenant`, default

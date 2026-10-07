@@ -195,7 +195,7 @@ callers. STARTTLS is offered when `smtp.tls.secretName` is set.
 | Audit stream | One JSON line per request (accepted or rejected) on stdout, tagged `"stream":"audit"`; `audit.output: stdout\|stderr\|none`. Never contains subject or body. |
 | Tracing | `tracing.endpoint` (OTLP/HTTP, e.g. `http://otel-collector:4318`) plus the standard `OTEL_*` variables. Spans: `http.request` → `auth.tokenreview`, `policy.evaluate`, `ratelimit.allow`, `backend.send`. |
 | Several clusters | `clusterName: prod-eu` adds a `cluster` field to every audit record and log line and a `cluster` target label to the ServiceMonitor. |
-| Rolling updates | On SIGTERM a pod fails readiness for `shutdownDelay` (5s) while still serving, then drains for up to `shutdownTimeout` (25s); `terminationGracePeriodSeconds` is 35. |
+| Rolling updates | On SIGTERM a pod fails readiness for `shutdownDelay` (5s) while still serving, then drains for up to `shutdownTimeout` (25s); `terminationGracePeriodSeconds` is 35. The controller does the same for its webhook (`controller.shutdownDelay`), so a rollout does not fail admission; with `webhook.enabled` run `controller.replicas: 2` (keep the PDB) so a second webhook backend serves while one rolls. |
 | Upstream errors (REST) | `502 upstream-error` is transient, retry with backoff; `422 upstream-rejected` means the relay refused this message for good. |
 | Backend credentials in other namespaces | List them in `rbac.allowedSecretNamespaces`; components only read Secrets there and in the release namespace. An entry whose namespace does not exist is skipped (its Role is created once the namespace exists and you upgrade), so this list can be edited as teams come and go without failing `helm upgrade`. |
 

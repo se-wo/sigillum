@@ -432,3 +432,23 @@ func TestChartSecretNamespacesRenderedWithoutCluster(t *testing.T) {
 		}
 	}
 }
+
+// #74: the controller drains on SIGTERM (--shutdown-delay) and every
+// webhook has a bounded timeout, so a controller rollout does not fail
+// admission requests for the API server's full default timeout.
+func TestChartControllerDrainAndWebhookTimeout(t *testing.T) {
+	objs := render(t)
+	if a := args(t, objs, "t-sigillum-controller"); a["shutdown-delay"] == "" {
+		t.Fatal("controller must pass --shutdown-delay")
+	}
+	var vwc admv1.ValidatingWebhookConfiguration
+	into(t, find(objs, "ValidatingWebhookConfiguration", ""), &vwc)
+	if len(vwc.Webhooks) == 0 {
+		t.Fatal("no webhooks rendered")
+	}
+	for _, w := range vwc.Webhooks {
+		if w.TimeoutSeconds == nil || *w.TimeoutSeconds != 10 {
+			t.Fatalf("webhook %s: want timeoutSeconds 10, got %v", w.Name, w.TimeoutSeconds)
+		}
+	}
+}
