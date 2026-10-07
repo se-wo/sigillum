@@ -127,8 +127,21 @@ func (v *MailBackendValidator[T]) validate(obj runtime.Object) (admission.Warnin
 						"TLS certificate verification must not be disabled"))
 				}
 			}
-			if spec.SMTP.AuthType != "" && spec.SMTP.AuthType != sigv1.SMTPAuthNone && spec.SMTP.CredentialsRef == nil {
-				allErrs = append(allErrs, field.Required(smtpPath.Child("credentialsRef"), "credentialsRef is required when authType != NONE"))
+			if spec.SMTP.AuthType != "" && spec.SMTP.AuthType != sigv1.SMTPAuthNone {
+				if spec.SMTP.CredentialsRef == nil {
+					allErrs = append(allErrs, field.Required(smtpPath.Child("credentialsRef"), "credentialsRef is required when authType != NONE"))
+				}
+				// AUTH over a cleartext (tls: none) endpoint would send the
+				// relay password unencrypted; the driver refuses to send
+				// over such an endpoint (#43). Warn rather than reject, so a
+				// mesh that encrypts pod-to-pod can keep tls: none, though
+				// the driver still will not send credentials in that case.
+				for i, ep := range spec.SMTP.Endpoints {
+					if ep.TLS == sigv1.SMTPTLSNone {
+						warnings = append(warnings, fmt.Sprintf("spec.smtp.endpoints[%d] uses tls: none with authType %s: "+
+							"the relay password would go in cleartext, so sends to this endpoint are refused; use tls or starttls", i, spec.SMTP.AuthType))
+					}
+				}
 			}
 			if spec.SMTP.CredentialsRef != nil {
 				allErrs = append(allErrs, v.validateCredentialsRef(smtpPath.Child("credentialsRef"), *spec.SMTP.CredentialsRef, selfNs)...)

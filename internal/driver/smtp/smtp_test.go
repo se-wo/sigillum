@@ -636,3 +636,75 @@ func TestAuthMechOffered(t *testing.T) {
 		t.Fatal("empty list offers nothing")
 	}
 }
+
+// #43: AUTH over a cleartext (tls: none) endpoint is refused before any
+// credential is sent, and is permanent so the caller stops retrying.
+func TestSMTPDriver_AuthOverCleartextIsRefused(t *testing.T) {
+	// A server that records whether it ever saw an AUTH command.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	sawAuth := make(chan struct{}, 1)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				w := func(s string) { _, _ = c.Write([]byte(s + "\r\n")) }
+				w("220 fake ESMTP")
+				for {
+					line, err := br.ReadString('\n')
+					if err != nil {
+						return
+					}
+					up := strings.ToUpper(strings.TrimSpace(line))
+					switch {
+					case strings.HasPrefix(up, "EHLO"), strings.HasPrefix(up, "HELO"):
+						w("250-fake")
+						w("250 AUTH PLAIN LOGIN")
+					case strings.HasPrefix(up, "AUTH"):
+						select {
+						case sawAuth <- struct{}{}:
+						default:
+						}
+						w("235 ok")
+					case up == "QUIT":
+						w("221 bye")
+						return
+					default:
+						w("250 OK")
+					}
+				}
+			}(c)
+		}
+	}()
+	port := int32(ln.Addr().(*net.TCPAddr).Port)
+
+	for _, mech := range []string{"PLAIN", "LOGIN"} {
+		d, err := driver.New(driver.Config{Type: driver.TypeSMTP, BackendKey: "/b", SMTP: &driver.SMTPConfig{
+			Endpoints: []driver.SMTPEndpoint{{Host: "127.0.0.1", Port: port, TLS: "none"}},
+			AuthType:  mech, Username: "u", Password: "secret", Timeout: 3,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = d.(driver.RawSender).SendRaw(context.Background(), "a@x.example", []string{"b@x.example"}, []byte("Subject: x\r\n\r\nbody\r\n"))
+		if err == nil || !errors.Is(err, driver.ErrUpstreamPermanent) {
+			t.Fatalf("%s over tls:none must fail permanently, got %v", mech, err)
+		}
+		if !strings.Contains(err.Error(), "cleartext") {
+			t.Fatalf("%s: want a cleartext-refusal message, got %v", mech, err)
+		}
+	}
+	select {
+	case <-sawAuth:
+		t.Fatal("no AUTH command must reach the relay over a cleartext connection")
+	default:
+	}
+}

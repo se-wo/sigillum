@@ -112,6 +112,14 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- `authType: LOGIN` over a `tls: none` (cleartext) endpoint sent the relay
+  password base64-encoded on the wire, and `authType: PLAIN` over `tls:
+  none` failed every send but was retried forever. The driver now refuses
+  to authenticate over a cleartext endpoint before sending any credential,
+  with a permanent error (`422 upstream-rejected` / SMTP `554`) so the
+  caller stops. `loginAuth` also refuses an unencrypted connection, as
+  `net/smtp.PlainAuth` already did. The webhook warns when `authType` is
+  set with a `tls: none` endpoint (#43).
 - The webhook now warns when a policy's `senderRestrictions.allowedSenders`
   holds an entry that is not a plain address or a `<local-part>@<bare
   domain>` glob (`*`, `*example.com`): the same check a backend's
