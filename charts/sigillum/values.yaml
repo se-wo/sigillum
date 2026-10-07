@@ -109,6 +109,12 @@ smtp:
   #   (authModes credential; at most two run at once)
   # + about 64 MiB for the process and its informer caches.
   maxConcurrentMessages: 4
+  # Messages one tenant (namespace) relays at once, so one tenant's slow or
+  # hung relay cannot hold every slot and stall the others. 0 derives it
+  # from maxConcurrentMessages (half, at least 1). Messages over a tenant's
+  # cap wait up to sendTimeout, then get a retryable 451, without holding a
+  # global slot other tenants need.
+  maxConcurrentPerTenant: 0
   sendTimeout: 60s
   shutdownDelay: 5s
   shutdownTimeout: 25s

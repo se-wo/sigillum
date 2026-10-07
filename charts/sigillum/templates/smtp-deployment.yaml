@@ -44,6 +44,7 @@ spec:
             - --shutdown-delay={{ .Values.smtp.shutdownDelay }}
             - --send-timeout={{ .Values.smtp.sendTimeout }}
             - --max-concurrent-messages={{ .Values.smtp.maxConcurrentMessages }}
+            - --max-concurrent-per-tenant={{ .Values.smtp.maxConcurrentPerTenant | default 0 }}
             - --audit-log={{ .Values.audit.output }}
             {{- include "sigillum.commonArgs" . | nindent 12 }}
             {{- include "sigillum.ratelimitArgs" . | nindent 12 }}

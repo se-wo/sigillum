@@ -59,6 +59,17 @@ var (
 		[]string{"transport", "auth_method", "reason"},
 	)
 
+	// SMTPMessagesInFlight is the number of messages a tenant is relaying
+	// through the SMTP proxy right now, bounded per namespace so one tenant
+	// cannot take every relay slot (#73).
+	SMTPMessagesInFlight = promauto.With(Registry).NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "sigillum_smtp_messages_in_flight",
+			Help: "Messages currently being relayed through the SMTP proxy, by tenant namespace.",
+		},
+		[]string{"namespace"},
+	)
+
 	// UpstreamAuthFailuresTotal counts failures to authenticate to an
 	// upstream relay (a rotated or wrong password, an unsupported
 	// mechanism). A backend whose probe is Ready but whose sends fail here

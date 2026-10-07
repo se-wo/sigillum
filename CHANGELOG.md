@@ -38,6 +38,8 @@ the version being prepared in the same pull request as the change.
 
 ### Added
 
+- `sigillum_smtp_messages_in_flight{namespace}` metric and the
+  `smtp.maxConcurrentPerTenant` setting (see Fixed, #73).
 - `sigillum_upstream_auth_failures_total{backend}` metric (see Fixed, #58).
 - `spec.smtp.caSecretRef` on `MailBackend` and `ClusterMailBackend`: PEM
   CA certificates (key `ca.crt` by default) trusted in addition to the
@@ -110,6 +112,13 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- One tenant's slow or hung relay could hold every SMTP relay slot
+  (`smtp.maxConcurrentMessages`, shared across tenants) and stall every
+  other tenant. A per-tenant cap (`smtp.maxConcurrentPerTenant`, default
+  half the global cap) now bounds the messages one namespace relays at
+  once, acquired before the global slot so a tenant at its cap holds no
+  global slot others need. The new `sigillum_smtp_messages_in_flight`
+  gauge reports it per namespace (#73).
 - The backend health probe never checked authentication, so a relay that
   does not offer the configured SASL mechanism (for example `CRAM-MD5`
   against a relay that only offers `PLAIN`/`LOGIN`) showed `Ready=True`

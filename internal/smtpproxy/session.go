@@ -69,6 +69,9 @@ type Backend struct {
 	// at once; each holds up to MaxMessageBytes in memory. Its capacity is
 	// the limit.
 	Slots chan struct{}
+	// Tenants, when non-nil, caps the messages one namespace relays at
+	// once, acquired before Slots so one tenant cannot hold every slot.
+	Tenants *tenantLimiter
 }
 
 // NewSession implements smtp.Backend.
@@ -305,6 +308,15 @@ func (s *session) Data(r io.Reader) error {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.b.SendTimeout)
 		defer cancel()
+	}
+	// Per-tenant cap first, so a tenant already at its cap waits here
+	// without holding a global slot other tenants need (#73).
+	if release, ok := s.b.Tenants.acquire(ctx, s.identity.Namespace); ok {
+		defer release()
+	} else {
+		s.b.Sender.Reject(baseEvent, "busy")
+		return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 2},
+			Message: "Too many concurrent messages for this tenant, try again later (id " + msgID + ")"}
 	}
 	if s.b.Slots != nil {
 		select {
