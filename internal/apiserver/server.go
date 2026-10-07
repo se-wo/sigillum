@@ -75,6 +75,9 @@ type Server struct {
 	// so endpoints are removed before the listener closes (G-3).
 	draining atomic.Bool
 	shutting atomic.Bool
+
+	// bodies bounds the request bodies held at once; nil means no bound.
+	bodies *bodyBudget
 }
 
 // Run starts the api-server (blocking, returns when SIGTERM is observed).
@@ -96,6 +99,7 @@ func init() {
 			clusterName     string
 			secretNs        string
 			skipCRDCheck    bool
+			maxInflightBody int64
 			rlCfg           ratelimit.Config
 		)
 		fs := flag.NewFlagSet("api", flag.ContinueOnError)
@@ -114,6 +118,7 @@ func init() {
 		fs.BoolVar(&skipCRDCheck, "skip-crd-check", false, crdcheck.SkipFlagUsage)
 		rlCfg.BindFlags(fs)
 		fs.StringVar(&auditLog, "audit-log", "stdout", "audit stream sink: stdout, stderr, none, or a file path")
+		fs.Int64Var(&maxInflightBody, "max-inflight-body-bytes", 32<<20, "request bodies held in memory at once; each costs about 4 times its size while it is sent (0 = unlimited)")
 		if err := fs.Parse(os.Args[1:]); err != nil && err != flag.ErrHelp {
 			return err
 		}
@@ -189,7 +194,8 @@ func init() {
 				Reader:   cl.GetClient(),
 				Limiter:  limiter,
 			},
-			authn: authn,
+			authn:  authn,
+			bodies: newBodyBudget(maxInflightBody),
 		}
 		s.router = s.buildRouter()
 

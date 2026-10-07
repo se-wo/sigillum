@@ -201,6 +201,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - `allowedDomains: [example.com]` allows every mailbox `@example.com`. `allowedRecipients` **[v0.3.0]** narrows this to single mailboxes (least privilege: a workload that only notifies `alerts@example.com` cannot mail the rest of the company, even when compromised). Entries are exact addresses or globs, matched case-insensitively like `allowedSenders` (shared matcher). The webhook requires plain addresses without display name and routing local parts, and globs of the form `<local-part pattern>@<bare domain>` (for example `*@oncall.example.com`); `*`, `*@*`, wildcard domains and bare domains are rejected, since whole domains belong in `allowedDomains`.
 - Checked addresses: all recipients (`to`, `cc`, `bcc` on REST; `RCPT TO` on SMTP) and all `Reply-To` addresses, since replies go there.
 - Local parts with routing semantics (`%`, `!`, quoted local parts such as `"user@other"@example.com`) are rejected as `invalid_payload`. The domain check only looks at the part after the last `@`; an upstream MTA that honors the percent hack or bang paths could otherwise deliver to a foreign domain.
+- **[v0.4.0]** Domains of all checked addresses, and of senders, must be ASCII host names (letters, digits, `-`, dots); others are rejected as `invalid_payload` (REST `400`, SMTP `553`). Lists compare domains as strings, while an MTA routes what a spelling maps to: the Unicode form of an internationalized domain (`evïl.example` is `xn--evl-yla.example`), fullwidth letters and the ideographic full stop (`ｃompetitor。example` is `competitor.example`) and invisible characters would pass `blockedDomains` and be delivered to the blocked domain, and a domain literal (`user@[192.0.2.1]`) routes to an address with no domain to check. Internationalized domains are sent in their A-label form (`xn--…`), which is also how they are listed.
 - On violation: `403` with problem type `recipient-not-allowed`.
 
 #### US-2.5 — Multi-backend routing **[v0.1.0]**
@@ -973,6 +974,7 @@ Rules:
   - `From`, `To`, `Cc`, `Bcc`, `Subject`, `Date`, `Message-ID`, `MIME-Version`, `Content-Type` and `Content-Transfer-Encoding` are managed by Sigillum; values supplied here are **silently dropped**.
   - `Sender` and `Reply-To` are allowed and checked against the policy (US-2.3, US-2.4).
 - Hard request ceiling: 32 MiB, independent of policy (`413`).
+- **[v0.4.0]** Request bodies held at once per pod are bounded by `--max-inflight-body-bytes` (chart `api.maxInflightBodyBytes`, default 32 MiB), since a body costs about four times its size while it is decoded and sent. A request reserves its `Content-Length` (the whole budget when the length is unknown) after authentication and before its body is read; one that finds no room within 10 s gets `503 unavailable` with `Retry-After: 5` (audit reason `busy`, as on the SMTP proxy). Small requests do not wait for each other. The chart sets `GOMEMLIMIT` to the container's memory limit.
 
 Response `202 Accepted`:
 ```json
@@ -1023,7 +1025,7 @@ The problem `type` is `https://sigillum.dev/errors/<slug>`. The audit / metric `
 | `502` | `upstream-error` | Upstream relay failed transiently (unreachable, `4xx`, or a handshake / TLS / relay-login problem on Sigillum's side), or the send did not finish within the request budget (50 s, below the server's 60 s write timeout, so the client always gets an answer) | Yes, with backoff; after a timeout the relay may already have the message |
 | `503` | `backend-not-ready` | Backend missing, not Ready, invalid, or its config could not be resolved | Yes, with backoff |
 | `503` | `policy-invalid` | The matching policy breaks the admission rules (created without the webhook or by an older version) **[v0.4.0]** | Yes, once the policy is fixed |
-| `503` | `unavailable` | Redis rate-limit store unreachable (fail closed), or the TokenReview failed (v0.3.0); `Retry-After: 5` | Yes |
+| `503` | `unavailable` | Redis rate-limit store unreachable (fail closed), the TokenReview failed (v0.3.0), or the pod's request-body budget is full **[v0.4.0]**; `Retry-After: 5` | Yes |
 | `503` | `shutting-down` | Replica is draining | Yes, immediately |
 | `501` | `not-implemented` | Reserved for operations the backend's capabilities do not cover [future] | No |
 

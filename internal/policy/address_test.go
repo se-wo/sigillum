@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"strings"
 	"testing"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
@@ -113,5 +114,47 @@ func TestValidatePlainAddress(t *testing.T) {
 		if err := ValidatePlainAddress(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+// Spellings of a domain that a string comparison against blockedDomains
+// misses while an MTA routes them to the blocked name, or to an address
+// without any domain, are refused.
+func TestValidateMailbox_DomainSpellings(t *testing.T) {
+	for addr, ok := range map[string]bool{
+		"u@xn--evl-yla.example":        true, // A-label: what policies compare
+		"u@COMPETITOR.example":         true, // case is folded by the comparison
+		"u@localhost":                  true,
+		"u@a-b.example":                true,
+		"u@evïl.example":               false, // U-label of xn--evl-yla.example
+		"u@ｃompetitor.example":         false, // fullwidth c maps to c
+		"u@competitor。example":         false, // ideographic full stop maps to '.'
+		"u@competitor.example​":        false, // zero-width space
+		"u@[10.0.0.1]":                 false, // domain literal
+		"u@[IPv6:::1]":                 false,
+		"u@-competitor.example":        false,
+		"u@competitor..example":        false,
+		"u@competitor_example.com":     false,
+		"u@" + strings.Repeat("a", 64): false,
+	} {
+		if err := ValidateMailbox(addr); (err == nil) != ok {
+			t.Errorf("ValidateMailbox(%q) = %v, want ok=%v", addr, err, ok)
+		}
+	}
+}
+
+// The policy engine refuses such recipients too, so a transport that
+// forgets the parse-time check cannot reopen the bypass.
+func TestEvaluate_UnicodeDomainCannotBypassBlockedDomains(t *testing.T) {
+	p := &sigv1.MailPolicy{Spec: sigv1.MailPolicySpec{RecipientRestrictions: &sigv1.RecipientRestrictions{
+		BlockedDomains: []string{"xn--evl-yla.example", "competitor.example"},
+	}}}
+	for _, r := range []string{"u@evïl.example", "u@ｃompetitor.example", "u@[192.0.2.1]", "u@xn--evl-yla.example", "u@Competitor.Example"} {
+		if d := Evaluate(p, MessageView{From: "a@team.example", Recipients: []string{r}}); d.Allowed {
+			t.Errorf("recipient %q must be refused", r)
+		}
+	}
+	if d := Evaluate(p, MessageView{From: "a@team.example", Recipients: []string{"u@partner.example"}}); !d.Allowed {
+		t.Fatalf("an ordinary recipient must pass, got %+v", d)
 	}
 }

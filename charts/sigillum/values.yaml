@@ -42,6 +42,14 @@ api:
   shutdownDelay: 5s
   shutdownTimeout: 25s
   terminationGracePeriodSeconds: 35
+  # Request bodies held in memory at once per pod (bytes; 0 = unlimited).
+  # Requests reserve their Content-Length; one that finds no room waits up
+  # to 10 s, then gets a retryable 503. A body costs about 4 times its size
+  # while it is decoded and sent, so keep resources.limits.memory above
+  #   4 x maxInflightBodyBytes (4 x 32 MiB)
+  # + about 64 MiB for the process and its informer caches.
+  # Bodies are at most 32 MiB each.
+  maxInflightBodyBytes: 33554432
   resources:
     requests:
       cpu: 100m
