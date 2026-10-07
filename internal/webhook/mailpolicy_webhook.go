@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -48,6 +49,7 @@ func (v *MailPolicyValidator) validate(mp *sigv1.MailPolicy) (admission.Warnings
 	gk := schema.GroupKind{Group: sigv1.GroupVersion.Group, Kind: "MailPolicy"}
 
 	var allErrs field.ErrorList
+	var warnings admission.Warnings
 	specPath := field.NewPath("spec")
 
 	if len(mp.Spec.Subjects) == 0 {
@@ -89,10 +91,19 @@ func (v *MailPolicyValidator) validate(mp *sigv1.MailPolicy) (admission.Warnings
 	}
 
 	if mp.Spec.SenderRestrictions != nil {
+		sPath := specPath.Child("senderRestrictions").Child("allowedSenders")
 		for i, s := range mp.Spec.SenderRestrictions.AllowedSenders {
 			if s == "" {
-				allErrs = append(allErrs, field.Required(specPath.Child("senderRestrictions").Child("allowedSenders").Index(i),
-					"allowed sender must be non-empty"))
+				allErrs = append(allErrs, field.Required(sPath.Index(i), "allowed sender must be non-empty"))
+				continue
+			}
+			// A policy's allowedSenders use the same matching as a backend's
+			// (US-2.8): "*" allows everyone and "*example.com" matches
+			// x@evilexample.com. The webhook only warns for now (0.x
+			// compatibility, #44); a later minor turns this into an error.
+			if msg := addressEntryError(s); msg != "" {
+				warnings = append(warnings, fmt.Sprintf("%s: %q is not a plain address or <local-part>@<bare domain> glob (%s); "+
+					"it will be rejected in a future release", sPath.Index(i), s, msg))
 			}
 		}
 	}
@@ -105,9 +116,9 @@ func (v *MailPolicyValidator) validate(mp *sigv1.MailPolicy) (admission.Warnings
 	}
 
 	if len(allErrs) == 0 {
-		return nil, nil
+		return warnings, nil
 	}
-	return nil, apierrors.NewInvalid(gk, mp.Name, allErrs)
+	return warnings, apierrors.NewInvalid(gk, mp.Name, allErrs)
 }
 
 func validateSelector(p *field.Path, sel *sigv1.LabelSelectorSubject) field.ErrorList {

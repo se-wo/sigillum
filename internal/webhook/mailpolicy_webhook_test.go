@@ -101,3 +101,40 @@ func TestMailPolicyValidator_AllowedRecipients(t *testing.T) {
 		})
 	}
 }
+
+// #44: a policy's allowedSenders are validated like a backend's, but only
+// as a warning for now (0.x compatibility) — never a hard error.
+func TestMailPolicyValidator_AllowedSendersWarn(t *testing.T) {
+	v := &MailPolicyValidator{}
+	for _, tc := range []struct {
+		name, entry, want string
+	}{
+		{"wildcard all", "*", "future release"},
+		{"unanchored", "*example.com", "future release"},
+		{"plain ok", "noreply@example.com", ""},
+		{"anchored glob ok", "*@example.com", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mp := validPolicy()
+			mp.Spec.SenderRestrictions = &sigv1.SenderRestrictions{AllowedSenders: []string{tc.entry}}
+			w, err := v.ValidateCreate(context.Background(), mp)
+			if err != nil {
+				t.Fatalf("allowedSenders must never be a hard error, got %v", err)
+			}
+			joined := strings.Join(w, "\n")
+			if tc.want == "" {
+				if len(w) != 0 {
+					t.Fatalf("%q must not warn, got %v", tc.entry, w)
+				}
+			} else if !strings.Contains(joined, tc.want) || !strings.Contains(joined, tc.entry) {
+				t.Fatalf("want a warning naming %q and %q, got %v", tc.entry, tc.want, w)
+			}
+		})
+	}
+	// An empty entry stays a hard error.
+	mp := validPolicy()
+	mp.Spec.SenderRestrictions = &sigv1.SenderRestrictions{AllowedSenders: []string{""}}
+	if _, err := v.ValidateCreate(context.Background(), mp); err == nil {
+		t.Fatal("an empty allowedSenders entry must be an error")
+	}
+}

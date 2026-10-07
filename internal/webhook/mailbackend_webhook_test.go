@@ -151,3 +151,28 @@ func TestMailBackendValidator_CASecretRef(t *testing.T) {
 		t.Fatalf("MailBackend with a cross-namespace caSecretRef: got %v", err)
 	}
 }
+
+// #43: authType with a tls: none endpoint draws a warning (the driver
+// refuses to send credentials in cleartext), not a hard error.
+func TestMailBackendValidator_AuthOverCleartextWarns(t *testing.T) {
+	cmb := validClusterBackend(nil)
+	cmb.Spec.SMTP.AuthType = sigv1.SMTPAuthPlain
+	cmb.Spec.SMTP.CredentialsRef = &sigv1.SecretReference{Name: "creds", Namespace: "sigillum-system"}
+	cmb.Spec.SMTP.Endpoints[0].TLS = sigv1.SMTPTLSNone
+	w, err := NewClusterMailBackendValidator().ValidateCreate(context.Background(), cmb)
+	if err != nil {
+		t.Fatalf("tls: none with auth must warn, not error, got %v", err)
+	}
+	if len(w) == 0 || !strings.Contains(strings.Join(w, "\n"), "cleartext") {
+		t.Fatalf("want a cleartext warning, got %v", w)
+	}
+	// With starttls there is no such warning.
+	cmb.Spec.SMTP.Endpoints[0].TLS = sigv1.SMTPTLSStartTLS
+	w, err = NewClusterMailBackendValidator().ValidateCreate(context.Background(), cmb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(w, "\n"), "cleartext") {
+		t.Fatalf("starttls must not warn about cleartext, got %v", w)
+	}
+}

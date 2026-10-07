@@ -112,6 +112,30 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- The SMTP proxy now adds a `Date` and a `Message-ID` header when the
+  client omits them, as a submission agent should (RFC 6409 §8). Before,
+  a bare `From`/`To`/`Subject` message was relayed with neither; a missing
+  `Date` breaks RFC 5322 and many receivers score such mail as spam. A
+  message that already carries them is relayed unchanged (#47).
+- `authType: LOGIN` over a `tls: none` (cleartext) endpoint sent the relay
+  password base64-encoded on the wire, and `authType: PLAIN` over `tls:
+  none` failed every send but was retried forever. The driver now refuses
+  to authenticate over a cleartext endpoint before sending any credential,
+  with a permanent error (`422 upstream-rejected` / SMTP `554`) so the
+  caller stops. `loginAuth` also refuses an unencrypted connection, as
+  `net/smtp.PlainAuth` already did. The webhook warns when `authType` is
+  set with a `tls: none` endpoint (#43).
+- The webhook now warns when a policy's `senderRestrictions.allowedSenders`
+  holds an entry that is not a plain address or a `<local-part>@<bare
+  domain>` glob (`*`, `*example.com`): the same check a backend's
+  `allowedSenders` already fails on, where `*` allows every sender and
+  `*example.com` matches `x@evilexample.com`. It is a warning for now
+  (0.x compatibility) and becomes an error in a later minor (#44).
+- The controller now releases its leader lease on shutdown
+  (`LeaderElectionReleaseOnCancel`), so the next controller acquires it
+  immediately instead of waiting out the lease duration; before, every
+  rollout left about 30 s with no reconciliation and no generated
+  credential Secrets written (#48).
 - The controller stopped its validating webhook server immediately on
   SIGTERM while the pod was still in the webhook Service endpoints, so with
   one replica and `failurePolicy: Fail` every admission request during a

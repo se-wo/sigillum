@@ -140,7 +140,8 @@ transfer-encoding overhead (an 8 MiB attachment counts as 8 MiB, as on the
 REST path); headers and MIME framing count on SMTP.
 Policy denials answer `550`, rate limits `421`, retryable upstream problems
 `451`, permanent upstream rejections `554`. The message is relayed byte-for-byte with a `Received` header that
-carries the Sigillum message id.
+carries the Sigillum message id; a `Date` and `Message-ID` are added only when
+the client omitted them.
 
 ### SMTP credentials for off-the-shelf apps
 

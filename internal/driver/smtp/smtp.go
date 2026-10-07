@@ -235,6 +235,16 @@ func (d *Driver) sendVia(ctx context.Context, ep driver.SMTPEndpoint, from strin
 		}
 	}
 	if d.cfg.SMTP.AuthType != "" && d.cfg.SMTP.AuthType != "NONE" {
+		// Never send credentials over a cleartext connection. tls: none is
+		// unencrypted (there is no STARTTLS or implicit TLS), so AUTH would
+		// put the relay password on the wire in the clear. Refuse before
+		// sending, with a permanent error so the caller stops retrying a
+		// configuration that can never succeed (#43). net/smtp.PlainAuth
+		// already refuses, but LOGIN did not, and both retried forever.
+		if ep.TLS == "none" {
+			telemetry.UpstreamAuthFailuresTotal.WithLabelValues(d.cfg.BackendKey).Inc()
+			return configError{fmt.Errorf("authType %s requires TLS; endpoint %s uses tls: none, which would send the relay password in cleartext", d.cfg.SMTP.AuthType, ep.Host)}
+		}
 		auth, err := buildAuth(d.cfg.SMTP.AuthType, d.cfg.SMTP.Username, d.cfg.SMTP.Password, ep.Host)
 		if err != nil {
 			return err
@@ -286,6 +296,14 @@ type deliveryError struct{ err error }
 func (e deliveryError) Error() string { return e.err.Error() }
 func (e deliveryError) Unwrap() error { return e.err }
 
+// configError marks a static misconfiguration that no retry can fix (for
+// example AUTH over an unencrypted connection), so it is classified
+// permanent rather than queued and retried forever.
+type configError struct{ err error }
+
+func (e configError) Error() string { return e.err.Error() }
+func (e configError) Unwrap() error { return e.err }
+
 // dial connects to ep; ctx bounds the TCP connect and, for implicit TLS,
 // the TLS handshake.
 func (d *Driver) dial(ctx context.Context, ep driver.SMTPEndpoint) (net.Conn, error) {
@@ -323,7 +341,7 @@ func buildAuth(mech, username, password, host string) (smtp.Auth, error) {
 	case "PLAIN":
 		return smtp.PlainAuth("", username, password, host), nil
 	case "LOGIN":
-		return loginAuth{username: username, password: password}, nil
+		return loginAuth{username: username, password: password, host: host}, nil
 	case "CRAM-MD5":
 		return smtp.CRAMMD5Auth(username, password), nil
 	default:
@@ -345,11 +363,23 @@ func endpointKey(host string, port int32) string {
 // loginAuth implements the RFC-4954 LOGIN SASL mechanism, which Go's stdlib
 // does not provide out of the box.
 type loginAuth struct {
-	username, password string
+	username, password, host string
 }
 
-func (a loginAuth) Start(_ *smtp.ServerInfo) (string, []byte, error) {
+func (a loginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	// Mirror net/smtp.PlainAuth: never reveal the password over an
+	// unencrypted connection. sendVia already refuses tls: none before
+	// reaching here; this is defence in depth (#43).
+	if server != nil && !server.TLS && !isLocalhost(server.Name) {
+		return "", nil, errors.New("unencrypted connection")
+	}
 	return "LOGIN", nil, nil
+}
+
+// isLocalhost reports whether name is a loopback host, matching
+// net/smtp's own exception for PlainAuth.
+func isLocalhost(name string) bool {
+	return name == "localhost" || name == "127.0.0.1" || name == "::1"
 }
 
 func (a loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
@@ -379,6 +409,10 @@ func (a loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 // stops retrying and sees the cause, instead of queueing forever. Splitting
 // the recipients into several transactions is left to the sender.
 func isTransient(err error) bool {
+	var ce configError
+	if errors.As(err, &ce) {
+		return false
+	}
 	var de deliveryError
 	if !errors.As(err, &de) {
 		return true
