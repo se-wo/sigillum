@@ -19,6 +19,30 @@ type testAttachment struct {
 	content []byte
 }
 
+func TestValidateAttachmentMeta(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a    requestAttachment
+		ok   bool
+	}{
+		{"plain", requestAttachment{Filename: "report.pdf", ContentType: "application/pdf"}, true},
+		{"unicode filename ok", requestAttachment{Filename: "Rëchnung €.pdf"}, true},
+		{"no contentType ok", requestAttachment{Filename: "a.txt"}, true},
+		{"CRLF filename", requestAttachment{Filename: "a\r\nb.txt"}, false},
+		{"NUL filename", requestAttachment{Filename: "a\x00b"}, false},
+		{"RLO spoof", requestAttachment{Filename: "invoice‮fdp.exe"}, false},
+		{"RLI spoof", requestAttachment{Filename: "a⁧b.exe"}, false},
+		{"LRM", requestAttachment{Filename: "a‎b"}, false},
+		{"bad contentType", requestAttachment{Filename: "a", ContentType: "not a media type"}, false},
+		{"contentType with params ok", requestAttachment{Filename: "a", ContentType: `text/plain; charset=utf-8`}, true},
+	} {
+		err := validateAttachmentMeta(tc.a)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: validateAttachmentMeta = %v, want ok=%v", tc.name, err, tc.ok)
+		}
+	}
+}
+
 func TestParseMultipartMessage_NoAttachments(t *testing.T) {
 	body, ct := buildMultipartBody(t, map[string]interface{}{
 		"from":    "sender@example.com",

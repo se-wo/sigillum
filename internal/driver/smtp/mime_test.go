@@ -3,9 +3,11 @@ package smtp
 import (
 	"bytes"
 	"encoding/base64"
+	"fmt"
 	"mime"
 	"mime/multipart"
 	"net/mail"
+	"net/textproto"
 	"strings"
 	"testing"
 
@@ -230,6 +232,188 @@ func TestAssemble_EscapesQuotesInFilename(t *testing.T) {
 	// The double-quote in the filename must be escaped in the wire bytes.
 	if strings.Contains(string(raw), `filename="file"name`) {
 		t.Fatal("unescaped double-quote found in Content-Disposition filename")
+	}
+}
+
+// longestEncodedWord returns the length of the longest RFC 2047 encoded-word
+// (=?...?=) in raw, or 0 if there is none.
+func longestEncodedWord(raw string) int {
+	longest := 0
+	for {
+		i := strings.Index(raw, "=?")
+		if i < 0 {
+			break
+		}
+		j := strings.Index(raw[i+2:], "?=")
+		if j < 0 {
+			break
+		}
+		w := j + 4 // "=?" + inner + "?="
+		if w > longest {
+			longest = w
+		}
+		raw = raw[i+2+j+2:]
+	}
+	return longest
+}
+
+func assertLineLimits(t *testing.T, raw []byte) {
+	t.Helper()
+	// RFC 5322 §2.1.1: every line in the top-level header block is at most
+	// 998 octets.
+	head := string(raw)
+	if i := strings.Index(head, crlf+crlf); i >= 0 {
+		head = head[:i]
+	}
+	for _, line := range strings.Split(head, crlf) {
+		if len(line) > 998 {
+			t.Fatalf("line of %d octets exceeds the 998 limit: %q", len(line), line)
+		}
+	}
+}
+
+func TestAssemble_FoldsLongSubject(t *testing.T) {
+	for _, subject := range []string{
+		"folding " + strings.TrimSpace(strings.Repeat("alpha ", 300)), // long ASCII
+		"folding " + strings.TrimSpace(strings.Repeat("Grüße ", 300)), // long UTF-8
+	} {
+		msg := &driver.Message{
+			From:    driver.Address{Address: "from@example.com"},
+			To:      []driver.Address{{Address: "to@example.com"}},
+			Subject: subject,
+			Body:    driver.Body{Text: "x"},
+		}
+		raw, _, err := AssembleMessage(msg, "example.com")
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertLineLimits(t, raw)
+		if w := longestEncodedWord(string(raw)); w > 75 {
+			t.Fatalf("encoded-word of %d characters exceeds the 75 limit", w)
+		}
+		m, _ := parseMessage(t, raw)
+		got, err := new(mime.WordDecoder).DecodeHeader(m.Header.Get("Subject"))
+		if err != nil {
+			t.Fatalf("decode subject: %v", err)
+		}
+		// Folding and encoding must not change the words of the subject.
+		if strings.Join(strings.Fields(got), " ") != strings.Join(strings.Fields(subject), " ") {
+			t.Fatalf("subject round-trip changed the text:\nwant %q\ngot  %q", subject, got)
+		}
+	}
+}
+
+func TestAssemble_FoldsLongRecipientList(t *testing.T) {
+	var to []driver.Address
+	for i := 0; i < 40; i++ {
+		to = append(to, driver.Address{Name: "Team Member Number", Address: fmt.Sprintf("user%02d@example.com", i)})
+	}
+	raw, _, err := AssembleMessage(&driver.Message{
+		From: driver.Address{Address: "from@example.com"},
+		To:   to,
+		Body: driver.Body{Text: "x"},
+	}, "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertLineLimits(t, raw)
+	m, _ := parseMessage(t, raw)
+	list, err := m.Header.AddressList("To")
+	if err != nil || len(list) != len(to) {
+		t.Fatalf("To list = %d addresses, %v; want %d", len(list), err, len(to))
+	}
+}
+
+// attachmentPart walks the assembled multipart/mixed message and returns the
+// header of the first part whose Content-Disposition is an attachment.
+func attachmentPart(t *testing.T, raw []byte) textproto.MIMEHeader {
+	t.Helper()
+	m, ct := parseMessage(t, raw)
+	_, params, err := mime.ParseMediaType(ct)
+	if err != nil {
+		t.Fatalf("top-level content-type %q: %v", ct, err)
+	}
+	mr := multipart.NewReader(m.Body, params["boundary"])
+	for {
+		p, err := mr.NextPart()
+		if err != nil {
+			break
+		}
+		if strings.HasPrefix(p.Header.Get("Content-Disposition"), "attachment") ||
+			strings.HasPrefix(p.Header.Get("Content-Disposition"), "inline") {
+			return p.Header
+		}
+	}
+	t.Fatal("attachment part not found")
+	return nil
+}
+
+func TestAssemble_AttachmentUnicodeFilename(t *testing.T) {
+	name := "Rëchnung 2026 €.pdf"
+	raw, _, err := AssembleMessage(&driver.Message{
+		From:        driver.Address{Address: "a@b"},
+		To:          []driver.Address{{Address: "c@d"}},
+		Body:        driver.Body{Text: "x"},
+		Attachments: []driver.Attachment{{Filename: name, ContentType: "application/pdf", Content: []byte("%PDF")}},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := attachmentPart(t, raw)
+	// mime.ParseMediaType decodes the RFC 2231 filename*= back to the original.
+	_, params, err := mime.ParseMediaType(h.Get("Content-Disposition"))
+	if err != nil {
+		t.Fatalf("parse content-disposition %q: %v", h.Get("Content-Disposition"), err)
+	}
+	if params["filename"] != name {
+		t.Fatalf("filename round-trip: want %q, got %q (header %q)", name, params["filename"], h.Get("Content-Disposition"))
+	}
+	// A plain ASCII fallback is present for old clients, and no raw UTF-8 byte
+	// leaks into the header.
+	if !strings.Contains(h.Get("Content-Disposition"), `filename="R`) {
+		t.Fatalf("no ASCII filename fallback: %q", h.Get("Content-Disposition"))
+	}
+}
+
+func TestAssemble_AttachmentContentTypeParamsStripped(t *testing.T) {
+	raw, _, err := AssembleMessage(&driver.Message{
+		From:        driver.Address{Address: "a@b"},
+		To:          []driver.Address{{Address: "c@d"}},
+		Body:        driver.Body{Text: "x"},
+		Attachments: []driver.Attachment{{Filename: "a.txt", ContentType: `text/plain; name="evil.exe"; charset=utf-8`, Content: []byte("x")}},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := attachmentPart(t, raw)
+	mt, params, err := mime.ParseMediaType(h.Get("Content-Type"))
+	if err != nil {
+		t.Fatalf("parse content-type %q: %v", h.Get("Content-Type"), err)
+	}
+	if mt != "text/plain" {
+		t.Fatalf("media type: want text/plain, got %q", mt)
+	}
+	if _, ok := params["name"]; ok {
+		t.Fatalf("caller name parameter leaked into Content-Type: %q", h.Get("Content-Type"))
+	}
+	if params["charset"] != "utf-8" {
+		t.Fatalf("charset dropped for text/*: %q", h.Get("Content-Type"))
+	}
+	_, dparams, _ := mime.ParseMediaType(h.Get("Content-Disposition"))
+	if dparams["filename"] != "a.txt" {
+		t.Fatalf("disposition filename: want a.txt, got %q", dparams["filename"])
+	}
+}
+
+func TestAssemble_AttachmentBadContentTypeRejected(t *testing.T) {
+	_, _, err := AssembleMessage(&driver.Message{
+		From:        driver.Address{Address: "a@b"},
+		To:          []driver.Address{{Address: "c@d"}},
+		Body:        driver.Body{Text: "x"},
+		Attachments: []driver.Attachment{{Filename: "a.txt", ContentType: "not a media type", Content: []byte("x")}},
+	}, "")
+	if err == nil {
+		t.Fatal("expected error for an unparseable contentType")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/mail"
 	"net/textproto"
@@ -604,18 +605,45 @@ func addressHeaders(h map[string]string) (sender string, replyTo []string, err e
 }
 
 // validateAttachmentMeta rejects attachment metadata fields (filename,
-// contentType, disposition) containing CR, LF, or NUL.
+// contentType, disposition) that cannot be safely written into MIME headers:
+// CR, LF or NUL in any field; a Unicode bidirectional or format control in the
+// filename (U+202A–202E, U+2066–2069, U+200E/F), which can make a filename
+// display as a different extension than it saves under; and a contentType that
+// is not a valid media type.
 func validateAttachmentMeta(a requestAttachment) error {
 	if strings.ContainsAny(a.Filename, "\r\n\x00") {
 		return fmt.Errorf("filename %q contains CR, LF, or NUL", a.Filename)
 	}
+	if r := firstBidiOrFormatControl(a.Filename); r != 0 {
+		return fmt.Errorf("filename %q contains the Unicode control U+%04X", a.Filename, r)
+	}
 	if strings.ContainsAny(a.ContentType, "\r\n\x00") {
 		return fmt.Errorf("contentType %q contains CR, LF, or NUL", a.ContentType)
+	}
+	if strings.TrimSpace(a.ContentType) != "" {
+		if _, _, err := mime.ParseMediaType(a.ContentType); err != nil {
+			return fmt.Errorf("contentType %q is not a valid media type: %w", a.ContentType, err)
+		}
 	}
 	if strings.ContainsAny(a.Disposition, "\r\n\x00") {
 		return fmt.Errorf("disposition %q contains CR, LF, or NUL", a.Disposition)
 	}
 	return nil
+}
+
+// firstBidiOrFormatControl returns the first Unicode bidirectional or format
+// control rune in s (the ones used to spoof a filename's apparent extension),
+// or 0 if there is none.
+func firstBidiOrFormatControl(s string) rune {
+	for _, r := range s {
+		switch {
+		case r >= 0x202A && r <= 0x202E, // LRE RLE PDF LRO RLO
+			r >= 0x2066 && r <= 0x2069, // LRI RLI FSI PDI
+			r == 0x200E, r == 0x200F:   // LRM RLM
+			return r
+		}
+	}
+	return 0
 }
 
 var errBodyTooLarge = errors.New("aggregate request body exceeds 32 MiB ceiling")

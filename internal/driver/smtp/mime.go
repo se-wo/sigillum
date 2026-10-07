@@ -170,10 +170,7 @@ func AssembleMessage(msg *driver.Message, heloDomain string) ([]byte, string, er
 	sort.Strings(keys)
 	for _, k := range keys {
 		for _, v := range hdr[k] {
-			out.WriteString(k)
-			out.WriteString(": ")
-			out.WriteString(v)
-			out.WriteString(crlf)
+			out.WriteString(foldHeaderLine(k, v))
 		}
 	}
 	out.WriteString(crlf)
@@ -232,12 +229,12 @@ func buildAlternative(b driver.Body) ([]byte, textproto.MIMEHeader) {
 
 func writeAttachment(mw *multipart.Writer, a driver.Attachment) error {
 	ph := textproto.MIMEHeader{}
-	ct := a.ContentType
-	if ct == "" {
-		ct = "application/octet-stream"
-	}
-	if containsInjectionChars(ct) {
-		return fmt.Errorf("attachment contentType contains CR, LF, or NUL")
+	// Keep only the media type (and charset for text/*); drop caller-supplied
+	// parameters such as name="evil.exe", which can disagree with the
+	// Content-Disposition filename and spoof what a client shows.
+	ct, err := sanitizeContentType(a.ContentType)
+	if err != nil {
+		return err
 	}
 	ph.Set("Content-Type", ct)
 	disp := a.Disposition
@@ -251,9 +248,7 @@ func writeAttachment(mw *multipart.Writer, a driver.Attachment) error {
 		if containsInjectionChars(a.Filename) {
 			return fmt.Errorf("attachment filename contains CR, LF, or NUL")
 		}
-		// Escape backslash and double-quote per RFC 2183 before quoting.
-		safeName := strings.ReplaceAll(strings.ReplaceAll(a.Filename, `\`, `\\`), `"`, `\"`)
-		ph.Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disp, safeName))
+		ph.Set("Content-Disposition", contentDispositionValue(disp, a.Filename))
 	} else {
 		ph.Set("Content-Disposition", disp)
 	}
@@ -366,4 +361,126 @@ func validateHeaderKey(k string) error {
 		}
 	}
 	return nil
+}
+
+// foldHeaderMax is the line length foldHeaderLine aims for. RFC 5322 §2.1.1
+// recommends at most 78 characters per line and requires at most 998.
+const foldHeaderMax = 78
+
+// foldHeaderLine renders "Key: value" as one or more wire lines, folding at
+// spaces so no line (field name included) grows without bound. RFC 2047
+// encoded-words are already at most 75 characters and single-space separated
+// (mime.WordEncoder), and whitespace between adjacent encoded-words is not
+// significant, so folding at those spaces is safe; address lists and plain
+// subjects fold at their spaces too. A single token longer than the limit
+// (a Message-ID, one long word) is emitted unbroken — there is no legal
+// place to fold it. The returned string ends with CRLF.
+func foldHeaderLine(key, value string) string {
+	var out strings.Builder
+	cur := key + ":"
+	first := true
+	for _, tok := range strings.Split(value, " ") {
+		if first {
+			cur += " " + tok
+			first = false
+			continue
+		}
+		if len(cur)+1+len(tok) > foldHeaderMax {
+			out.WriteString(cur)
+			out.WriteString(crlf)
+			cur = " " + tok // continuation line begins with the folding space
+			continue
+		}
+		cur += " " + tok
+	}
+	out.WriteString(cur)
+	out.WriteString(crlf)
+	return out.String()
+}
+
+// sanitizeContentType parses an attachment's Content-Type and returns just the
+// media type (plus charset for text/*). Caller-supplied parameters such as
+// name="evil.exe" are dropped: they can disagree with the Content-Disposition
+// filename, and clients differ in which one they display and save under. An
+// empty value defaults to application/octet-stream; one that does not parse is
+// rejected so a malformed type cannot reach the wire.
+func sanitizeContentType(ct string) (string, error) {
+	if strings.TrimSpace(ct) == "" {
+		return "application/octet-stream", nil
+	}
+	mt, params, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return "", fmt.Errorf("attachment contentType %q is not a valid media type: %w", ct, err)
+	}
+	kept := map[string]string{}
+	if strings.HasPrefix(mt, "text/") {
+		if cs := params["charset"]; cs != "" {
+			kept["charset"] = cs
+		}
+	}
+	out := mime.FormatMediaType(mt, kept)
+	if out == "" {
+		return "", fmt.Errorf("attachment contentType %q is not a valid media type", ct)
+	}
+	return out, nil
+}
+
+// contentDispositionValue builds a Content-Disposition header value with the
+// filename encoded for the wire. The ASCII-safe form goes in filename="…"
+// (quotes and backslashes escaped per RFC 2183) for every client; a non-ASCII
+// name additionally gets an RFC 2231 / 5987 filename*=UTF-8”… form, which
+// modern clients prefer. The caller has already rejected CR/LF/NUL and Unicode
+// bidirectional/format controls in the name.
+func contentDispositionValue(disp, filename string) string {
+	ascii := asciiFilenameFallback(filename)
+	escaped := strings.ReplaceAll(strings.ReplaceAll(ascii, `\`, `\\`), `"`, `\"`)
+	v := disp + `; filename="` + escaped + `"`
+	if !isASCII(filename) {
+		v += `; filename*=UTF-8''` + rfc5987Encode(filename)
+	}
+	return v
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > 0x7e || s[i] < 0x20 {
+			return false
+		}
+	}
+	return true
+}
+
+// asciiFilenameFallback replaces every byte that is not printable ASCII with
+// '_', so the legacy filename="…" parameter is a valid, if lossy, name for
+// clients that do not read filename*=.
+func asciiFilenameFallback(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r >= 0x20 && r <= 0x7e {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+// rfc5987Encode percent-encodes s (UTF-8 bytes) for an RFC 5987 ext-value,
+// leaving only the attr-char set unescaped.
+func rfc5987Encode(s string) string {
+	const upperhex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' ||
+			strings.IndexByte("!#$&+-.^_`|~", c) >= 0 {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(upperhex[c>>4])
+		b.WriteByte(upperhex[c&0x0f])
+	}
+	return b.String()
 }
