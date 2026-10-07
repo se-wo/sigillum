@@ -133,6 +133,11 @@ func init() {
 			LeaderElection:          enableLeaderElection,
 			LeaderElectionID:        leaderElectionID,
 			LeaderElectionNamespace: releaseNs,
+			// Release the lease on shutdown so the next controller acquires
+			// it at once instead of waiting out the lease duration (~30 s of
+			// no reconciliation on every rollout). Safe because the process
+			// exits right after the manager stops (#48).
+			LeaderElectionReleaseOnCancel: true,
 		}
 		kubecache.RestrictSecretCache(&opts.Cache, kubecache.SecretNamespaces(secretNamespaces))
 		if !disableWebhook {

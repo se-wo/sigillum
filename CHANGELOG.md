@@ -112,6 +112,11 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- The controller now releases its leader lease on shutdown
+  (`LeaderElectionReleaseOnCancel`), so the next controller acquires it
+  immediately instead of waiting out the lease duration; before, every
+  rollout left about 30 s with no reconciliation and no generated
+  credential Secrets written (#48).
 - The controller stopped its validating webhook server immediately on
   SIGTERM while the pod was still in the webhook Service endpoints, so with
   one replica and `failurePolicy: Fail` every admission request during a
