@@ -525,3 +525,49 @@ func TestSenderAndReplyToReachPolicy(t *testing.T) {
 		t.Fatalf("got Sender=%q ReplyTo=%v", req.Sender, req.ReplyTo)
 	}
 }
+
+// #47: the proxy adds Date and Message-ID when the client omits them, and
+// leaves a message that already has them unchanged.
+func TestRelayAddsDateAndMessageIDWhenAbsent(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	c := dial(t, startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{}}))
+	if err := c.Auth(sasl.NewOAuthBearerClient(&sasl.OAuthBearerOptions{Username: "x", Token: "good-token"})); err != nil {
+		t.Fatal(err)
+	}
+	// No Date, no Message-ID.
+	if err := send(c, "bounce@billing.example", []string{"a@x.example"},
+		"From: App <app@billing.example>\r\nTo: a@x.example\r\nSubject: hi\r\n\r\nhello\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	raw := string(sender.reqs[0].Raw)
+	if !strings.Contains(raw, "\r\nDate: ") {
+		t.Fatalf("missing Date not added:\n%s", raw)
+	}
+	if !strings.Contains(raw, "Message-ID: <"+sender.reqs[0].MessageID+"@billing.example>") {
+		t.Fatalf("missing Message-ID not added:\n%s", raw)
+	}
+	// The body and the client's own headers survive.
+	if !strings.Contains(raw, "Subject: hi\r\n\r\nhello") {
+		t.Fatalf("body not relayed:\n%s", raw)
+	}
+}
+
+func TestRelayKeepsClientDateAndMessageID(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	c := dial(t, startProxy(t, &Backend{Sender: sender, Tokens: stubTokens{}}))
+	if err := c.Auth(sasl.NewOAuthBearerClient(&sasl.OAuthBearerOptions{Username: "x", Token: "good-token"})); err != nil {
+		t.Fatal(err)
+	}
+	msg := "From: App <app@billing.example>\r\nTo: a@x.example\r\nDate: Wed, 01 Jan 2025 00:00:00 +0000\r\n" +
+		"Message-ID: <client-123@billing.example>\r\nSubject: hi\r\n\r\nhello\r\n"
+	if err := send(c, "bounce@billing.example", []string{"a@x.example"}, msg); err != nil {
+		t.Fatal(err)
+	}
+	raw := string(sender.reqs[0].Raw)
+	if strings.Count(raw, "Date: ") != 1 || strings.Count(raw, "Message-ID: ") != 1 {
+		t.Fatalf("client's Date/Message-ID must not be duplicated:\n%s", raw)
+	}
+	if !strings.Contains(raw, "<client-123@billing.example>") {
+		t.Fatalf("client's Message-ID must be kept:\n%s", raw)
+	}
+}

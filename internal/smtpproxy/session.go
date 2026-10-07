@@ -350,6 +350,19 @@ func (s *session) Data(r io.Reader) error {
 		s.b.Sender.Reject(baseEvent, "invalid_payload")
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 6, 0}, Message: err.Error()}
 	}
+	// As a submission agent, add Date and Message-ID when the client left
+	// them out (RFC 6409 §8.2/§8.3): a missing Date breaks RFC 5322 and
+	// many receivers score such mail as spam. Everything the client did
+	// send is still relayed byte for byte; the common case where both are
+	// present adds nothing and stays zero-copy.
+	relayed := buf.Bytes()[:len(trace)+len(raw)]
+	if added := missingOriginationHeaders(msg.Header, msgID, hdr.from); added != "" {
+		combined := make([]byte, 0, len(trace)+len(added)+len(raw))
+		combined = append(combined, trace...)
+		combined = append(combined, added...)
+		combined = append(combined, raw...)
+		relayed = combined
+	}
 
 	// The credential may have been revoked since MAIL FROM.
 	if err := s.checkCredential(msgID, s.from, s.rcpts); err != nil {
@@ -364,7 +377,7 @@ func (s *session) Data(r io.Reader) error {
 		Transport:    gateway.TransportSMTP,
 		MessageID:    msgID,
 		Message:      &driver.Message{From: driver.Address{Address: hdr.from}, To: to},
-		Raw:          buf.Bytes()[:len(trace)+len(raw)],
+		Raw:          relayed,
 		EnvelopeFrom: s.from,
 		Sender:       hdr.sender,
 		ReplyTo:      hdr.replyTo,
@@ -515,6 +528,27 @@ func addressField(h mail.Header, k string) ([]string, error) {
 		out[i] = a.Address
 	}
 	return out, nil
+}
+
+// missingOriginationHeaders returns the Date and Message-ID header lines
+// the client omitted, each CRLF-terminated, ready to prepend. It returns ""
+// when both are present, so a complete message is relayed unchanged. The
+// Message-ID uses the Sigillum message id and the sender's domain (or
+// sigillum.local when it has none).
+func missingOriginationHeaders(h mail.Header, msgID, from string) string {
+	const crlf = "\r\n"
+	var b strings.Builder
+	if h.Get("Date") == "" {
+		b.WriteString("Date: " + time.Now().UTC().Format(time.RFC1123Z) + crlf)
+	}
+	if h.Get("Message-ID") == "" {
+		domain := "sigillum.local"
+		if at := strings.LastIndexByte(from, '@'); at >= 0 && at < len(from)-1 {
+			domain = from[at+1:]
+		}
+		b.WriteString("Message-ID: <" + msgID + "@" + domain + ">" + crlf)
+	}
+	return b.String()
 }
 
 // receivedHeader builds the RFC 5321 trace header that is prepended to the

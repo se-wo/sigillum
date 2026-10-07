@@ -112,6 +112,11 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- The SMTP proxy now adds a `Date` and a `Message-ID` header when the
+  client omits them, as a submission agent should (RFC 6409 §8). Before,
+  a bare `From`/`To`/`Subject` message was relayed with neither; a missing
+  `Date` breaks RFC 5322 and many receivers score such mail as spam. A
+  message that already carries them is relayed unchanged (#47).
 - `authType: LOGIN` over a `tls: none` (cleartext) endpoint sent the relay
   password base64-encoded on the wire, and `authType: PLAIN` over `tls:
   none` failed every send but was retried forever. The driver now refuses
