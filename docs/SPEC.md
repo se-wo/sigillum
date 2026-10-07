@@ -185,7 +185,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
   | `senderRestrictions: {}` or `allowedSenders: []` | **Every sender is denied.** Almost always an authoring mistake. |
   | `allowedSenders` with entries | Only matching senders are accepted. |
 
-- Matching is case-insensitive. Entries without `*`, `?` or `[` match exactly. Entries with them use Go `filepath.Match` glob syntax against the whole address, so `*` also matches `@`: `*example.com` matches `x@evilexample.com`. Always anchor on the domain: `*@example.com`.
+- Matching is case-insensitive. Entries without `*`, `?` or `[` match exactly. Entries with them use Go `filepath.Match` glob syntax against the whole address, so `*` also matches `@`: `*example.com` matches `x@evilexample.com`. Always anchor on the domain: `*@example.com`. **[v0.4.0]** The webhook now warns on a policy's `allowedSenders` entry that is not a plain address or a `<local-part>@<bare domain>` glob (as it already rejects a backend's); a later minor turns the warning into an error.
 - Checked addresses: header `From`, SMTP envelope sender (`MAIL FROM`), and the `Sender` header if present. All must match.
 - On violation: `403` with problem type `sender-not-allowed` (audit and metric reason `sender_not_allowed`).
 - Display names, comments and encoded-words in `From`, `Sender` and `Reply-To` must not contain `@` (otherwise `invalid_payload`). Without this rule an arbitrary address could be *displayed* as sender while only the addr-spec is checked.

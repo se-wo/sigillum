@@ -112,6 +112,12 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- The webhook now warns when a policy's `senderRestrictions.allowedSenders`
+  holds an entry that is not a plain address or a `<local-part>@<bare
+  domain>` glob (`*`, `*example.com`): the same check a backend's
+  `allowedSenders` already fails on, where `*` allows every sender and
+  `*example.com` matches `x@evilexample.com`. It is a warning for now
+  (0.x compatibility) and becomes an error in a later minor (#44).
 - The controller now releases its leader lease on shutdown
   (`LeaderElectionReleaseOnCancel`), so the next controller acquires it
   immediately instead of waiting out the lease duration; before, every
