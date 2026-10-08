@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,32 @@ func FuzzParseResponse(f *testing.F) {
 		}
 		if (status == 429 || status >= 500) && e.Permanent {
 			t.Fatalf("status %d must not be permanent", status)
+		}
+	})
+}
+
+// FuzzReadCallback checks the loopback redirect of `sigillum oauth login`:
+// only the expected state is accepted, a code is printable ASCII, and the
+// provider's error text is safe to print.
+func FuzzReadCallback(f *testing.F) {
+	f.Add("state-1", "state-1", "M.C507_BAY.2.U.code", "", "")
+	f.Add("state-1", "state-1", "", "access_denied", "The user declined.\r\n")
+	f.Add("state-1", "forged", "code", "", "")
+	f.Fuzz(func(t *testing.T, want, got, code, e, desc string) {
+		q := url.Values{"state": {got}, "code": {code}, "error": {e}, "error_description": {desc}}
+		cb := readCallback(q, want)
+		if got != want && cb.err != errStateMismatch {
+			t.Fatalf("state %q accepted for %q", got, want)
+		}
+		if cb.err == nil && !isVisibleASCII(cb.code, maxRefreshTokenBytes) {
+			t.Fatalf("accepted code %q", cb.code)
+		}
+		if cb.err != nil {
+			for _, r := range cb.err.Error() {
+				if r < 0x20 || r >= 0x7f {
+					t.Fatalf("unprintable %q in %q", r, cb.err)
+				}
+			}
 		}
 	})
 }
