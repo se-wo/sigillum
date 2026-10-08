@@ -130,7 +130,7 @@ func (d *Driver) Send(ctx context.Context, msg *driver.Message) (*driver.SendRes
 // the message; the envelope sender has no counterpart and was checked by
 // the policy like From.
 func (d *Driver) SendRaw(ctx context.Context, _ string, recipients []string, raw []byte) (*driver.SendResult, error) {
-	body, from, err := prepare(raw, recipients)
+	body, from, err := driver.BindToEnvelope(raw, recipients)
 	if err != nil {
 		return nil, err
 	}

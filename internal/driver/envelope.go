@@ -1,4 +1,4 @@
-package graph
+package driver
 
 import (
 	"bytes"
@@ -6,24 +6,23 @@ import (
 	"fmt"
 	"net/mail"
 	"strings"
-
-	"github.com/se-wo/sigillum/internal/driver"
 )
 
-// prepare makes the recipients Graph delivers to equal the envelope the
-// policy checked (SPEC US-6.1). Graph takes them from the To, Cc and Bcc
-// header fields of the MIME message and has no envelope, so:
+// BindToEnvelope makes the recipients an API backend delivers to equal the
+// envelope the policy checked (SPEC US-6.1). Microsoft Graph and the Gmail
+// API take them from the To, Cc and Bcc header fields of the MIME message
+// and have no envelope, so:
 //
 //   - every To and Cc address must be an envelope recipient, otherwise the
 //     message is refused with ErrRecipientNotInEnvelope (permanent);
 //   - envelope recipients in neither field are blind copies and go into a
-//     Bcc field, which Graph removes from the delivered copies.
+//     Bcc field, which the provider removes from the delivered copies.
 //
 // A message that still carries Bcc is refused: the SMTP proxy strips Bcc
 // and REST messages are assembled without, so one here would be a bug that
 // could deliver to unchecked addresses. It returns the message to send and
-// its From address, the mailbox Graph sends as.
-func prepare(raw []byte, envelope []string) ([]byte, string, error) {
+// its From address, the mailbox the provider sends as.
+func BindToEnvelope(raw []byte, envelope []string) ([]byte, string, error) {
 	m, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
 		return nil, "", permanent("cannot parse the message header: %v", err)
@@ -59,7 +58,7 @@ func prepare(raw []byte, envelope []string) ([]byte, string, error) {
 		for _, a := range addrs {
 			key := strings.ToLower(a.Address)
 			if !inEnvelope[key] {
-				return nil, "", fmt.Errorf("%w: %w: %s %s", driver.ErrUpstreamPermanent, driver.ErrRecipientNotInEnvelope, field, a.Address)
+				return nil, "", fmt.Errorf("%w: %w: %s %s", ErrUpstreamPermanent, ErrRecipientNotInEnvelope, field, a.Address)
 			}
 			listed[key] = true
 		}
@@ -81,5 +80,5 @@ func prepare(raw []byte, envelope []string) ([]byte, string, error) {
 }
 
 func permanent(format string, args ...any) error {
-	return fmt.Errorf("%w: %s", driver.ErrUpstreamPermanent, fmt.Sprintf(format, args...))
+	return fmt.Errorf("%w: %s", ErrUpstreamPermanent, fmt.Sprintf(format, args...))
 }
