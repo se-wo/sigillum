@@ -147,9 +147,13 @@ the version being prepared in the same pull request as the change.
   that is not a valid media type are rejected (`400`) (#78).
 - REST `subject` and display names are now folded so no header line
   exceeds the RFC 5322 998-octet limit, and each RFC 2047 encoded-word is
-  at most 75 characters. A long subject previously produced a single line
-  of thousands of characters, which strict relays reject and others
-  rewrap (#79).
+  at most 75 characters; a run without spaces too long to fold is
+  RFC 2047-encoded. A long subject previously produced a single line of
+  thousands of characters, which strict relays reject and others rewrap.
+  The REST limit for custom `headers` now covers the whole line (key,
+  `: ` and value, at most 998 characters) instead of the value alone, so a
+  value close to 998 characters with a long key is now rejected (`400`)
+  instead of being relayed as an over-long line (#79).
 - The SMTP proxy now adds a `Date` and a `Message-ID` header when the
   client omits them, as a submission agent should (RFC 6409 §8). Before,
   a bare `From`/`To`/`Subject` message was relayed with neither; a missing

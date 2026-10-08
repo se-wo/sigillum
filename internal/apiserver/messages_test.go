@@ -266,3 +266,16 @@ func buildMultipartBody(t *testing.T, meta interface{}, attachments []testAttach
 	w.Close()
 	return &buf, w.FormDataContentType()
 }
+
+// The whole custom header line (field name, ": " and value) is bounded by
+// the RFC 5322 998-character limit, not just the value.
+func TestValidateRequestHeaders_LineLimit(t *testing.T) {
+	k := "X-Ticket"
+	fits := strings.Repeat("v", maxHeaderLine-len(k)-len(": "))
+	if err := validateRequestHeaders(map[string]string{k: fits}); err != nil {
+		t.Fatalf("a %d-character line must be accepted: %v", maxHeaderLine, err)
+	}
+	if err := validateRequestHeaders(map[string]string{k: fits + "v"}); err == nil {
+		t.Fatalf("a %d-character line must be rejected", maxHeaderLine+1)
+	}
+}

@@ -215,7 +215,7 @@ func TestHandleSendMessage_OversizedBodyAuditedAsMessageTooLarge(t *testing.T) {
 }
 
 func TestHandleSendMessage_AddressSpoofingIsRejected(t *testing.T) {
-	long := strings.Repeat("x", maxHeaderValue+1)
+	long := strings.Repeat("x", maxHeaderLine+1)
 	for name, body := range map[string]string{
 		"percent hack":        `{"from":"a@team.example","to":["attacker%evil.example@x.example"]}`,
 		"bang path":           `{"from":"a@team.example","cc":["evil.example!attacker@x.example"]}`,

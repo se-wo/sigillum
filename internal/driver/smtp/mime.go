@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/se-wo/sigillum/internal/driver"
 )
@@ -33,7 +34,13 @@ func formatAddress(a driver.Address) string {
 			return mime.BEncoding.Encode("utf-8", a.Name) + " <" + a.Address + ">"
 		}
 	}
-	return (&mail.Address{Name: a.Name, Address: a.Address}).String()
+	s := (&mail.Address{Name: a.Name, Address: a.Address}).String()
+	if longestToken(s) > maxFoldableToken {
+		// A printable name with a run too long to fold within the line
+		// limit: encoded-words split it without changing the decoded name.
+		return forceEncodedWords(a.Name) + " <" + a.Address + ">"
+	}
+	return s
 }
 
 func formatAddressList(addrs []driver.Address) string {
@@ -101,7 +108,13 @@ func AssembleMessage(msg *driver.Message, heloDomain string) ([]byte, string, er
 		hdr.Set("Cc", formatAddressList(msg.Cc))
 	}
 	if msg.Subject != "" {
-		hdr.Set("Subject", mime.QEncoding.Encode("utf-8", msg.Subject))
+		subject := mime.QEncoding.Encode("utf-8", msg.Subject)
+		if longestToken(subject) > maxFoldableToken {
+			// One run too long to fold (no space in it): encoded-words split
+			// it, and whitespace between them is dropped when decoding.
+			subject = forceEncodedWords(msg.Subject)
+		}
+		hdr.Set("Subject", subject)
 	}
 	hdr.Set("MIME-Version", "1.0")
 
@@ -170,7 +183,11 @@ func AssembleMessage(msg *driver.Message, heloDomain string) ([]byte, string, er
 	sort.Strings(keys)
 	for _, k := range keys {
 		for _, v := range hdr[k] {
-			out.WriteString(foldHeaderLine(k, v))
+			line := foldHeaderLine(k, v)
+			if longestLine(line) > maxHeaderLine {
+				return nil, messageID, fmt.Errorf("header %q cannot be folded within the %d-character line limit", k, maxHeaderLine)
+			}
+			out.WriteString(line)
 		}
 	}
 	out.WriteString(crlf)
@@ -366,6 +383,60 @@ func validateHeaderKey(k string) error {
 // foldHeaderMax is the line length foldHeaderLine aims for. RFC 5322 §2.1.1
 // recommends at most 78 characters per line and requires at most 998.
 const foldHeaderMax = 78
+
+// maxHeaderLine is the RFC 5322 §2.1.1 hard limit for a line, in octets,
+// excluding CRLF.
+const maxHeaderLine = 998
+
+// maxFoldableToken is the longest run without a space that still fits on a
+// header line next to any field name Sigillum writes; a longer run cannot be
+// folded and is RFC 2047-encoded instead (subject, display names).
+const maxFoldableToken = maxHeaderLine - len("Content-Transfer-Encoding: ")
+
+// longestToken returns the length of the longest space-separated run in s.
+func longestToken(s string) int {
+	longest := 0
+	for _, tok := range strings.Split(s, " ") {
+		if len(tok) > longest {
+			longest = len(tok)
+		}
+	}
+	return longest
+}
+
+// longestLine returns the length of the longest CRLF-separated line in s.
+func longestLine(s string) int {
+	longest := 0
+	for _, l := range strings.Split(s, crlf) {
+		if len(l) > longest {
+			longest = len(l)
+		}
+	}
+	return longest
+}
+
+// forceEncodedWords writes s as RFC 2047 B encoded-words of at most 72
+// characters, splitting on rune boundaries, even when s is plain ASCII.
+// mime.WordEncoder leaves ASCII unencoded, so a long run without spaces would
+// stay one unfoldable token; encoded-words give foldHeaderLine places to
+// fold, and the whitespace between them is not part of the decoded text.
+func forceEncodedWords(s string) string {
+	const maxChunk = 45 // 45 bytes -> 60 base64 chars + 12 for "=?utf-8?b?" "?="
+	var words []string
+	for len(s) > 0 {
+		n := 0
+		for n < len(s) {
+			_, size := utf8.DecodeRuneInString(s[n:]) // size 1 for invalid bytes
+			if n+size > maxChunk && n > 0 {
+				break
+			}
+			n += size
+		}
+		words = append(words, "=?utf-8?b?"+base64.StdEncoding.EncodeToString([]byte(s[:n]))+"?=")
+		s = s[n:]
+	}
+	return strings.Join(words, " ")
+}
 
 // foldHeaderLine renders "Key: value" as one or more wire lines, folding at
 // spaces so no line (field name included) grows without bound. RFC 2047

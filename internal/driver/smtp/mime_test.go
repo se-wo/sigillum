@@ -324,6 +324,47 @@ func TestAssemble_FoldsLongRecipientList(t *testing.T) {
 	}
 }
 
+// A run with no space in it cannot be folded. Subjects and display names
+// are then RFC 2047-encoded so the line still fits and the decoded text is
+// unchanged; a custom header value is refused instead (found by
+// FuzzAssembleMessage).
+func TestAssemble_UnfoldableRuns(t *testing.T) {
+	run := strings.Repeat("a", 1500)
+	raw, _, err := AssembleMessage(&driver.Message{
+		From:    driver.Address{Name: run, Address: "from@example.com"},
+		To:      []driver.Address{{Name: run, Address: "to@example.com"}},
+		Subject: run,
+		Body:    driver.Body{Text: "x"},
+	}, "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertLineLimits(t, raw)
+	if w := longestEncodedWord(string(raw)); w > 75 {
+		t.Fatalf("encoded-word of %d characters exceeds 75", w)
+	}
+	m, _ := parseMessage(t, raw)
+	if got, err := new(mime.WordDecoder).DecodeHeader(m.Header.Get("Subject")); err != nil || got != run {
+		t.Fatalf("subject did not round-trip: %d chars, %v", len(got), err)
+	}
+	for _, k := range []string{"From", "To"} {
+		list, err := m.Header.AddressList(k)
+		if err != nil || len(list) != 1 || list[0].Name != run {
+			t.Fatalf("%s display name did not round-trip: %v %v", k, list, err)
+		}
+	}
+
+	_, _, err = AssembleMessage(&driver.Message{
+		From:    driver.Address{Address: "from@example.com"},
+		To:      []driver.Address{{Address: "to@example.com"}},
+		Body:    driver.Body{Text: "x"},
+		Headers: map[string]string{"X-Long": run},
+	}, "example.com")
+	if err == nil {
+		t.Fatal("a custom header that cannot be folded within 998 characters must be refused")
+	}
+}
+
 // attachmentPart walks the assembled multipart/mixed message and returns the
 // header of the first part whose Content-Disposition is an attachment.
 func attachmentPart(t *testing.T, raw []byte) textproto.MIMEHeader {

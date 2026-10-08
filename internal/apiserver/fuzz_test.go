@@ -58,7 +58,7 @@ func FuzzRequestHeaders(f *testing.F) {
 			return
 		}
 		for k, v := range h {
-			if strings.ContainsAny(k+v, "\r\n\x00") || len(v) > maxHeaderValue ||
+			if strings.ContainsAny(k+v, "\r\n\x00") || len(k)+len(": ")+len(v) > maxHeaderLine ||
 				strings.HasPrefix(textproto.CanonicalMIMEHeaderKey(k), "Resent-") {
 				t.Fatalf("validateRequestHeaders accepted %q: %q", k, v)
 			}

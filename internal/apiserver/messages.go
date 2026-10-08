@@ -537,14 +537,15 @@ type subject struct {
 	ServiceAccount string
 }
 
-// maxHeaderValue is the RFC 5322 line limit (998 characters). The driver
-// writes custom header values unfolded, so a longer one could not be
-// relayed intact anyway.
-const maxHeaderValue = 998
+// maxHeaderLine is the RFC 5322 line limit (998 characters). It bounds the
+// whole custom header line (field name, ": " and value): a value without
+// spaces cannot be folded, so a longer line could not be relayed intact.
+const maxHeaderLine = 998
 
 // validateRequestHeaders rejects header keys or values containing CR, LF, or
-// NUL, which would allow SMTP header injection through the driver, values
-// longer than one header line, the same field given twice (keys match case-
+// NUL, which would allow SMTP header injection through the driver, header
+// lines (key, ": " and value) over the RFC 5322 limit, the same field given
+// twice (keys match case-
 // insensitively, and which of them the driver keeps would be arbitrary), and
 // Resent-* fields, which have no place in a submission.
 func validateRequestHeaders(h map[string]string) error {
@@ -556,8 +557,8 @@ func validateRequestHeaders(h map[string]string) error {
 		if strings.ContainsAny(v, "\r\n\x00") {
 			return fmt.Errorf("header %q value contains CR, LF, or NUL", k)
 		}
-		if len(v) > maxHeaderValue {
-			return fmt.Errorf("header %q value exceeds %d characters", k, maxHeaderValue)
+		if len(k)+len(": ")+len(v) > maxHeaderLine {
+			return fmt.Errorf("header %q line exceeds %d characters (field name, \": \" and value)", k, maxHeaderLine)
 		}
 		ck := textproto.CanonicalMIMEHeaderKey(k)
 		if seen[ck] {
