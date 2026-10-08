@@ -49,6 +49,22 @@ func FuzzAssembleMessage(f *testing.F) {
 		if len(m.Header["Bcc"]) > 0 || len(m.Header["Cc"]) > 0 {
 			t.Fatalf("assembled message gained recipients:\n%q", raw)
 		}
+		// In the top-level header block, no line may exceed the RFC 5322
+		// §2.1.1 998-octet limit and no RFC 2047 encoded-word may exceed 75
+		// characters, however long the caller's subject, display name or
+		// header value is.
+		head := string(raw)
+		if i := strings.Index(head, crlf+crlf); i >= 0 {
+			head = head[:i]
+		}
+		for _, line := range strings.Split(head, crlf) {
+			if len(line) > 998 {
+				t.Fatalf("header line of %d octets exceeds 998:\n%q", len(line), line)
+			}
+		}
+		if w := longestEncodedWord(head); w > 75 {
+			t.Fatalf("encoded-word of %d characters exceeds 75:\n%q", w, head)
+		}
 		from, err := m.Header.AddressList("From")
 		if err != nil || len(from) != 1 || from[0].Address != "from@example.com" {
 			t.Fatalf("From header = %v, %v:\n%q", from, err, raw)

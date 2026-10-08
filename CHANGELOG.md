@@ -134,6 +134,26 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- REST attachment metadata is now encoded correctly for the wire. A
+  non-ASCII `filename` was written as raw bytes into a header parameter
+  (not valid MIME unless the hop negotiated SMTPUTF8, which the driver
+  never does); it is now emitted as an ASCII `filename="…"` plus an
+  RFC 2231 / 5987 `filename*=UTF-8''…` form. A caller-supplied
+  `contentType` passed through verbatim, so a `name="evil.exe"` parameter
+  could disagree with the displayed filename; it is now reduced to its
+  media type (plus `charset` for `text/*`). A `filename` with a Unicode
+  bidirectional or format control (an attachment-spoofing trick, e.g.
+  U+202E showing `invoicefdp.exe` as `invoiceexe.pdf`) and a `contentType`
+  that is not a valid media type are rejected (`400`) (#78).
+- REST `subject` and display names are now folded so no header line
+  exceeds the RFC 5322 998-octet limit, and each RFC 2047 encoded-word is
+  at most 75 characters; a run without spaces too long to fold is
+  RFC 2047-encoded. A long subject previously produced a single line of
+  thousands of characters, which strict relays reject and others rewrap.
+  The REST limit for custom `headers` now covers the whole line (key,
+  `: ` and value, at most 998 characters) instead of the value alone, so a
+  value close to 998 characters with a long key is now rejected (`400`)
+  instead of being relayed as an over-long line (#79).
 - The SMTP proxy now adds a `Date` and a `Message-ID` header when the
   client omits them, as a submission agent should (RFC 6409 §8). Before,
   a bare `From`/`To`/`Subject` message was relayed with neither; a missing

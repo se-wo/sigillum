@@ -968,8 +968,10 @@ Rules:
 - Multipart: the `data` part holds the JSON object above (Base64 `attachments` in it are sent too); every other part is a file attachment, named after its filename or its form name. A part without a filename that is named like a message field (`subject`, `text`, …) is refused, since it belongs in `data`.
 - Addresses are RFC 5322 (display names allowed, subject to US-2.3); local parts follow US-2.4.
 - `disposition` is `attachment` (default) or `inline`.
+- **[v0.4.0]** Attachment `filename` and `contentType` are encoded for the wire: a non-ASCII `filename` is written both as an ASCII-only `filename="…"` (for old clients) and as an RFC 2231 / 5987 `filename*=UTF-8''…` parameter, rather than as raw bytes; `contentType` is reduced to its media type (plus `charset` for `text/*`), so caller-supplied parameters such as `name="evil.exe"` cannot disagree with the filename. A `filename` containing a Unicode bidirectional or format control (U+202A–202E, U+2066–2069, U+200E/F), or a `contentType` that is not a valid media type, is rejected (`400`).
+- **[v0.4.0]** `subject` and the display names in `from`/`to`/`cc` are folded (RFC 5322 §2.1.1) so no header line exceeds 998 octets, and non-ASCII values are emitted as RFC 2047 encoded-words of at most 75 characters each. A run without spaces too long to fold is RFC 2047-encoded as well, which leaves the decoded text unchanged.
 - `headers`:
-  - Keys and values must not contain CR, LF or NUL; values are at most 998 characters; each header at most once (case-insensitive).
+  - Keys and values must not contain CR, LF or NUL; the header line (key, `: ` and value) is at most 998 characters (**[v0.4.0]**; before, the value alone); each header at most once (case-insensitive).
   - `Resent-*` headers are rejected.
   - `From`, `To`, `Cc`, `Bcc`, `Subject`, `Date`, `Message-ID`, `MIME-Version`, `Content-Type` and `Content-Transfer-Encoding` are managed by Sigillum; values supplied here are **silently dropped**.
   - `Sender` and `Reply-To` are allowed and checked against the policy (US-2.3, US-2.4).
