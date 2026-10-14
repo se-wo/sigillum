@@ -60,6 +60,10 @@ the version being prepared in the same pull request as the change.
 
 ### Added
 
+- The `MailPolicy` webhook warns when `senderRestrictions.allowedSenders`
+  lists addresses its backend's `allowedSenders` never allows; sends from
+  them would fail with `403 sender-not-allowed` while the policy is Ready
+  (#49).
 - `sigillum_smtp_messages_in_flight{namespace}` metric and the
   `smtp.maxConcurrentPerTenant` setting (see Fixed, #73).
 - `sigillum_upstream_auth_failures_total{backend}` metric (see Fixed, #58).

@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
@@ -22,23 +23,37 @@ import (
 
 // MailPolicyValidator enforces the structural rules listed in the plan:
 // at least one subject, a non-empty backendRef, and a recognised backend kind.
-type MailPolicyValidator struct{}
+type MailPolicyValidator struct {
+	// Reader looks up the referenced backend for warnings about it (#49);
+	// nil skips them.
+	Reader client.Reader
+}
 
 // SetupMailPolicyWebhook wires the validator into the manager.
 func SetupMailPolicyWebhook(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr, &sigv1.MailPolicy{}).
-		WithValidator(&MailPolicyValidator{}).
+		WithValidator(&MailPolicyValidator{Reader: mgr.GetClient()}).
 		Complete()
 }
 
 var _ admission.Validator[*sigv1.MailPolicy] = &MailPolicyValidator{}
 
-func (v *MailPolicyValidator) ValidateCreate(_ context.Context, obj *sigv1.MailPolicy) (admission.Warnings, error) {
-	return v.validate(obj)
+func (v *MailPolicyValidator) ValidateCreate(ctx context.Context, obj *sigv1.MailPolicy) (admission.Warnings, error) {
+	return v.validateWithWarnings(ctx, obj)
 }
 
-func (v *MailPolicyValidator) ValidateUpdate(_ context.Context, _, newObj *sigv1.MailPolicy) (admission.Warnings, error) {
-	return v.validate(newObj)
+func (v *MailPolicyValidator) ValidateUpdate(ctx context.Context, _, newObj *sigv1.MailPolicy) (admission.Warnings, error) {
+	return v.validateWithWarnings(ctx, newObj)
+}
+
+// validateWithWarnings adds the warnings that need a lookup to validate's;
+// a rejected policy gets none of them.
+func (v *MailPolicyValidator) validateWithWarnings(ctx context.Context, mp *sigv1.MailPolicy) (admission.Warnings, error) {
+	warnings, err := v.validate(mp)
+	if err != nil {
+		return warnings, err
+	}
+	return append(warnings, v.backendWarnings(ctx, mp)...), nil
 }
 
 func (v *MailPolicyValidator) ValidateDelete(_ context.Context, _ *sigv1.MailPolicy) (admission.Warnings, error) {
