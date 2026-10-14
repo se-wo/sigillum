@@ -123,7 +123,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 **As a** developer **I want** clear error messages, **so that** I know whether to retry or whether my payload is wrong.
 
 *Acceptance criteria:*
-- Errors use RFC 7807 Problem Details (`application/problem+json`).
+- Errors use RFC 7807 Problem Details (`application/problem+json`), also for unknown paths and methods **[v0.4.0]**. The `detail` speaks in terms of the request (`` `to` must be an array of addresses (strings), not a string ``), not of Sigillum's implementation.
 - Whether a request may be retried is defined per status code in §4.4.3. It is **not** "4xx = never retry, 5xx = always retry": `429` is retryable. Upstream failures are split since v0.3.0: `502 upstream-error` is transient (retry), `422 upstream-rejected` is a permanent rejection of this message by the relay (do not retry unchanged).
 - Policy denials name the policy that denied the request (`policy` field).
 
@@ -928,7 +928,7 @@ Controller behavior in generated mode:
 ### 4.4 REST API (v1)
 
 **Base path:** `/v1`
-**Content type:** `application/json`, or `multipart/form-data` for attachments (US-1.3)
+**Content type:** `application/json`, or `multipart/form-data` for attachments (US-1.3). **[v0.4.0]** Any other or a missing `Content-Type` answers `415 unsupported-media-type` (parameters such as `charset` are allowed).
 **Auth:** `Authorization: Bearer <ServiceAccount token>` with audience `sigillum`
 **Transport:** plain HTTP on port 8443 by default, expecting TLS from the mesh or a gateway. Native TLS when `SIGILLUM_TLS_CERT` / `SIGILLUM_TLS_KEY` are set (chart `api.tls.secretName`). **[v0.4.0]** The files are checked every 10 s and a renewed certificate is used for new connections without a restart (the kubelet updates a mounted Secret within about a minute); a pair that does not load keeps the previous one in use and logs a warning. The same applies to the SMTP proxy's certificate (`smtp.tls.secretName`).
 
@@ -1017,6 +1017,9 @@ The problem `type` is `https://sigillum.dev/errors/<slug>`. The audit / metric `
 | `202` | — | Accepted by the backend | — |
 | `400` | `invalid-payload` | Malformed JSON / multipart, unknown field, invalid address or header, no recipient, no content | No, fix the request |
 | `401` | `invalid-token` | Missing, invalid, expired or wrong-audience token | No, fix the token |
+| `404` | `not-found` | No such endpoint **[v0.4.0]** (before, a `text/plain` body) | No |
+| `405` | `method-not-allowed` | The endpoint exists, the method does not; `Allow` header lists the methods **[v0.4.0]** (before, an empty body) | No |
+| `415` | `unsupported-media-type` | `Content-Type` is neither `application/json` nor `multipart/form-data` **[v0.4.0]**; audit reason `invalid_payload` | No, fix the request |
 | `403` | `no-policy-matched` | No policy matches the caller | No |
 | `403` | `sender-not-allowed` | US-2.3 | No |
 | `403` | `recipient-not-allowed` | US-2.4 (recipients or `Reply-To`) | No |

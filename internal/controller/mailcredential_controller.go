@@ -217,8 +217,13 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			conflict, err := r.writeSecret(ctx, &mc, st.Username, password)
 			switch {
 			case conflict:
-				keepOrFail(sigv1.ReasonSecretConflict, fmt.Sprintf("Secret %s/%s exists and is not owned by this MailCredential: %v",
-					mc.Namespace, mc.Spec.SecretName, err))
+				// The API error is the guard's or a failed patch test's
+				// generic 422 text; say what to do instead (#50).
+				log.Info("secret name taken by a foreign Secret", "secret", mc.Spec.SecretName, "err", err)
+				keepOrFail(sigv1.ReasonSecretConflict, fmt.Sprintf("Secret %s/%s exists and is not owned by this MailCredential "+
+					"(only a Secret with the label %s=%s and the annotation %s=%s is updated); set spec.secretName to an unused name, "+
+					"or delete that Secret if nothing else uses it",
+					mc.Namespace, mc.Spec.SecretName, sigv1.CredentialLabel, mc.Name, sigv1.CredentialUIDAnnotation, mc.UID))
 				result.RequeueAfter = secretConflictRequeue
 			case err != nil:
 				keepOrFail(sigv1.ReasonSecretWriteFailed, err.Error())

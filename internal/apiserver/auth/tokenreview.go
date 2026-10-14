@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +41,7 @@ type Authenticator struct {
 
 type cacheEntry struct {
 	subject *Subject
+	reason  string // why the token was rejected, if subject is nil
 	expires time.Time
 }
 
@@ -86,7 +89,7 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (*Subjec
 	if a.cache != nil {
 		if e, ok := a.cache.Get(key); ok && a.now().Before(e.expires) {
 			if e.subject == nil {
-				return nil, errors.New("token rejected")
+				return nil, errors.New(e.reason)
 			}
 			return e.subject, nil
 		}
@@ -104,14 +107,14 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (*Subjec
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	if !resp.Status.Authenticated {
-		if a.cache != nil {
-			a.cache.Add(key, cacheEntry{expires: a.now().Add(a.ttl)})
-		}
 		msg := resp.Status.Error
 		if msg == "" {
 			msg = "token rejected by kube-apiserver"
 		}
-		return nil, errors.New(msg)
+		if got, ok := rejectedAudiences(msg); ok {
+			msg = a.audienceMessage(got)
+		}
+		return nil, a.reject(key, msg)
 	}
 
 	// The TokenReview API requires clients that set spec.audiences to verify
@@ -121,10 +124,7 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (*Subjec
 	// Sigillum a credential that can act as the ServiceAccount against the
 	// Kubernetes API.
 	if !a.audienceMatches(resp.Status.Audiences) {
-		if a.cache != nil {
-			a.cache.Add(key, cacheEntry{expires: a.now().Add(a.ttl)})
-		}
-		return nil, fmt.Errorf("token audiences %v do not include any of %v", resp.Status.Audiences, a.audiences)
+		return nil, a.reject(key, a.audienceMessage(resp.Status.Audiences))
 	}
 
 	ns, sa, ok := parseServiceAccountUsername(resp.Status.User.Username)
@@ -175,6 +175,50 @@ func tokenExpiry(token string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.Unix(int64(secs), 0), true
+}
+
+// reject caches a negative result with its reason and returns it as error.
+func (a *Authenticator) reject(key, reason string) error {
+	if a.cache != nil {
+		a.cache.Add(key, cacheEntry{reason: reason, expires: a.now().Add(a.ttl)})
+	}
+	return errors.New(reason)
+}
+
+// audienceMessage explains a token minted for another audience, most
+// often a default ServiceAccount token meant for the kube-apiserver.
+func (a *Authenticator) audienceMessage(got []string) string {
+	want := a.audiences[0]
+	have := "token has no audience"
+	if len(got) > 0 {
+		have = "token audience is " + strings.Join(got, ", ")
+	}
+	return fmt.Sprintf("%s, expected %s (create the token with --audience %s, or a projected token with audience: %s)",
+		have, strings.Join(a.audiences, " or "), want, want)
+}
+
+// kubeAudienceError matches the kube-apiserver's TokenReview error for a
+// token of another audience: `token audiences ["https://kubernetes..."] is
+// invalid for the target audiences ["sigillum"]`.
+var (
+	kubeAudienceError = regexp.MustCompile(`token audiences \[([^\]]*)\] is invalid for the target audiences`)
+	quotedString      = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+)
+
+// rejectedAudiences returns the audiences of a token the kube-apiserver
+// rejected for its audience.
+func rejectedAudiences(msg string) ([]string, bool) {
+	m := kubeAudienceError.FindStringSubmatch(msg)
+	if m == nil {
+		return nil, false
+	}
+	var out []string
+	for _, q := range quotedString.FindAllString(m[1], -1) {
+		if s, err := strconv.Unquote(q); err == nil {
+			out = append(out, s)
+		}
+	}
+	return out, true
 }
 
 func (a *Authenticator) audienceMatches(got []string) bool {

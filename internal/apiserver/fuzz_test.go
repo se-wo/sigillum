@@ -80,3 +80,24 @@ func FuzzRequestHeaders(f *testing.F) {
 		}
 	})
 }
+
+// FuzzDecodeRequestJSON checks that a rejected payload is explained in
+// terms of the request, never with encoding/json's Go type names (#50).
+func FuzzDecodeRequestJSON(f *testing.F) {
+	f.Add(`{"from":"a@x","to":"b@x"}`)
+	f.Add(`{"to":[1],"cc":[{}],"body":"x"}`)
+	f.Add(`{"attachments":[{"filename":1}],"headers":{"X":[]}}`)
+	f.Add(`{"body":{"text":true,"html":null}}`)
+	f.Add(`[]`)
+	f.Fuzz(func(t *testing.T, body string) {
+		var req requestBody
+		err := decodeRequestJSON([]byte(body), &req)
+		if err == nil {
+			return
+		}
+		if msg := err.Error(); strings.Contains(msg, "Go struct") || strings.Contains(msg, "Go value") ||
+			strings.Contains(msg, "requestBody") || strings.Contains(msg, "[]string") {
+			t.Fatalf("%q: detail leaks Go internals: %s", body, msg)
+		}
+	})
+}

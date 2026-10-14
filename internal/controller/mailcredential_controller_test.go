@@ -170,6 +170,11 @@ func TestSecretConflictKeepsIssuedPassword(t *testing.T) {
 	if ready == nil || ready.Status != metav1.ConditionTrue || !strings.Contains(ready.Message, "not owned by this MailCredential") {
 		t.Fatalf("password in grafana-smtp stays usable, the conflict is reported: %+v", ready)
 	}
+	// #50: the message says what to do, not the API's generic 422 text.
+	if !strings.Contains(ready.Message, "set spec.secretName to an unused name") ||
+		strings.Contains(ready.Message, "is invalid") {
+		t.Fatalf("conflict message must be actionable: %q", ready.Message)
+	}
 	if got.Status.SecretName != "grafana-smtp" || !credential.VerifyGenerated(got.Status.Current.Hash, "current") {
 		t.Fatalf("status keeps the issued password: %+v", got.Status)
 	}

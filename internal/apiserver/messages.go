@@ -92,6 +92,32 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// rejectPayload answers 4xx for a request that never reached the
+	// pipeline and still leaves an audit record.
+	rejectPayload := func(p problem.Problem) {
+		p.MessageID = msgID
+		// Same audit reasons as the SMTP proxy: SIEM rules key on them.
+		reason := "invalid_payload"
+		if p.Type == problem.TypeBase+problem.TypeMessageTooLarge {
+			reason = "message_too_large"
+		}
+		s.gw.Reject(ev, reason)
+		problem.Write(w, p)
+	}
+
+	// A body in another format would be read as JSON and fail with a
+	// misleading detail, or worse, succeed for a client that is broken.
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if mediaType != "application/json" && mediaType != "multipart/form-data" {
+		p := problem.New(problem.TypeUnsupportedMedia, http.StatusUnsupportedMediaType,
+			"Unsupported Content-Type", "send Content-Type: application/json, or multipart/form-data with attachments")
+		if ct := r.Header.Get("Content-Type"); ct == "" {
+			p.Detail = "the Content-Type header is missing; " + p.Detail
+		}
+		rejectPayload(p)
+		return
+	}
+
 	// Bound the bodies held at once before reading this one (see
 	// bodyBudget). Callers are authenticated by now, so anonymous clients
 	// cannot take up the budget.
@@ -110,24 +136,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	// rejectPayload answers 4xx for a request that never reached the
-	// pipeline and still leaves an audit record.
-	rejectPayload := func(p problem.Problem) {
-		p.MessageID = msgID
-		// Same audit reasons as the SMTP proxy: SIEM rules key on them.
-		reason := "invalid_payload"
-		if p.Type == problem.TypeBase+problem.TypeMessageTooLarge {
-			reason = "message_too_large"
-		}
-		s.gw.Reject(ev, reason)
-		problem.Write(w, p)
-	}
-
 	const maxBody = 32 * 1024 * 1024 // 32 MiB hard ceiling — policy enforces lower limits
 
 	var req requestBody
 	var atts []driver.Attachment
-	if ct := r.Header.Get("Content-Type"); strings.HasPrefix(ct, "multipart/form-data") {
+	if mediaType == "multipart/form-data" {
 		var merr error
 		req, atts, merr = parseMultipartMessage(r, maxBody)
 		if merr != nil {
@@ -477,12 +490,74 @@ func decodeOneJSON(data []byte, v any, disallowUnknown bool) error {
 		if errors.Is(err, io.EOF) {
 			return errors.New("empty JSON payload")
 		}
+		var te *json.UnmarshalTypeError
+		if errors.As(err, &te) {
+			return jsonTypeError(te)
+		}
 		return err
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return errors.New("unexpected data after the JSON object")
 	}
 	return nil
+}
+
+// fieldTypes describes what a request field holds, for type errors. Array
+// elements are keyed with "[]".
+var fieldTypes = map[string]string{
+	"to":          "an array of addresses (strings)",
+	"cc":          "an array of addresses (strings)",
+	"bcc":         "an array of addresses (strings)",
+	"to[]":        "an address (string)",
+	"cc[]":        "an address (string)",
+	"bcc[]":       "an address (string)",
+	"body":        "an object with text and/or html",
+	"attachments": "an array of attachment objects",
+	"headers":     "an object of header names to string values",
+}
+
+// jsonTypeError rewords encoding/json's type error, which names Go types
+// ("Go struct field requestBody.to of type []string"), in terms of the
+// request: "`to` must be an array of addresses (strings), not a string".
+func jsonTypeError(te *json.UnmarshalTypeError) error {
+	if te.Field == "" {
+		return errors.New("the payload must be a JSON object")
+	}
+	// encoding/json joins the path with dots, array indices included.
+	var path, key strings.Builder
+	for i, seg := range strings.Split(te.Field, ".") {
+		if _, err := strconv.Atoi(seg); err == nil && i > 0 && key.String() != "headers" {
+			path.WriteString("[" + seg + "]")
+			key.WriteString("[]")
+			continue
+		}
+		if i > 0 {
+			path.WriteByte('.')
+			key.WriteByte('.')
+		}
+		path.WriteString(seg)
+		key.WriteString(seg)
+	}
+	want := fieldTypes[key.String()]
+	if want == "" {
+		switch te.Type.Kind() {
+		case reflect.String:
+			want = "a string"
+		case reflect.Slice:
+			want = "an array"
+		case reflect.Map, reflect.Struct:
+			want = "an object"
+		default:
+			want = "a " + te.Type.Kind().String()
+		}
+	}
+	got := te.Value
+	if got == "array" || got == "object" {
+		got = "an " + got
+	} else if !strings.HasPrefix(got, "number ") {
+		got = "a " + got
+	}
+	return fmt.Errorf("`%s` must be %s, not %s", path.String(), want, got)
 }
 
 // hasContent reports whether a message would carry anything: the driver
