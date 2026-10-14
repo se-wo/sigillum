@@ -51,6 +51,10 @@ Sigillum resource, so `helm install` refuses it.
 
 Point Sigillum at an SMTP relay and authorize a workload to send mail through it.
 
+This README describes `main`. Fields marked `(0.4.0)` are not in a released
+chart yet; the 0.3 CRDs drop them without an error, so a backend would have no
+sender bound and a policy no daily cap. Leave them out with a 0.3 release.
+
 ```yaml
 # 1. Credentials for the upstream relay (omit for unauth relays).
 apiVersion: v1
@@ -77,10 +81,10 @@ spec:
     credentialsRef:
       name: corporate-smtp-credentials
       namespace: sigillum-system
-    # optional, for a relay certificate from a private CA: PEM CA
+    # optional (0.4.0), for a relay certificate from a private CA: PEM CA
     # certificates trusted in addition to the system roots (key ca.crt)
     # caSecretRef: { name: corporate-ca, namespace: sigillum-system }
-  # optional: the relay sends only for these. "*@example.com" does not
+  # optional (0.4.0): the relay sends only for these. "*@example.com" does not
   # cover subdomains, so list every domain the policies use.
   allowedSenders: ["*@example.com", "*@billing.example.com", "*@monitoring.example.com"]
 ---
@@ -106,7 +110,7 @@ spec:
   rateLimits:
     messagesPerMinute: 60
     messagesPerHour: 1000
-    messagesPerDay: 5000          # stay below the upstream mailbox's daily quota (needs rateLimit.backend: redis, see below)
+    messagesPerDay: 5000          # (0.4.0) stay below the upstream mailbox's daily quota (needs rateLimit.backend: redis, see below)
 ```
 
 Rate limits are only exact with `--set rateLimit.backend=redis`. The
