@@ -134,6 +134,12 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- The startup CRD check reported an API server that could not serve the
+  OpenAPI schemas (a slow start after a node restart) as "installed CRDs
+  do not match this version" and told the operator to re-apply the CRDs.
+  It now says `could not read the CRD schemas from the API server (…);
+  retrying on restart`; only missing kinds or fields get the mismatch
+  message (#71).
 - REST attachment metadata is now encoded correctly for the wire. A
   non-ASCII `filename` was written as raw bytes into a header parameter
   (not valid MIME unless the hop negotiated SMTPUTF8, which the driver

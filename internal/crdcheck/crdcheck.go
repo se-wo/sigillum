@@ -62,8 +62,22 @@ const Timeout = 30 * time.Second
 // SkipFlagUsage is the help text of every mode's --skip-crd-check flag.
 const SkipFlagUsage = "do not verify at startup that the installed CRDs match this version (for clusters that hide the OpenAPI v3 endpoint)"
 
+// MismatchError reports installed CRDs that lack a kind or field this
+// version needs. Verify returns other errors when it cannot read the
+// schemas at all.
+type MismatchError struct {
+	// Problems are the missing kinds and fields, one entry each.
+	Problems []string
+}
+
+// One line: it ends up in a single log record.
+func (e *MismatchError) Error() string { return strings.Join(e.Problems, "; ") }
+
 // Wait runs Verify until it succeeds or timeout elapses, since the API
-// server publishes a created or updated CRD schema a few seconds late.
+// server publishes a created or updated CRD schema a few seconds late. Only
+// a *MismatchError is reported as outdated CRDs; an API server that cannot
+// serve the schemas (one still starting after a node restart) is reported
+// as such, since re-applying the CRDs would not help.
 func Wait(ctx context.Context, cfg *rest.Config, fields []Field, timeout time.Duration) error {
 	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
@@ -83,7 +97,11 @@ func Wait(ctx context.Context, cfg *rest.Config, fields []Field, timeout time.Du
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("installed CRDs do not match this version: %w; %s", last, UpgradeHint)
+			var mismatch *MismatchError
+			if errors.As(last, &mismatch) {
+				return fmt.Errorf("installed CRDs do not match this version: %w; %s", last, UpgradeHint)
+			}
+			return fmt.Errorf("could not read the CRD schemas from the API server (%w); retrying on restart", last)
 		case <-time.After(2 * time.Second):
 		}
 	}
@@ -98,7 +116,7 @@ func Verify(ctx context.Context, c openapi.ClientWithContext, fields []Field) er
 	}
 	p, ok := paths["apis/"+gv.Group+"/"+gv.Version]
 	if !ok {
-		return fmt.Errorf("no %s CRDs are installed", gv)
+		return &MismatchError{Problems: []string{fmt.Sprintf("no %s CRDs are installed", gv)}}
 	}
 	raw, err := p.SchemaWithContext(ctx, "application/json")
 	if err != nil {
@@ -149,8 +167,7 @@ func verifyDoc(raw []byte, fields []Field) error {
 		}
 	}
 	if len(problems) > 0 {
-		// One line: it ends up in a single log record.
-		return errors.New(strings.Join(problems, "; "))
+		return &MismatchError{Problems: problems}
 	}
 	return nil
 }
