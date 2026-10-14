@@ -382,9 +382,9 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 **As a** platform engineer **I want** structured JSON logs, **so that** I can search and correlate mail activity.
 
 *Acceptance criteria:*
-- JSON via Go `log/slog` on stdout.
+- JSON via Go `log/slog` on stdout. **[v0.4.0]** One schema in all three modes (`time`, `level` in upper case, `msg`, snake_case keys): the controller-runtime and client-go (klog) loggers, Go's standard `log` package and OpenTelemetry's error handler write through the same handler, and keys of those libraries are converted to snake_case (`reconcile_id`, `controller_kind`). A failing trace export (unreachable collector) is logged at `WARN` as `telemetry export failed`, at most once per minute, with the number of errors left out in `suppressed_errors`.
 - Log level via env `SIGILLUM_LOG_LEVEL` (`debug`, `info`, `warn`, `error`; chart value `logLevel`).
-- Fields per mail log line: `time`, `level`, `msg`, `message_id`, `namespace`, `service_account`, `authMethod` (`oauth_bearer` | `smtp_credential` | `pod_ip_legacy`; `istio` once US-3.3 lands), `transport`, `policy`, `backend`, `result`, plus `reason`, `upstream_id`, `trace_id`, `credential` (and `credential_previous`) and `cluster` where applicable.
+- Fields per mail log line: `time`, `level`, `msg`, `message_id`, `namespace`, `service_account`, `auth_method` (`oauth_bearer` | `smtp_credential` | `pod_ip_legacy`; `istio` once US-3.3 lands), `transport`, `policy`, `backend`, `result`, plus `reason`, `upstream_id`, `trace_id`, `credential` (and `credential_previous`) and `cluster` where applicable.
 - No mail content in logs (metadata only), no tokens, no passwords.
 
 #### US-4.3 — Audit log stream **[v0.2.0]**

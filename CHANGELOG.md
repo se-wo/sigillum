@@ -14,6 +14,16 @@ the version being prepared in the same pull request as the change.
 
 ### Upgrading
 
+- Log schema: all three modes now log the same JSON (see Changed).
+  Log pipelines that parse the controller's old zap lines or match these
+  keys need updating:
+  - controller: `ts` → `time`, `level` values `info` → `INFO` (upper
+    case, as api and smtp), `error` → `err`, and controller-runtime keys
+    in snake_case (`controllerGroup` → `controller_group`,
+    `controllerKind` → `controller_kind`, `reconcileID` →
+    `reconcile_id`, the object key such as `MailBackend` →
+    `mail_backend`);
+  - api and smtp: `authMethod` → `auth_method`.
 - Addresses whose domain is not an ASCII host name are rejected with
   `400 invalid-payload` (SMTP `553`), see Security. Send to an
   internationalized domain in its A-label form (`xn--…`).
@@ -100,6 +110,15 @@ the version being prepared in the same pull request as the change.
 
 ### Changed
 
+- One log schema in every mode (#51). The controller logged with zap
+  (`{"level":"info","ts":…}`), api and smtp with slog
+  (`{"time":…,"level":"INFO"}`), and keys mixed camelCase and snake_case.
+  controller-runtime, client-go (klog), Go's standard `log` and
+  OpenTelemetry now all write through the slog JSON handler, with
+  snake_case keys. The controller now honours `logLevel`
+  (`SIGILLUM_LOG_LEVEL`). OpenTelemetry's export errors (an unreachable
+  `tracing.endpoint`) were plain-text lines among the JSON; they are now
+  `WARN` `telemetry export failed`, at most once per minute.
 - Chart: `helm install` and `helm upgrade` fail with an explanation when
   the admission webhook is enabled (the default) without cert-manager
   (`webhook.certificate.useCertManager=false`, the default) and the

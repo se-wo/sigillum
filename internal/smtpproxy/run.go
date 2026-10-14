@@ -172,6 +172,7 @@ func Run(logger *slog.Logger) error {
 	if o.ClusterName != "" {
 		logger = logger.With("cluster", o.ClusterName)
 	}
+	telemetry.SetGlobalLogger(logger)
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return err
