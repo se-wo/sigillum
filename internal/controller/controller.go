@@ -6,7 +6,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -27,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	"github.com/se-wo/sigillum/internal/cliflags"
 	"github.com/se-wo/sigillum/internal/crdcheck"
 	"github.com/se-wo/sigillum/internal/credential"
 	"github.com/se-wo/sigillum/internal/kubecache"
@@ -78,10 +78,7 @@ func init() {
 			skipCRDCheck         bool
 			shutdownDelay        time.Duration
 		)
-		fs := flag.NewFlagSet("controller", flag.ContinueOnError)
-		// --mode is consumed by the entrypoint; accept it here so Parse does
-		// not error out on it.
-		_ = fs.String("mode", "", "operating mode (handled by entrypoint)")
+		fs := cliflags.New("controller")
 		fs.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "address the metric endpoint binds to")
 		fs.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "address health/readiness probes bind to")
 		fs.IntVar(&webhookPort, "webhook-port", 9443, "port the validating webhook server listens on")
@@ -102,7 +99,7 @@ func init() {
 		fs.BoolVar(&skipCRDCheck, "skip-crd-check", false, crdcheck.SkipFlagUsage)
 
 		// Allow flags to be passed after --mode=controller.
-		if err := fs.Parse(os.Args[1:]); err != nil && err != flag.ErrHelp {
+		if err := cliflags.Parse(fs, os.Args[1:]); err != nil {
 			return err
 		}
 

@@ -701,7 +701,7 @@ Personal accounts have no app-only access: no client credentials for Outlook.com
 | **controller** (`--mode=controller`) | Reconciles `MailBackend` / `ClusterMailBackend` / `MailPolicy` / `MailCredential`, status updates, validating webhook, periodic backend probes, credential Secrets and their guard check | Deployment with leader election (chart default 1) |
 | **rate-limit store** | State for sliding-window counters | In-process memory (per replica) **or** external Redis (single node, Sentinel or Cluster) |
 
-All three modes ship as one binary and one container image. The **gateway pipeline** (`internal/gateway`) is transport-agnostic: REST and SMTP only parse their wire format and map the pipeline result to their status codes, so policy, rate limiting, audit, metrics and tracing behave identically on both paths.
+All three modes ship as one binary and one container image. `sigillum --help` lists the flags of every mode, `sigillum --mode=<mode> --help` those of one (exit code 0). The **gateway pipeline** (`internal/gateway`) is transport-agnostic: REST and SMTP only parse their wire format and map the pipeline result to their status codes, so policy, rate limiting, audit, metrics and tracing behave identically on both paths.
 
 ### 4.3 Custom resource definitions
 

@@ -304,7 +304,7 @@ make e2e                # kind + Mailpit smoke (needs docker)
 ## Layout
 
 ```
-cmd/sigillum/                  # single entrypoint, --mode=api|controller|smtp
+cmd/sigillum/                  # single entrypoint, --mode=api|controller|smtp (--help lists the flags)
 api/v1alpha1/                  # CRD types + generated deepcopy
 internal/driver/               # Driver interface + registry
 internal/driver/smtp/          # SMTP driver (STARTTLS, PLAIN/LOGIN/CRAM-MD5, MIME)

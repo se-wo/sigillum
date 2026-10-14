@@ -134,6 +134,11 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- `sigillum --help` printed only `must pass --mode=…` and exited with 2.
+  It now lists the modes and the flags of each (`--mode=<mode> --help`:
+  of that mode) and exits with 0; without `--help`, the mode list goes
+  to stderr. Before, `--mode=<mode> --help` printed the flags and then
+  started the mode anyway (#53).
 - The startup CRD check reported an API server that could not serve the
   OpenAPI schemas (a slow start after a node restart) as "installed CRDs
   do not match this version" and told the operator to re-apply the CRDs.
