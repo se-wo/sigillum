@@ -14,6 +14,16 @@ the version being prepared in the same pull request as the change.
 
 ### Upgrading
 
+- Log schema: all three modes now log the same JSON (see Changed).
+  Log pipelines that parse the controller's old zap lines or match these
+  keys need updating:
+  - controller: `ts` → `time`, `level` values `info` → `INFO` (upper
+    case, as api and smtp), `error` → `err`, and controller-runtime keys
+    in snake_case (`controllerGroup` → `controller_group`,
+    `controllerKind` → `controller_kind`, `reconcileID` →
+    `reconcile_id`, the object key such as `MailBackend` →
+    `mail_backend`);
+  - api and smtp: `authMethod` → `auth_method`.
 - Addresses whose domain is not an ASCII host name are rejected with
   `400 invalid-payload` (SMTP `553`), see Security. Send to an
   internationalized domain in its A-label form (`xn--…`).
@@ -116,6 +126,15 @@ the version being prepared in the same pull request as the change.
 
 ### Changed
 
+- One log schema in every mode (#51). The controller logged with zap
+  (`{"level":"info","ts":…}`), api and smtp with slog
+  (`{"time":…,"level":"INFO"}`), and keys mixed camelCase and snake_case.
+  controller-runtime, client-go (klog), Go's standard `log` and
+  OpenTelemetry now all write through the slog JSON handler, with
+  snake_case keys. The controller now honours `logLevel`
+  (`SIGILLUM_LOG_LEVEL`). OpenTelemetry's export errors (an unreachable
+  `tracing.endpoint`) were plain-text lines among the JSON; they are now
+  `WARN` `telemetry export failed`, at most once per minute.
 - Chart: `helm install` and `helm upgrade` fail with an explanation when
   the admission webhook is enabled (the default) without cert-manager
   (`webhook.certificate.useCertManager=false`, the default) and the
@@ -170,6 +189,21 @@ the version being prepared in the same pull request as the change.
   It now says `could not read the CRD schemas from the API server (…);
   retrying on restart`; only missing kinds or fields get the mismatch
   message (#71).
+- SMTP: `--read-timeout` (60 s) capped the whole `DATA` transfer, so an
+  8 MB message sent at about 100 KB/s was cut off after 60 s with no reply
+  and audited as `invalid_payload`. During `DATA` it is now an idle
+  timeout, renewed with every read. The transfer as a whole is bounded by
+  the new `--data-timeout` (chart `smtp.dataTimeout`; by default
+  `--max-message-bytes` at 100 KiB/s plus `--read-timeout`, about 6.5 min
+  for 32 MiB). Either timeout answers `451 4.4.2 Timeout during data
+  transfer`, closes the connection and is audited as `data_timeout` (#81).
+- SMTP: a message line over the line-length limit (go-smtp's default of
+  2000 bytes) bounced with `554 5.0.0 Error: transaction failed: smtp: too
+  long a line in input stream` and a TCP reset. It now answers
+  `550 5.6.0 Line longer than N bytes; use quoted-printable or base64` and
+  closes the connection in order. The limit is set explicitly with the new
+  `--max-line-length` (chart `smtp.maxLineLength`, default 2000, at least
+  1000 per RFC 5321) (#64).
 - REST attachment metadata is now encoded correctly for the wire. A
   non-ASCII `filename` was written as raw bytes into a header parameter
   (not valid MIME unless the hop negotiated SMTPUTF8, which the driver

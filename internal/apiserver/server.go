@@ -120,6 +120,10 @@ func init() {
 			return err
 		}
 
+		if clusterName != "" {
+			logger = logger.With("cluster", clusterName)
+		}
+		telemetry.SetGlobalLogger(logger)
 		cfg, err := ctrl.GetConfig()
 		if err != nil {
 			return err
@@ -132,9 +136,6 @@ func init() {
 		clientset, err := kubernetes.NewForConfig(cfg)
 		if err != nil {
 			return err
-		}
-		if clusterName != "" {
-			logger = logger.With("cluster", clusterName)
 		}
 		cl, err := cluster.New(cfg, func(o *cluster.Options) {
 			o.Scheme = scheme

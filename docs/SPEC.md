@@ -384,9 +384,9 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 **As a** platform engineer **I want** structured JSON logs, **so that** I can search and correlate mail activity.
 
 *Acceptance criteria:*
-- JSON via Go `log/slog` on stdout.
+- JSON via Go `log/slog` on stdout. **[v0.4.0]** One schema in all three modes (`time`, `level` in upper case, `msg`, snake_case keys): the controller-runtime and client-go (klog) loggers, Go's standard `log` package and OpenTelemetry's error handler write through the same handler, and keys of those libraries are converted to snake_case (`reconcile_id`, `controller_kind`). A failing trace export (unreachable collector) is logged at `WARN` as `telemetry export failed`, at most once per minute, with the number of errors left out in `suppressed_errors`.
 - Log level via env `SIGILLUM_LOG_LEVEL` (`debug`, `info`, `warn`, `error`; chart value `logLevel`).
-- Fields per mail log line: `time`, `level`, `msg`, `message_id`, `namespace`, `service_account`, `authMethod` (`oauth_bearer` | `smtp_credential` | `pod_ip_legacy`; `istio` once US-3.3 lands), `transport`, `policy`, `backend`, `result`, plus `reason`, `upstream_id`, `trace_id`, `credential` (and `credential_previous`) and `cluster` where applicable.
+- Fields per mail log line: `time`, `level`, `msg`, `message_id`, `namespace`, `service_account`, `auth_method` (`oauth_bearer` | `smtp_credential` | `pod_ip_legacy`; `istio` once US-3.3 lands), `transport`, `policy`, `backend`, `result`, plus `reason`, `upstream_id`, `trace_id`, `credential` (and `credential_previous`) and `cluster` where applicable.
 - No mail content in logs (metadata only), no tokens, no passwords.
 
 #### US-4.3 — Audit log stream **[v0.2.0]**
@@ -1112,7 +1112,7 @@ Drivers register a factory per type in a process-wide registry. The webhook reje
 - **Message rules** (checked at the end of `DATA`): exactly one `From` field holding exactly one address; at most one `Sender` field (holding exactly one address) and at most one `Reply-To` field; no `Resent-*` fields; display names per US-2.3. Violations answer `550 5.6.0`.
 - **Policy input:** header `From`, envelope sender and `Sender` against `allowedSenders`; the envelope recipients (`RCPT TO`, not the `To`/`Cc` headers) and `Reply-To` against `recipientRestrictions`.
 - **Relay:** the message is relayed byte-for-byte via the driver's `RawSender`, with a prepended `Received` header carrying the Sigillum message ID and the protocol per RFC 3848 (`ESMTP`, `ESMTPA` when authenticated, `ESMTPS`/`ESMTPSA` over STARTTLS). `Bcc:` header fields are removed before relaying. **[v0.4.0]** As a submission agent (RFC 6409 §8), the proxy adds a `Date` and a `Message-ID` when the client omitted them (a missing `Date` breaks RFC 5322 and is often scored as spam); the `Message-ID` uses the Sigillum message ID and the sender's domain. Everything the client did send, including its own `Date`/`Message-ID`, is relayed unchanged.
-- **Limits:** `--max-message-bytes` (default 32 MiB) and `--max-recipients` (default 100) are hard ceilings; policies enforce lower limits. `--max-concurrent-messages` (default 4) bounds memory use per pod; excess messages wait up to `--send-timeout` and then get `451 4.3.2`. **[v0.4.0]** `--max-concurrent-per-tenant` (default: half of `--max-concurrent-messages`, at least 1) caps the messages one tenant (namespace) relays at once, acquired before the global slot, so one tenant's slow or hung relay cannot hold every slot and stall the others. Messages over a tenant's cap wait (holding no global slot) and then get `451 4.3.2`. `sigillum_smtp_messages_in_flight{namespace}` exposes the per-tenant count.
+- **Limits:** `--max-message-bytes` (default 32 MiB) and `--max-recipients` (default 100) are hard ceilings; policies enforce lower limits. **[v0.4.0]** `--max-line-length` (chart `smtp.maxLineLength`, default 2000 bytes including CRLF, 1000 to 1048576) bounds command and message lines; a message with a longer line is refused with `550 5.6.0` (audited as `invalid_payload`) and the connection is closed after the reply, since the rest of the `DATA` stream cannot be read as commands. **[v0.4.0]** `--read-timeout` (default 60 s) is an idle timeout, also during `DATA`, where it is renewed with every read; `--data-timeout` (chart `smtp.dataTimeout`) bounds a `DATA` transfer as a whole and defaults to `--max-message-bytes` at a minimum throughput of 100 KiB/s plus `--read-timeout` (about 6.5 min for 32 MiB). Either timeout during `DATA` answers `451 4.4.2 Timeout during data transfer`, is audited as `data_timeout`, and closes the connection after the reply. `--max-concurrent-messages` (default 4) bounds memory use per pod; excess messages wait up to `--send-timeout` and then get `451 4.3.2`. **[v0.4.0]** `--max-concurrent-per-tenant` (default: half of `--max-concurrent-messages`, at least 1) caps the messages one tenant (namespace) relays at once, acquired before the global slot, so one tenant's slow or hung relay cannot hold every slot and stall the others. Messages over a tenant's cap wait (holding no global slot) and then get `451 4.3.2`. `sigillum_smtp_messages_in_flight{namespace}` exposes the per-tenant count.
 - Pod lookup for `podip` uses an informer cache of pods.
 - Otherwise the same gateway pipeline as REST (§4.2).
 
@@ -1129,9 +1129,10 @@ Drivers register a factory per type in a process-wide registry. The webhook reje
 | Null sender, policy denial (no policy, sender, recipient) | `550 5.7.1` |
 | Too many recipients for policy | `550 5.5.3` |
 | Over policy size | `552 5.3.4` |
-| Malformed message | `550 5.6.0` |
+| Malformed message, line over `--max-line-length` (then closes) | `550 5.6.0` |
 | Rate limited | `421 4.7.0` (see Q-7) |
 | Upstream transient / backend not ready / limiter down / busy | `451` |
+| Pause over `--read-timeout` or transfer over `--data-timeout` during `DATA` (then closes) | `451 4.4.2` |
 | Upstream permanent rejection | `554 5.0.0` |
 
 Each reply after `DATA` carries the Sigillum message ID for correlation with the audit log.
@@ -1168,7 +1169,7 @@ One JSON object per line. Field names are a public contract; SIEM pipelines key 
 | `decision` | string | `accept` or `reject` |
 | `reason` | string | Rejection reason (omitted on accept), see below |
 
-Rejection reasons: `missing_token`, `invalid_token`, `invalid_credentials`, `auth_rate_limited`, `auth_unavailable`, `auth_required`, `pod_ip_unresolved`, `shutting_down`, `busy`, `null_sender`, `invalid_payload`, `message_too_large`, `no_policy_matched`, `sender_not_allowed`, `recipient_not_allowed`, `too_many_recipients`, `backend_not_ready`, `policy_invalid`, `rate_limited`, `ratelimit_unavailable`, `upstream_error`, `upstream_rejected`. (`upstream_rejected` replaces `upstream_error` for permanent rejections since v0.3.0, on both transports.)
+Rejection reasons: `missing_token`, `invalid_token`, `invalid_credentials`, `auth_rate_limited`, `auth_unavailable`, `auth_required`, `pod_ip_unresolved`, `shutting_down`, `busy`, `null_sender`, `invalid_payload`, `message_too_large`, `data_timeout` (SMTP, v0.4.0), `no_policy_matched`, `sender_not_allowed`, `recipient_not_allowed`, `too_many_recipients`, `backend_not_ready`, `policy_invalid`, `rate_limited`, `ratelimit_unavailable`, `upstream_error`, `upstream_rejected`. (`upstream_rejected` replaces `upstream_error` for permanent rejections since v0.3.0, on both transports.)
 
 The record never contains subject, body, attachment content, header values other than addresses, tokens or passwords.
 

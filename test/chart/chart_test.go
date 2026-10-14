@@ -287,6 +287,17 @@ func TestChartCredentialAuthNeedsTLS(t *testing.T) {
 	}
 }
 
+func TestChartSMTPLimits(t *testing.T) {
+	a := args(t, render(t, "--set", "smtp.enabled=true"), "t-sigillum-smtp")
+	if a["max-line-length"] != "2000" || a["data-timeout"] != "0s" {
+		t.Fatalf("max-line-length=%q data-timeout=%q, want 2000 and 0s", a["max-line-length"], a["data-timeout"])
+	}
+	a = args(t, render(t, "--set", "smtp.enabled=true", "--set", "smtp.maxLineLength=8192"), "t-sigillum-smtp")
+	if a["max-line-length"] != "8192" {
+		t.Fatalf("max-line-length=%q, want 8192", a["max-line-length"])
+	}
+}
+
 // The release workflow publishes the CHANGELOG.md section of the tagged
 // version as release notes and fails without one; catch that before a tag.
 func TestChangelogCoversChartVersion(t *testing.T) {

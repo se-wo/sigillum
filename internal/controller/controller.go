@@ -21,7 +21,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
@@ -30,6 +29,7 @@ import (
 	"github.com/se-wo/sigillum/internal/crdcheck"
 	"github.com/se-wo/sigillum/internal/credential"
 	"github.com/se-wo/sigillum/internal/kubecache"
+	"github.com/se-wo/sigillum/internal/telemetry"
 	whv1 "github.com/se-wo/sigillum/internal/webhook"
 
 	// pull in the SMTP driver so the registry has it at startup
@@ -57,7 +57,7 @@ func Run(logger *slog.Logger) error {
 }
 
 func init() {
-	run = func(_ *slog.Logger) error {
+	run = func(logger *slog.Logger) error {
 		var (
 			metricsAddr          string
 			probeAddr            string
@@ -109,11 +109,10 @@ func init() {
 			return fmt.Errorf("--credential-guard-check-interval must be positive, got %s", credentialGuardCheck)
 		}
 
-		zlog := zap.New(zap.UseDevMode(false))
 		if clusterName != "" {
-			zlog = zlog.WithValues("cluster", clusterName)
+			logger = logger.With("cluster", clusterName)
 		}
-		ctrl.SetLogger(zlog)
+		telemetry.SetGlobalLogger(logger)
 		setupLog := log.Log.WithName("setup")
 
 		releaseNs := os.Getenv("POD_NAMESPACE")
