@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/se-wo/sigillum/internal/driver"
 	"github.com/se-wo/sigillum/internal/oauth/oauthtest"
@@ -234,6 +235,33 @@ func TestSend_GraphErrors(t *testing.T) {
 			To: []driver.Address{{Address: "a@example.com"}}, Body: driver.Body{Text: "x"}})
 		if !errors.Is(err, tc.want) || !strings.Contains(err.Error(), tc.detail) {
 			t.Errorf("HTTP %d: want %v with %q, got %v", tc.status, tc.want, tc.detail, err)
+		}
+	}
+}
+
+// #63: Graph's Retry-After on throttling reaches the caller, capped.
+func TestSend_ThrottlingCarriesRetryAfter(t *testing.T) {
+	for _, tc := range []struct {
+		status     int
+		retryAfter string
+		want       time.Duration
+	}{
+		{429, "30", 30 * time.Second},
+		{503, "120", 2 * time.Minute},
+		{429, "86400", driver.MaxRetryAfter},
+		{503, time.Now().Add(time.Hour).UTC().Format(http.TimeFormat), driver.MaxRetryAfter},
+		{429, "", 0},
+		{429, "soon", 0},
+		{500, "30", 0}, // only throttling answers count
+	} {
+		f := newFixture(t)
+		f.graph.statuses = []int{tc.status}
+		f.graph.header = http.Header{"Retry-After": {tc.retryAfter}}
+		_, err := f.driver.Send(context.Background(), &driver.Message{From: driver.Address{Address: "app@contoso.com"},
+			To: []driver.Address{{Address: "a@example.com"}}, Body: driver.Body{Text: "x"}})
+		if !errors.Is(err, driver.ErrUpstreamTransient) || driver.RetryAfter(err) != tc.want {
+			t.Errorf("HTTP %d Retry-After %q: want transient with %v, got %v (%v)",
+				tc.status, tc.retryAfter, tc.want, err, driver.RetryAfter(err))
 		}
 	}
 }

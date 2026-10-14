@@ -275,6 +275,18 @@ func (s *Server) buildRouter() http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(s.requestLogger)
+	// Set before the routes, so /v1 inherits them: every error is a
+	// problem document (US-1.4), not chi's text/plain or empty body.
+	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+		problem.Write(w, problem.New(problem.TypeNotFound, http.StatusNotFound,
+			"Not found", "no such endpoint; mail is sent with POST /v1/messages"))
+	})
+	r.MethodNotAllowed(func(w http.ResponseWriter, req *http.Request) {
+		allowed := allowedMethods(r, req.URL.Path)
+		w.Header().Set("Allow", strings.Join(allowed, ", "))
+		problem.Write(w, problem.New(problem.TypeMethodNotAllowed, http.StatusMethodNotAllowed,
+			"Method not allowed", req.Method+" is not supported here; use "+strings.Join(allowed, " or ")))
+	})
 
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
@@ -289,6 +301,19 @@ func (s *Server) buildRouter() http.Handler {
 		r.Post("/messages", s.handleSendMessage)
 	})
 	return r
+}
+
+// allowedMethods lists the methods routed for path. chi does not hand
+// them to a custom MethodNotAllowed handler.
+func allowedMethods(r *chi.Mux, path string) []string {
+	var out []string
+	for _, m := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodOptions} {
+		if r.Match(chi.NewRouteContext(), m, path) {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func (s *Server) requestLogger(next http.Handler) http.Handler {

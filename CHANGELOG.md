@@ -41,6 +41,10 @@ the version being prepared in the same pull request as the change.
   rollout, that controller reports the guard as changed and writes no
   generated credential Secrets (`SecretsManaged=False`) until the other
   side is updated; it re-checks every 30 s.
+- REST: `POST /v1/messages` answers `415 unsupported-media-type` unless
+  the `Content-Type` is `application/json` or `multipart/form-data` (see
+  Fixed, #50). Check that clients set the header; a body sent without
+  it, or as `text/plain`, was accepted before.
 - REST: `POST /v1/messages` now rejects unknown JSON fields and messages
   without content with `400 invalid-payload` (see Changed). Check that
   clients send only the documented fields.
@@ -177,6 +181,32 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- An upstream's request to back off was dropped: Microsoft Graph's
+  `Retry-After` on `429` and `503` (`ApplicationThrottled`,
+  `MailboxConcurrency`) reached REST callers as a plain
+  `502 upstream-error`, so they retried at once and kept the mailbox
+  throttled. The delay is now passed on as `Retry-After` on the `502`
+  (capped at 10 minutes, like the token endpoint's) and named in the SMTP
+  proxy's `451` text (`retry in 30s`). An SMTP relay's `421`/`451` reply
+  that says "try again in N seconds/minutes" is passed on the same way
+  (#63).
+- REST errors are now RFC 7807 problem documents everywhere, as the docs
+  promised: an unknown path answered a `text/plain` `404 page not found`
+  and a wrong method an empty `405`; they now answer `404 not-found` and
+  `405 method-not-allowed` with an `Allow` header. A field of the wrong
+  JSON type names the field instead of Go types (`` `to` must be an array
+  of addresses (strings), not a string `` instead of `json: cannot
+  unmarshal string into Go struct field requestBody.to of type
+  []string`), and a token of the wrong audience says how to create the
+  right one (`token audience is https://kubernetes.default.svc…, expected
+  sigillum (create the token with --audience sigillum, …)`), also when
+  the rejection is served from the token cache (it said `token rejected`).
+  A request whose `Content-Type` is neither `application/json` nor
+  `multipart/form-data` now answers `415` instead of being parsed as
+  JSON. The `MailCredential` `SecretConflict` condition names the label
+  and annotation a reused Secret needs and what to do, instead of ending
+  with the API server's generic "the server rejected our request due to
+  an error in our request" (#50).
 - A `MailBackend` or `ClusterMailBackend` whose credentials or CA Secret
   is in a namespace the components may not read (not the release
   namespace and not in `rbac.allowedSecretNamespaces`) showed
