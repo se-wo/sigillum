@@ -21,6 +21,11 @@ spec:
     kind: Issuer
   duration: {{ .Values.webhook.certificate.duration }}
   renewBefore: {{ .Values.webhook.certificate.renewBefore }}
+  # The issuer is self-signed, so the subject is also the Issuer DN. An
+  # empty one contravenes RFC 5280 and makes cert-manager warn (#52).
+  subject:
+    organizations:
+      - sigillum
   dnsNames:
     - {{ include "sigillum.webhook.serviceName" . }}.{{ .Release.Namespace }}.svc
     - {{ include "sigillum.webhook.serviceName" . }}.{{ .Release.Namespace }}.svc.cluster.local

@@ -18,10 +18,12 @@ the version being prepared in the same pull request as the change.
   `400 invalid-payload` (SMTP `553`), see Security. Send to an
   internationalized domain in its A-label form (`xn--…`).
 - Apply the CRDs before upgrading:
-  `kubectl apply --server-side -f charts/sigillum/crds/`. The 0.4.0 pods
-  refuse to start on 0.3 CRDs, which would drop `messagesPerDay` and a
-  backend's `allowedSenders` without an error, leaving the policy without
-  a daily cap and the backend unbounded.
+  `kubectl apply --server-side --force-conflicts -f charts/sigillum/crds/`.
+  `--force-conflicts` is needed on CRDs that `helm install` created: Helm
+  owns `.spec.versions`, and without the flag the apply fails with a field
+  conflict (#59). The 0.4.0 pods refuse to start on 0.3 CRDs, which
+  would drop `messagesPerDay` and a backend's `allowedSenders` without an
+  error, leaving the policy without a daily cap and the backend unbounded.
 - The credential Secret guard changes (it also admits the OAuth token
   Secrets of delegated backends). Upgrade the chart and the controller
   together with `helm upgrade`. While the old guard and a new
@@ -252,6 +254,13 @@ the version being prepared in the same pull request as the change.
 - A message now leaves a rate-limit window the moment it is as old as the
   window. Before, a caller retrying exactly after `Retry-After` could be
   rejected once more.
+- Chart: the self-signed webhook `Certificate` has a subject
+  (`O=sigillum`). With an empty one, cert-manager warned that the
+  certificate would be issued with an empty Issuer DN (#52).
+- Chart NOTES: the quickstart creates the relay credentials Secret its
+  backend references; copied as is, the backend stayed `Ready=False`
+  ("credentials secret … not found"). The README now covers uninstalling,
+  including the webhook Secret cert-manager leaves behind (#54).
 
 ## [0.3.1] - unreleased
 

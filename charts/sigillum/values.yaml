@@ -248,9 +248,12 @@ containerSecurityContext:
     drop: [ALL]
 
 ## Rate limiting ##
-# memory: per-replica counters — with api.replicas > 1 every replica enforces
-#         the policy limit on its own, so the effective limit multiplies.
-# redis:  one sliding window shared by all replicas (recommended for HA).
+# memory: per-replica counters — every api and smtp replica enforces the
+#         policy limit on its own, so the effective limit multiplies, and a
+#         restart or rollout clears the counters. A policy's messagesPerDay
+#         then does not protect the upstream mailbox's daily quota.
+# redis:  one sliding window shared by all replicas (recommended for HA, and
+#         required for an exact messagesPerDay).
 rateLimit:
   backend: memory
   # Only for backend=redis: admit mail while Redis is unreachable instead of

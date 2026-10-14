@@ -378,8 +378,14 @@ func TestChartWebhookCertificate(t *testing.T) {
 	}
 
 	objs = render(t, "--set", "webhook.certificate.useCertManager=true", "--set", "webhook.certificate.caBundle=Zm9v")
-	if find(objs, "Certificate", "") == nil {
+	cert := find(objs, "Certificate", "")
+	if cert == nil {
 		t.Fatal("useCertManager=true must render a Certificate")
+	}
+	// #52: the issuer is self-signed, so an empty subject is an empty
+	// Issuer DN, which cert-manager warns about.
+	if orgs, _, _ := unstructured.NestedStringSlice(cert.Object, "spec", "subject", "organizations"); len(orgs) == 0 {
+		t.Fatal("the webhook Certificate needs a subject, or its Issuer DN is empty")
 	}
 	vwc := find(objs, "ValidatingWebhookConfiguration", "")
 	if vwc.GetAnnotations()["cert-manager.io/inject-ca-from"] == "" {
