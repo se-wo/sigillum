@@ -80,7 +80,10 @@ func generateMessageID(domain string) string {
 //
 // Structure decisions:
 //   - If both text and html are present we emit multipart/alternative.
-//   - If attachments are present we wrap the body in multipart/mixed.
+//   - Inline attachments with a content ID go with the HTML they are
+//     referenced from (cid:), as multipart/related (RFC 2387) in place of
+//     the HTML part.
+//   - If other attachments are present we wrap the body in multipart/mixed.
 //   - Headers sort deterministically so tests can compare bytes.
 func AssembleMessage(msg *driver.Message, heloDomain string) ([]byte, string, error) {
 	if msg == nil {
@@ -136,7 +139,15 @@ func AssembleMessage(msg *driver.Message, heloDomain string) ([]byte, string, er
 
 	hasText := strings.TrimSpace(msg.Body.Text) != ""
 	hasHTML := strings.TrimSpace(msg.Body.HTML) != ""
-	hasAtt := len(msg.Attachments) > 0
+	var related, regular []driver.Attachment
+	for _, a := range msg.Attachments {
+		if hasHTML && a.ContentID != "" && strings.EqualFold(a.Disposition, "inline") {
+			related = append(related, a)
+		} else {
+			regular = append(regular, a)
+		}
+	}
+	hasAtt := len(regular) > 0
 
 	switch {
 	case !hasAtt && !hasText && !hasHTML:
@@ -145,7 +156,9 @@ func AssembleMessage(msg *driver.Message, heloDomain string) ([]byte, string, er
 		body.WriteString("")
 
 	case !hasAtt:
-		writeAlternative(&hdr, &body, msg.Body)
+		if err := writeAlternative(&hdr, &body, msg.Body, related); err != nil {
+			return nil, messageID, err
+		}
 
 	default:
 		mw := multipart.NewWriter(&body)
@@ -155,7 +168,10 @@ func AssembleMessage(msg *driver.Message, heloDomain string) ([]byte, string, er
 
 		// Body part (alternative) goes first.
 		if hasText || hasHTML {
-			altBuf, altHeader := buildAlternative(msg.Body)
+			altBuf, altHeader, err := buildAlternative(msg.Body, related)
+			if err != nil {
+				return nil, messageID, err
+			}
 			part, err := mw.CreatePart(altHeader)
 			if err != nil {
 				return nil, messageID, err
@@ -165,7 +181,7 @@ func AssembleMessage(msg *driver.Message, heloDomain string) ([]byte, string, er
 			}
 		}
 
-		for _, a := range msg.Attachments {
+		for _, a := range regular {
 			if err := writeAttachment(mw, a); err != nil {
 				return nil, messageID, err
 			}
@@ -195,31 +211,42 @@ func AssembleMessage(msg *driver.Message, heloDomain string) ([]byte, string, er
 	return out.Bytes(), messageID, nil
 }
 
-func writeAlternative(hdr *textproto.MIMEHeader, body *bytes.Buffer, b driver.Body) {
+func writeAlternative(hdr *textproto.MIMEHeader, body *bytes.Buffer, b driver.Body, related []driver.Attachment) error {
 	hasText := strings.TrimSpace(b.Text) != ""
 	hasHTML := strings.TrimSpace(b.HTML) != ""
 
+	var raw []byte
+	var partHeader textproto.MIMEHeader
+	var err error
 	switch {
 	case hasText && hasHTML:
-		raw, partHeader := buildAlternative(b)
-		for k, vs := range partHeader {
-			for _, v := range vs {
-				hdr.Set(k, v)
-			}
-		}
-		body.Write(raw)
+		raw, partHeader, err = buildAlternative(b, related)
+	case hasHTML && len(related) > 0:
+		raw, partHeader, err = buildRelated(b.HTML, related)
 	case hasHTML:
 		hdr.Set("Content-Type", "text/html; charset=utf-8")
 		hdr.Set("Content-Transfer-Encoding", "quoted-printable")
 		writeQuotedPrintable(body, b.HTML)
+		return nil
 	default:
 		hdr.Set("Content-Type", "text/plain; charset=utf-8")
 		hdr.Set("Content-Transfer-Encoding", "quoted-printable")
 		writeQuotedPrintable(body, b.Text)
+		return nil
 	}
+	if err != nil {
+		return err
+	}
+	for k, vs := range partHeader {
+		for _, v := range vs {
+			hdr.Set(k, v)
+		}
+	}
+	body.Write(raw)
+	return nil
 }
 
-func buildAlternative(b driver.Body) ([]byte, textproto.MIMEHeader) {
+func buildAlternative(b driver.Body, related []driver.Attachment) ([]byte, textproto.MIMEHeader, error) {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	boundary := generateBoundary()
@@ -232,16 +259,48 @@ func buildAlternative(b driver.Body) ([]byte, textproto.MIMEHeader) {
 		writeQuotedPrintable(w, b.Text)
 	}
 	if strings.TrimSpace(b.HTML) != "" {
-		ph := textproto.MIMEHeader{}
-		ph.Set("Content-Type", "text/html; charset=utf-8")
-		ph.Set("Content-Transfer-Encoding", "quoted-printable")
-		w, _ := mw.CreatePart(ph)
-		writeQuotedPrintable(w, b.HTML)
+		if len(related) > 0 {
+			raw, ph, err := buildRelated(b.HTML, related)
+			if err != nil {
+				return nil, nil, err
+			}
+			w, _ := mw.CreatePart(ph)
+			_, _ = w.Write(raw)
+		} else {
+			ph := textproto.MIMEHeader{}
+			ph.Set("Content-Type", "text/html; charset=utf-8")
+			ph.Set("Content-Transfer-Encoding", "quoted-printable")
+			w, _ := mw.CreatePart(ph)
+			writeQuotedPrintable(w, b.HTML)
+		}
 	}
 	_ = mw.Close()
 	return buf.Bytes(), textproto.MIMEHeader{
 		"Content-Type": []string{"multipart/alternative; boundary=\"" + boundary + "\""},
+	}, nil
+}
+
+// buildRelated returns the HTML body and the inline parts it references
+// as one multipart/related entity (RFC 2387), HTML first as its root.
+func buildRelated(html string, inline []driver.Attachment) ([]byte, textproto.MIMEHeader, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	boundary := generateBoundary()
+	_ = mw.SetBoundary(boundary)
+	ph := textproto.MIMEHeader{}
+	ph.Set("Content-Type", "text/html; charset=utf-8")
+	ph.Set("Content-Transfer-Encoding", "quoted-printable")
+	w, _ := mw.CreatePart(ph)
+	writeQuotedPrintable(w, html)
+	for _, a := range inline {
+		if err := writeAttachment(mw, a); err != nil {
+			return nil, nil, err
+		}
 	}
+	_ = mw.Close()
+	return buf.Bytes(), textproto.MIMEHeader{
+		"Content-Type": []string{"multipart/related; type=\"text/html\"; boundary=\"" + boundary + "\""},
+	}, nil
 }
 
 func writeAttachment(mw *multipart.Writer, a driver.Attachment) error {
@@ -254,12 +313,11 @@ func writeAttachment(mw *multipart.Writer, a driver.Attachment) error {
 		return err
 	}
 	ph.Set("Content-Type", ct)
-	disp := a.Disposition
-	if disp == "" {
-		disp = "attachment"
-	}
-	if containsInjectionChars(disp) {
-		return fmt.Errorf("attachment disposition contains CR, LF, or NUL")
+	// Only the two dispositions are written: any other text would be
+	// copied into the header, control characters included.
+	disp := "attachment"
+	if strings.EqualFold(a.Disposition, "inline") {
+		disp = "inline"
 	}
 	if a.Filename != "" {
 		if containsInjectionChars(a.Filename) {
@@ -268,6 +326,12 @@ func writeAttachment(mw *multipart.Writer, a driver.Attachment) error {
 		ph.Set("Content-Disposition", contentDispositionValue(disp, a.Filename))
 	} else {
 		ph.Set("Content-Disposition", disp)
+	}
+	if a.ContentID != "" {
+		if err := driver.ValidateContentID(a.ContentID); err != nil {
+			return err
+		}
+		ph.Set("Content-ID", "<"+a.ContentID+">")
 	}
 	ph.Set("Content-Transfer-Encoding", "base64")
 	w, err := mw.CreatePart(ph)

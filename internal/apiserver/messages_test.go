@@ -35,6 +35,16 @@ func TestValidateAttachmentMeta(t *testing.T) {
 		{"LRM", requestAttachment{Filename: "a‎b"}, false},
 		{"bad contentType", requestAttachment{Filename: "a", ContentType: "not a media type"}, false},
 		{"contentType with params ok", requestAttachment{Filename: "a", ContentType: `text/plain; charset=utf-8`}, true},
+		{"disposition attachment ok", requestAttachment{Filename: "a", Disposition: "attachment"}, true},
+		{"unknown disposition", requestAttachment{Filename: "a", Disposition: "inlne"}, false},
+		{"control char disposition", requestAttachment{Filename: "a", Disposition: "\x11"}, false},
+		{"contentId inline ok", requestAttachment{Filename: "a.png", Disposition: "inline", ContentID: "logo@example.com"}, true},
+		{"contentId Inline ok", requestAttachment{Filename: "a.png", Disposition: "Inline", ContentID: "logo@x"}, true},
+		{"contentId needs inline", requestAttachment{Filename: "a.png", ContentID: "logo@x"}, false},
+		{"contentId attachment", requestAttachment{Filename: "a.png", Disposition: "attachment", ContentID: "logo@x"}, false},
+		{"contentId with brackets", requestAttachment{Filename: "a.png", Disposition: "inline", ContentID: "<logo@x>"}, false},
+		{"contentId without @", requestAttachment{Filename: "a.png", Disposition: "inline", ContentID: "logo"}, false},
+		{"contentId CRLF", requestAttachment{Filename: "a.png", Disposition: "inline", ContentID: "a@x\r\nBcc: e@x"}, false},
 	} {
 		err := validateAttachmentMeta(tc.a)
 		if (err == nil) != tc.ok {
