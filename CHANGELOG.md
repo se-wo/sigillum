@@ -249,6 +249,9 @@ the version being prepared in the same pull request as the change.
 - A message now leaves a rate-limit window the moment it is as old as the
   window. Before, a caller retrying exactly after `Retry-After` could be
   rejected once more.
+- Chart: the self-signed webhook `Certificate` has a subject
+  (`O=sigillum`). With an empty one, cert-manager warned that the
+  certificate would be issued with an empty Issuer DN (#52).
 
 ## [0.3.1] - unreleased
 
