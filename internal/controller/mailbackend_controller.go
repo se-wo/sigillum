@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -28,11 +29,15 @@ type MailBackendReconciler struct {
 func (r *MailBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var mb sigv1.MailBackend
 	if err := r.Get(ctx, req.NamespacedName, &mb); err != nil {
+		if apierrors.IsNotFound(err) {
+			forgetBackendMetrics(req.NamespacedName.String())
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	requeue := reconcileBackend(ctx, r.Client, req.NamespacedName.String(), &mb.Spec, &mb.Status, mb.Generation, mb.Namespace,
 		webhook.ValidateBackend(&mb))
+	recordBackendMetrics(req.NamespacedName.String(), mb.Spec.Type, &mb.Status)
 	if err := r.Status().Update(ctx, &mb); err != nil {
 		return ctrl.Result{}, err
 	}

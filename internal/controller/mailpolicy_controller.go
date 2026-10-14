@@ -31,6 +31,9 @@ type MailPolicyReconciler struct {
 func (r *MailPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var mp sigv1.MailPolicy
 	if err := r.Get(ctx, req.NamespacedName, &mp); err != nil {
+		if apierrors.IsNotFound(err) {
+			forgetPolicyMetrics(req.Namespace, req.Name)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -54,6 +57,7 @@ func (r *MailPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		legacyCond.Message = "no legacy auth modes enabled"
 	}
 	mp.Status.Conditions = setCondition(mp.Status.Conditions, legacyCond)
+	recordPolicyMetrics(mp.Namespace, mp.Name, mp.Status.Conditions)
 
 	if err := r.Status().Update(ctx, &mp); err != nil {
 		return ctrl.Result{}, err

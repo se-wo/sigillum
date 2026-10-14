@@ -88,6 +88,9 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	now := r.now()
 	var mc sigv1.MailCredential
 	if err := r.Get(ctx, req.NamespacedName, &mc); err != nil {
+		if apierrors.IsNotFound(err) {
+			forgetCredentialMetrics(req.Namespace, req.Name)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	// A key re-queued while the previous reconcile ran can start before the
@@ -279,6 +282,7 @@ func (r *MailCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		Reason:             reason,
 		Message:            message,
 	})
+	recordCredentialMetrics(mc.Namespace, mc.Name, ready == metav1.ConditionTrue)
 	if !equality.Semantic.DeepEqual(orig, mc.Status) || secretWritten {
 		if err := r.updateStatus(ctx, &mc, secretWritten); err != nil {
 			return ctrl.Result{}, err
