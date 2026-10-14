@@ -176,3 +176,54 @@ func TestMailBackendValidator_AuthOverCleartextWarns(t *testing.T) {
 		t.Fatalf("starttls must not warn about cleartext, got %v", w)
 	}
 }
+
+// #72: a backend whose Secret is in a namespace the components may not
+// read is admitted with a warning naming the chart value.
+func TestMailBackendValidator_SecretNamespaceWarning(t *testing.T) {
+	allowed := []string{"sigillum-system", "shared"}
+	team := func(ns string) *sigv1.MailBackend {
+		return &sigv1.MailBackend{
+			ObjectMeta: metav1.ObjectMeta{Name: "own-relay", Namespace: ns},
+			Spec: sigv1.BackendSpec{Type: sigv1.BackendSMTP, SMTP: &sigv1.SMTPBackendSpec{
+				Endpoints:      []sigv1.SMTPEndpoint{{Host: "mx", Port: 587, TLS: sigv1.SMTPTLSStartTLS}},
+				AuthType:       sigv1.SMTPAuthPlain,
+				CredentialsRef: &sigv1.SecretReference{Name: "team-relay"},
+				CASecretRef:    &sigv1.CASecretReference{Name: "team-ca"},
+			}},
+		}
+	}
+	nv := &MailBackendValidator[*sigv1.MailBackend]{secretNamespaces: allowed}
+	warnings, err := nv.ValidateCreate(context.Background(), team("team-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 2 || !strings.Contains(warnings[0], "spec.smtp.credentialsRef") ||
+		!strings.Contains(warnings[1], "spec.smtp.caSecretRef") ||
+		!strings.Contains(warnings[0], `adds "team-a" to the chart value rbac.allowedSecretNamespaces`) ||
+		!strings.Contains(warnings[0], "sigillum-system, shared") {
+		t.Fatalf("want warnings for both Secrets, got %q", warnings)
+	}
+	if warnings, _ := nv.ValidateCreate(context.Background(), team("shared")); len(warnings) != 0 {
+		t.Fatalf("allowed namespace: got %q", warnings)
+	}
+	if warnings, _ := NewMailBackendValidator().ValidateCreate(context.Background(), team("team-a")); len(warnings) != 0 {
+		t.Fatalf("no namespace list: got %q", warnings)
+	}
+
+	cmb := validClusterBackend(nil)
+	cmb.Spec.Type = sigv1.BackendMicrosoftGraph
+	cmb.Spec.SMTP = nil
+	cmb.Spec.AllowedSenders = []string{"noreply@example.com"}
+	cmb.Spec.MicrosoftGraph = &sigv1.MicrosoftGraphBackendSpec{
+		TenantID: "example.com", ClientID: "00000000-0000-0000-0000-000000000001",
+		CredentialsRef: sigv1.SecretReference{Name: "graph", Namespace: "team-b"},
+	}
+	cv := &MailBackendValidator[*sigv1.ClusterMailBackend]{clusterScoped: true, secretNamespaces: allowed}
+	warnings, err = cv.ValidateCreate(context.Background(), cmb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "spec.microsoftGraph.credentialsRef") || !strings.Contains(warnings[0], `"team-b"`) {
+		t.Fatalf("ClusterMailBackend: got %q", warnings)
+	}
+}

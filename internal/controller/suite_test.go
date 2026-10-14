@@ -92,10 +92,10 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 
-	if err := whv1.SetupMailBackendWebhook(mgr); err != nil {
+	if err := whv1.SetupMailBackendWebhook(mgr, nil); err != nil {
 		panic(err)
 	}
-	if err := whv1.SetupClusterMailBackendWebhook(mgr); err != nil {
+	if err := whv1.SetupClusterMailBackendWebhook(mgr, nil); err != nil {
 		panic(err)
 	}
 	if err := whv1.SetupMailPolicyWebhook(mgr, "memory"); err != nil {

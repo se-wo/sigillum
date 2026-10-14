@@ -233,10 +233,13 @@ const (
 	ReasonAllEndpointsDown        = "AllEndpointsDown"
 	ReasonUnsupportedBackendType  = "UnsupportedBackendType"
 	ReasonInvalidConfiguration    = "InvalidConfiguration"
-	ReasonProbeError              = "ProbeError"
-	ReasonBackendNotFound         = "BackendNotFound"
-	ReasonBackendNotReady         = "BackendNotReady"
-	ReasonReady                   = "Ready"
+	// ReasonSecretNamespaceNotAllowed: a backend's Secret is in a namespace
+	// the components may not read (rbac.allowedSecretNamespaces).
+	ReasonSecretNamespaceNotAllowed = "SecretNamespaceNotAllowed"
+	ReasonProbeError                = "ProbeError"
+	ReasonBackendNotFound           = "BackendNotFound"
+	ReasonBackendNotReady           = "BackendNotReady"
+	ReasonReady                     = "Ready"
 )
 
 // Labels, annotations and keys of the Secret in which the controller keeps a

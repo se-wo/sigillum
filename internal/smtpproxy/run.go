@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -30,6 +29,7 @@ import (
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 	"github.com/se-wo/sigillum/internal/apiserver/auth"
 	"github.com/se-wo/sigillum/internal/audit"
+	"github.com/se-wo/sigillum/internal/cliflags"
 	"github.com/se-wo/sigillum/internal/crdcheck"
 	"github.com/se-wo/sigillum/internal/credential"
 	"github.com/se-wo/sigillum/internal/gateway"
@@ -106,8 +106,7 @@ func (o *Options) dataTimeout() time.Duration {
 func ParseFlags(args []string) (*Options, error) {
 	o := &Options{}
 	var modes string
-	fs := flag.NewFlagSet("smtp", flag.ContinueOnError)
-	_ = fs.String("mode", "", "operating mode (handled by entrypoint)")
+	fs := cliflags.New("smtp")
 	fs.StringVar(&o.Listen, "listen", ":2587", "SMTP submission listen address (unprivileged; map port 587 in the Service)")
 	fs.StringVar(&o.MetricsListen, "metrics-listen", ":9090", "listen address for /metrics, /healthz and /readyz")
 	fs.StringVar(&o.Domain, "domain", "sigillum", "host name announced in the SMTP greeting")
@@ -136,7 +135,7 @@ func ParseFlags(args []string) (*Options, error) {
 	fs.BoolVar(&o.SkipCRDCheck, "skip-crd-check", false, crdcheck.SkipFlagUsage)
 	fs.StringVar(&o.SecretNamespaces, "secret-namespaces", "", "comma-separated namespaces whose Secrets may be read (backend credentials); default: the pod's namespace")
 	o.RateLimit.BindFlags(fs)
-	if err := fs.Parse(args); err != nil && err != flag.ErrHelp {
+	if err := cliflags.Parse(fs, args); err != nil {
 		return nil, err
 	}
 	for _, m := range strings.Split(modes, ",") {
