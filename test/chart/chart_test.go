@@ -452,3 +452,18 @@ func TestChartControllerDrainAndWebhookTimeout(t *testing.T) {
 		}
 	}
 }
+
+// #82: the controller learns the rate-limit store the sending pods use, for
+// the messagesPerDay admission warning.
+func TestChartControllerKnowsRateLimitBackend(t *testing.T) {
+	if got := args(t, render(t), "t-sigillum-controller")["ratelimit-backend"]; got != "memory" {
+		t.Fatalf("default: want controller --ratelimit-backend=memory, got %q", got)
+	}
+	objs := render(t, "--set", "smtp.enabled=true", "--set", "rateLimit.backend=redis",
+		"--set", "rateLimit.redis.addrs={redis:6379}")
+	for _, dep := range []string{"t-sigillum-api", "t-sigillum-smtp", "t-sigillum-controller"} {
+		if got := args(t, objs, dep)["ratelimit-backend"]; got != "redis" {
+			t.Fatalf("%s: want --ratelimit-backend=redis, got %q", dep, got)
+		}
+	}
+}

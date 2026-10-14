@@ -78,3 +78,29 @@ func TestMailPolicyValidator_WarnsAboutSendersTheBackendRefuses(t *testing.T) {
 		})
 	}
 }
+
+// #82: messagesPerDay with the in-memory store is per pod and reset by
+// restarts; the webhook says so when it knows the store.
+func TestMailPolicyValidator_WarnsAboutDailyCapInMemory(t *testing.T) {
+	for _, tc := range []struct {
+		store  string
+		perDay int32
+		warn   bool
+	}{
+		{"memory", 100, true},
+		{"memory", 0, false},
+		{"redis", 100, false},
+		{"", 100, false},
+	} {
+		mp := validPolicy()
+		mp.Spec.RateLimits = &sigv1.RateLimitsSpec{MessagesPerMinute: 10, MessagesPerDay: tc.perDay}
+		warnings, err := (&MailPolicyValidator{RateLimitBackend: tc.store}).ValidateCreate(context.Background(), mp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := strings.Contains(strings.Join(warnings, "\n"), "messagesPerDay")
+		if got != tc.warn {
+			t.Errorf("store %q, messagesPerDay %d: warning %v, want %v (%q)", tc.store, tc.perDay, got, tc.warn, warnings)
+		}
+	}
+}

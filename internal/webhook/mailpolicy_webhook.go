@@ -27,12 +27,15 @@ type MailPolicyValidator struct {
 	// Reader looks up the referenced backend for warnings about it (#49);
 	// nil skips them.
 	Reader client.Reader
+	// RateLimitBackend is the rate-limit store of the api-server and SMTP
+	// proxy (--ratelimit-backend, set by the chart); "" if unknown.
+	RateLimitBackend string
 }
 
 // SetupMailPolicyWebhook wires the validator into the manager.
-func SetupMailPolicyWebhook(mgr ctrl.Manager) error {
+func SetupMailPolicyWebhook(mgr ctrl.Manager, rateLimitBackend string) error {
 	return ctrl.NewWebhookManagedBy(mgr, &sigv1.MailPolicy{}).
-		WithValidator(&MailPolicyValidator{Reader: mgr.GetClient()}).
+		WithValidator(&MailPolicyValidator{Reader: mgr.GetClient(), RateLimitBackend: rateLimitBackend}).
 		Complete()
 }
 
@@ -52,6 +55,12 @@ func (v *MailPolicyValidator) validateWithWarnings(ctx context.Context, mp *sigv
 	warnings, err := v.validate(mp)
 	if err != nil {
 		return warnings, err
+	}
+	if rl := mp.Spec.RateLimits; rl != nil && rl.MessagesPerDay > 0 && v.RateLimitBackend == "memory" {
+		warnings = append(warnings, "spec.rateLimits.messagesPerDay: this release keeps rate limits in memory "+
+			"(rateLimit.backend: memory), so every api-server and SMTP proxy pod counts on its own and a restart "+
+			"or rollout resets the count: the daily cap can be exceeded up to once per pod. "+
+			"Use rateLimit.backend: redis for a cap that holds (#82).")
 	}
 	return append(warnings, v.backendWarnings(ctx, mp)...), nil
 }
