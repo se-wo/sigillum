@@ -215,10 +215,12 @@ for credential rotation.
 ## Upgrading
 
 Helm installs CRDs only on first install. Apply them before upgrading the
-release:
+release. `--force-conflicts` hands the fields over from Helm, which created
+the CRDs on first install; without it the apply fails with a conflict on
+`.spec.versions`:
 
 ```sh
-kubectl apply --server-side -f charts/sigillum/crds/
+kubectl apply --server-side --force-conflicts -f charts/sigillum/crds/
 helm upgrade sigillum ./charts/sigillum -n sigillum-system --reuse-values
 ```
 
