@@ -247,6 +247,20 @@ each [GitHub Release](https://github.com/se-wo/sigillum/releases)). Changes in
   namespace need that namespace listed, as the RBAC already required).
 - `terminationGracePeriodSeconds` is 35 for the api-server and SMTP proxy.
 
+## Uninstall
+
+```sh
+helm uninstall sigillum -n sigillum-system
+# cert-manager keeps the issued Secret unless it runs with
+# --enable-certificate-owner-ref:
+kubectl -n sigillum-system delete secret sigillum-webhook-tls --ignore-not-found
+```
+
+Helm leaves the CRDs in place. Deleting them
+(`kubectl delete -f charts/sigillum/crds/`) also deletes every
+`MailBackend`, `ClusterMailBackend`, `MailPolicy` and `MailCredential` in
+the cluster.
+
 ## Supply chain
 
 Releases after v0.2.1 are built and published only by

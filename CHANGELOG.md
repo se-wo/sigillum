@@ -252,6 +252,10 @@ the version being prepared in the same pull request as the change.
 - Chart: the self-signed webhook `Certificate` has a subject
   (`O=sigillum`). With an empty one, cert-manager warned that the
   certificate would be issued with an empty Issuer DN (#52).
+- Chart NOTES: the quickstart creates the relay credentials Secret its
+  backend references; copied as is, the backend stayed `Ready=False`
+  ("credentials secret … not found"). The README now covers uninstalling,
+  including the webhook Secret cert-manager leaves behind (#54).
 
 ## [0.3.1] - unreleased
 
