@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -62,6 +63,7 @@ type Options struct {
 	AuthFailuresPerUserIP       int
 	MaxMessageBytes             int64
 	MaxRecipients               int
+	MaxLineLength               int
 	ReadTimeout                 time.Duration
 	WriteTimeout                time.Duration
 	AuthTimeout                 time.Duration
@@ -80,6 +82,12 @@ type Options struct {
 	RateLimit                   ratelimit.Config
 }
 
+// Bounds of --max-line-length.
+const (
+	minLineLength = 1000
+	maxLineLength = 1 << 20
+)
+
 // ParseFlags parses args into Options.
 func ParseFlags(args []string) (*Options, error) {
 	o := &Options{}
@@ -96,6 +104,7 @@ func ParseFlags(args []string) (*Options, error) {
 	fs.IntVar(&o.AuthFailuresPerUserIP, "auth-failures-per-user-ip", 10, "failed logins of a bring-your-own-hash credential per username and source IP within the window before further attempts from that IP are refused (0 = unlimited; generated credentials are never throttled)")
 	fs.Int64Var(&o.MaxMessageBytes, "max-message-bytes", 32*1024*1024, "hard ceiling per message (policies enforce lower limits)")
 	fs.IntVar(&o.MaxRecipients, "max-recipients", 100, "hard ceiling of RCPT TO per message")
+	fs.IntVar(&o.MaxLineLength, "max-line-length", 2000, "longest command or message line in bytes, CRLF included (1000-1048576; RFC 5321 requires at least 1000)")
 	fs.DurationVar(&o.ReadTimeout, "read-timeout", 60*time.Second, "per-command read timeout")
 	fs.DurationVar(&o.WriteTimeout, "write-timeout", 60*time.Second, "per-reply write timeout")
 	fs.DurationVar(&o.AuthTimeout, "auth-timeout", 10*time.Second, "timeout for TokenReview and pod lookups")
@@ -128,6 +137,10 @@ func ParseFlags(args []string) (*Options, error) {
 	if len(o.AuthModes) == 0 {
 		return nil, errors.New("--auth-modes must enable at least one mode")
 	}
+	// 0 would mean no limit in go-smtp, and a command line is buffered whole.
+	if o.MaxLineLength < minLineLength || o.MaxLineLength > maxLineLength {
+		return nil, fmt.Errorf("--max-line-length must be between %d and %d", minLineLength, maxLineLength)
+	}
 	return o, nil
 }
 
@@ -141,13 +154,14 @@ func (o *Options) has(mode string) bool {
 }
 
 // NewServer builds the go-smtp server around backend. STARTTLS is offered
-// when tlsCfg is non-nil.
+// when tlsCfg is non-nil. Serve it on wrapListener.
 func NewServer(o *Options, backend smtp.Backend, tlsCfg *tls.Config) *smtp.Server {
 	s := smtp.NewServer(backend)
 	s.Addr = o.Listen
 	s.Domain = o.Domain
 	s.MaxMessageBytes = o.MaxMessageBytes
 	s.MaxRecipients = o.MaxRecipients
+	s.MaxLineLength = o.MaxLineLength
 	s.ReadTimeout = o.ReadTimeout
 	s.WriteTimeout = o.WriteTimeout
 	s.AllowInsecureAuth = o.AllowInsecureAuth
@@ -302,11 +316,15 @@ func Run(logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	ln, err := net.Listen("tcp", o.Listen)
+	if err != nil {
+		return err
+	}
 	errCh := make(chan error, 2)
 	go func() {
 		logger.Info("smtp proxy listening", "addr", o.Listen, "auth_modes", strings.Join(o.AuthModes, ","),
 			"starttls", tlsCfg != nil, "tracing", tracingOn)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, smtp.ErrServerClosed) {
+		if err := srv.Serve(wrapListener(ln)); err != nil && !errors.Is(err, smtp.ErrServerClosed) {
 			errCh <- err
 		}
 	}()

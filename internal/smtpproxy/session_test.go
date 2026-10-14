@@ -92,7 +92,7 @@ func startProxyWith(t *testing.T, b *Backend, tweak func(*smtp.Server)) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go func() { _ = srv.Serve(ln) }()
+	go func() { _ = srv.Serve(wrapListener(ln)) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return ln.Addr().String()
 }
@@ -572,5 +572,49 @@ func TestRelayKeepsClientDateAndMessageID(t *testing.T) {
 	}
 	if !strings.Contains(raw, "<client-123@billing.example>") {
 		t.Fatalf("client's Message-ID must be kept:\n%s", raw)
+	}
+}
+
+// #64: a line over --max-line-length gets a readable permanent reply and an
+// orderly close, not go-smtp's 554 5.0.0 followed by a reset.
+func TestLongLineIs550AndClosesConnection(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	addr := startProxyWith(t, &Backend{Sender: sender, Tokens: stubTokens{}},
+		func(s *smtp.Server) { s.MaxLineLength = 1000 })
+	c := authed(t, addr)
+
+	ok := testMessage + strings.Repeat("x", 990) + "\r\n"
+	if err := send(c, "app@billing.example", []string{"a@x.example"}, ok); err != nil {
+		t.Fatalf("a line within the limit must pass: %v", err)
+	}
+	// Enough data after the long line that it is still unread when the
+	// proxy answers.
+	long := testMessage + strings.Repeat("x", 1200) + "\r\n" + strings.Repeat("more body\r\n", 20000)
+	err := send(c, "app@billing.example", []string{"a@x.example"}, long)
+	var se *smtp.SMTPError
+	if !errors.As(err, &se) || se.Code != 550 || se.EnhancedCode != (smtp.EnhancedCode{5, 6, 0}) ||
+		!strings.Contains(se.Message, "longer than 1000 bytes") {
+		t.Fatalf("want 550 5.6.0 naming the limit, got %v", err)
+	}
+	if len(sender.reqs) != 1 || len(sender.rejects) != 1 || sender.rejects[0] != "invalid_payload" {
+		t.Fatalf("want one audited invalid_payload, got reqs=%d rejects=%v", len(sender.reqs), sender.rejects)
+	}
+	if err := c.Noop(); err == nil {
+		t.Fatal("the connection must be closed after an overlong line")
+	}
+}
+
+func TestMaxLineLengthFlag(t *testing.T) {
+	o, err := ParseFlags([]string{"--max-line-length=4096"})
+	if err != nil || o.MaxLineLength != 4096 {
+		t.Fatalf("got %+v, %v", o, err)
+	}
+	if NewServer(o, &Backend{}, nil).MaxLineLength != 4096 {
+		t.Fatal("MaxLineLength not passed to go-smtp")
+	}
+	for _, v := range []string{"0", "999", "1048577"} {
+		if _, err := ParseFlags([]string{"--max-line-length=" + v}); err == nil {
+			t.Fatalf("--max-line-length=%s must be refused", v)
+		}
 	}
 }

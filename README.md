@@ -138,6 +138,9 @@ Messages need exactly one `From` field, and the null sender `<>` is refused.
 `Bcc:` header fields are removed before relaying. `maxSizeBytes` ignores
 transfer-encoding overhead (an 8 MiB attachment counts as 8 MiB, as on the
 REST path); headers and MIME framing count on SMTP.
+Lines may be at most `smtp.maxLineLength` bytes (default 2000, CRLF
+included); send long lines quoted-printable or base64, otherwise the
+message is refused with `550 5.6.0`.
 Policy denials answer `550`, rate limits `421`, retryable upstream problems
 `451`, permanent upstream rejections `554`. The message is relayed byte-for-byte with a `Received` header that
 carries the Sigillum message id; a `Date` and `Message-ID` are added only when

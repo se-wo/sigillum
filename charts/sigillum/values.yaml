@@ -107,6 +107,11 @@ smtp:
   tls:
     secretName: ""    # enables STARTTLS with tls.crt / tls.key
   maxMessageBytes: 33554432
+  # Longest line of a command or message in bytes, CRLF included (1000 to
+  # 1048576). A message with a longer line is refused with 550 5.6.0 and
+  # the connection is closed; long lines (one-line HTML, raw binary) must
+  # be sent quoted-printable or base64.
+  maxLineLength: 2000
   maxRecipients: 100
   # Messages buffered and relayed at once per pod. Further messages wait up
   # to sendTimeout, then get a retryable 451. Memory budget per pod, to stay

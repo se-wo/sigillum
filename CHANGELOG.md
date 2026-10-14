@@ -134,6 +134,13 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- SMTP: a message line over the line-length limit (go-smtp's default of
+  2000 bytes) bounced with `554 5.0.0 Error: transaction failed: smtp: too
+  long a line in input stream` and a TCP reset. It now answers
+  `550 5.6.0 Line longer than N bytes; use quoted-printable or base64` and
+  closes the connection in order. The limit is set explicitly with the new
+  `--max-line-length` (chart `smtp.maxLineLength`, default 2000, at least
+  1000 per RFC 5321) (#64).
 - REST attachment metadata is now encoded correctly for the wire. A
   non-ASCII `filename` was written as raw bytes into a header parameter
   (not valid MIME unless the hop negotiated SMTPUTF8, which the driver

@@ -338,8 +338,15 @@ func (s *session) Data(r io.Reader) error {
 	// go-smtp enforces Server.MaxMessageBytes while we read.
 	if _, err := io.Copy(buf, r); err != nil {
 		reason := "invalid_payload"
-		if errors.Is(err, smtp.ErrDataTooLarge) {
+		switch {
+		case errors.Is(err, smtp.ErrDataTooLarge):
 			reason = "message_too_large"
+		case errors.Is(err, smtp.ErrTooLongLine):
+			// go-smtp cannot resync after an overlong line: answer, then
+			// close instead of a bare 554 and a reset (#64).
+			s.b.Sender.Reject(baseEvent, reason)
+			s.closeAfterReply()
+			return withMessageID(errLineTooLong(s.conn.Server()), msgID)
 		}
 		s.b.Sender.Reject(baseEvent, reason)
 		return err
