@@ -6,7 +6,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -26,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	"github.com/se-wo/sigillum/internal/cliflags"
 	"github.com/se-wo/sigillum/internal/crdcheck"
 	"github.com/se-wo/sigillum/internal/credential"
 	"github.com/se-wo/sigillum/internal/kubecache"
@@ -79,10 +79,7 @@ func init() {
 			shutdownDelay        time.Duration
 			rateLimitBackend     string
 		)
-		fs := flag.NewFlagSet("controller", flag.ContinueOnError)
-		// --mode is consumed by the entrypoint; accept it here so Parse does
-		// not error out on it.
-		_ = fs.String("mode", "", "operating mode (handled by entrypoint)")
+		fs := cliflags.New("controller")
 		fs.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "address the metric endpoint binds to")
 		fs.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "address health/readiness probes bind to")
 		fs.IntVar(&webhookPort, "webhook-port", 9443, "port the validating webhook server listens on")
@@ -104,7 +101,7 @@ func init() {
 		fs.StringVar(&rateLimitBackend, "ratelimit-backend", "", "rate-limit store of the api-server and SMTP proxy (memory or redis), for admission warnings; empty: unknown")
 
 		// Allow flags to be passed after --mode=controller.
-		if err := fs.Parse(os.Args[1:]); err != nil && err != flag.ErrHelp {
+		if err := cliflags.Parse(fs, os.Args[1:]); err != nil {
 			return err
 		}
 
@@ -145,7 +142,8 @@ func init() {
 			// exits right after the manager stops (#48).
 			LeaderElectionReleaseOnCancel: true,
 		}
-		kubecache.RestrictSecretCache(&opts.Cache, kubecache.SecretNamespaces(secretNamespaces))
+		secretNs := kubecache.SecretNamespaces(secretNamespaces)
+		kubecache.RestrictSecretCache(&opts.Cache, secretNs)
 		if !disableWebhook {
 			opts.WebhookServer = webhook.NewServer(webhook.Options{
 				Port:    webhookPort,
@@ -167,10 +165,13 @@ func init() {
 			return err
 		}
 
-		if err := (&MailBackendReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
+		// A Secret outside secretNs is reported as such, not as the
+		// cache's "unknown namespace" (#72).
+		backendClient := kubecache.GuardSecretReads(mgr.GetClient(), secretNs)
+		if err := (&MailBackendReconciler{Client: backendClient, Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
 			return err
 		}
-		if err := (&ClusterMailBackendReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
+		if err := (&ClusterMailBackendReconciler{Client: backendClient, Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
 			return err
 		}
 		if err := (&MailPolicyReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
@@ -214,10 +215,10 @@ func init() {
 		}
 
 		if !disableWebhook {
-			if err := whv1.SetupMailBackendWebhook(mgr); err != nil {
+			if err := whv1.SetupMailBackendWebhook(mgr, secretNs); err != nil {
 				return err
 			}
-			if err := whv1.SetupClusterMailBackendWebhook(mgr); err != nil {
+			if err := whv1.SetupClusterMailBackendWebhook(mgr, secretNs); err != nil {
 				return err
 			}
 			if err := whv1.SetupMailPolicyWebhook(mgr, rateLimitBackend); err != nil {

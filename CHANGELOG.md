@@ -79,6 +79,14 @@ the version being prepared in the same pull request as the change.
 
 ### Added
 
+- Readiness metrics on the controller, so a broken relay is noticed
+  before the first mail fails: `sigillum_backend_ready{backend,type}`,
+  `sigillum_backend_endpoints_ready{backend}` and
+  `sigillum_backend_endpoints{backend}`,
+  `sigillum_policy_ready{namespace,policy,reason}` and
+  `sigillum_credential_ready{namespace,credential}`, plus
+  `sigillum_build_info{version,commit}` on every component. SPEC US-4.1
+  has an example alert (`sigillum_backend_ready == 0` for 10m) (#76).
 - The `MailPolicy` webhook warns when a policy sets
   `rateLimits.messagesPerDay` and the release keeps rate limits in memory
   (`rateLimit.backend: memory`), where the cap is per pod and reset by
@@ -184,6 +192,26 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- A `MailBackend` or `ClusterMailBackend` whose credentials or CA Secret
+  is in a namespace the components may not read (not the release
+  namespace and not in `rbac.allowedSecretNamespaces`) showed
+  controller-runtime's `unknown namespace for the cache` in its
+  condition. It is now `Ready=False` with reason
+  `SecretNamespaceNotAllowed` and a message naming the namespace to add
+  to `rbac.allowedSecretNamespaces`, and the webhook warns about it on
+  `kubectl apply`. This includes a team's `MailBackend` with its
+  credentials in its own namespace (#72).
+- `sigillum --help` printed only `must pass --mode=…` and exited with 2.
+  It now lists the modes and the flags of each (`--mode=<mode> --help`:
+  of that mode) and exits with 0; without `--help`, the mode list goes
+  to stderr. Before, `--mode=<mode> --help` printed the flags and then
+  started the mode anyway (#53).
+- The startup CRD check reported an API server that could not serve the
+  OpenAPI schemas (a slow start after a node restart) as "installed CRDs
+  do not match this version" and told the operator to re-apply the CRDs.
+  It now says `could not read the CRD schemas from the API server (…);
+  retrying on restart`; only missing kinds or fields get the mismatch
+  message (#71).
 - SMTP: `--read-timeout` (60 s) capped the whole `DATA` transfer, so an
   8 MB message sent at about 100 KB/s was cut off after 60 s with no reply
   and audited as `invalid_payload`. During `DATA` it is now an idle

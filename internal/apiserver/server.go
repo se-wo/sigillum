@@ -5,7 +5,6 @@ package apiserver
 import (
 	"context"
 	"errors"
-	"flag"
 	"log/slog"
 	"net/http"
 	"os"
@@ -31,6 +30,7 @@ import (
 	"github.com/se-wo/sigillum/internal/apiserver/auth"
 	"github.com/se-wo/sigillum/internal/apiserver/problem"
 	"github.com/se-wo/sigillum/internal/audit"
+	"github.com/se-wo/sigillum/internal/cliflags"
 	"github.com/se-wo/sigillum/internal/crdcheck"
 	"github.com/se-wo/sigillum/internal/gateway"
 	"github.com/se-wo/sigillum/internal/kubecache"
@@ -102,10 +102,7 @@ func init() {
 			maxInflightBody int64
 			rlCfg           ratelimit.Config
 		)
-		fs := flag.NewFlagSet("api", flag.ContinueOnError)
-		// --mode is consumed by the entrypoint; accept it here so Parse does
-		// not error out on it.
-		_ = fs.String("mode", "", "operating mode (handled by entrypoint)")
+		fs := cliflags.New("api")
 		fs.StringVar(&addr, "listen", ":8443", "HTTPS listen address (TLS via SIGILLUM_TLS_CERT/KEY) or HTTP if no cert configured")
 		fs.StringVar(&metricsAddr, "metrics-listen", ":9090", "Prometheus metrics listen address")
 		fs.IntVar(&tokenCacheSize, "token-cache-size", 4096, "LRU cache capacity for TokenReview results")
@@ -119,7 +116,7 @@ func init() {
 		rlCfg.BindFlags(fs)
 		fs.StringVar(&auditLog, "audit-log", "stdout", "audit stream sink: stdout, stderr, none, or a file path")
 		fs.Int64Var(&maxInflightBody, "max-inflight-body-bytes", 32<<20, "request bodies held in memory at once; each costs about 4 times its size while it is sent (0 = unlimited)")
-		if err := fs.Parse(os.Args[1:]); err != nil && err != flag.ErrHelp {
+		if err := cliflags.Parse(fs, os.Args[1:]); err != nil {
 			return err
 		}
 

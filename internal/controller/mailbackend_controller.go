@@ -2,14 +2,17 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	"github.com/se-wo/sigillum/internal/kubecache"
 	"github.com/se-wo/sigillum/internal/webhook"
 )
 
@@ -28,11 +31,15 @@ type MailBackendReconciler struct {
 func (r *MailBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var mb sigv1.MailBackend
 	if err := r.Get(ctx, req.NamespacedName, &mb); err != nil {
+		if apierrors.IsNotFound(err) {
+			forgetBackendMetrics(req.NamespacedName.String())
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	requeue := reconcileBackend(ctx, r.Client, req.NamespacedName.String(), &mb.Spec, &mb.Status, mb.Generation, mb.Namespace,
 		webhook.ValidateBackend(&mb))
+	recordBackendMetrics(req.NamespacedName.String(), mb.Spec.Type, &mb.Status)
 	if err := r.Status().Update(ctx, &mb); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -78,7 +85,11 @@ func reconcileBackend(
 
 	cfg, err := ResolveBackendConfig(ctx, c, key, spec, secretFallbackNs)
 	if err != nil {
-		status.Conditions = setCondition(status.Conditions, errorReadyCondition(generation, sigv1.ReasonInvalidConfiguration, err.Error()))
+		reason := sigv1.ReasonInvalidConfiguration
+		if nsErr := (*kubecache.SecretNamespaceError)(nil); errors.As(err, &nsErr) {
+			reason = sigv1.ReasonSecretNamespaceNotAllowed
+		}
+		status.Conditions = setCondition(status.Conditions, errorReadyCondition(generation, reason, err.Error()))
 		status.ObservedGeneration = generation
 		return probeInterval
 	}

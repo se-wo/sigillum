@@ -1,12 +1,17 @@
 package crdcheck
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/yaml"
 )
 
@@ -96,5 +101,65 @@ func TestVerifyDoc(t *testing.T) {
 
 	if err := verifyDoc([]byte("{"), Required); err == nil {
 		t.Fatal("invalid JSON accepted")
+	}
+}
+
+// TestWaitErrorWording checks that only missing kinds or fields are
+// reported as outdated CRDs, not an API server that cannot serve the
+// schemas (#71).
+func TestWaitErrorWording(t *testing.T) {
+	stale := strings.Replace(strings.Replace(strings.Replace(doc, "%b", `"allowedSenders":{}`, 1),
+		"%r", `"messagesPerDay":{}`, 1), "%s", `"allowedDomains":{}`, 1)
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+		want    []string
+		notWant string
+	}{
+		{
+			name: "unavailable",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "starting", http.StatusServiceUnavailable)
+			},
+			want:    []string{"could not read the CRD schemas from the API server", "retrying on restart"},
+			notWant: "do not match",
+		},
+		{
+			name: "no CRDs",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"paths":{}}`))
+			},
+			want: []string{"installed CRDs do not match this version", "no sigillum.dev/v1alpha1 CRDs are installed", UpgradeHint},
+		},
+		{
+			name: "missing field",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/openapi/v3" {
+					_, _ = w.Write([]byte(`{"paths":{"apis/sigillum.dev/v1alpha1":{"serverRelativeURL":"/openapi/v3/apis/sigillum.dev/v1alpha1?hash=1"}}}`))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(stale))
+			},
+			want: []string{"installed CRDs do not match this version", "no field spec.recipientRestrictions.allowedRecipients", UpgradeHint},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(tc.handler)
+			defer srv.Close()
+			err := Wait(context.Background(), &rest.Config{Host: srv.URL}, Required, 100*time.Millisecond)
+			if err == nil {
+				t.Fatal("no error")
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("want %q in %v", w, err)
+				}
+			}
+			if tc.notWant != "" && strings.Contains(err.Error(), tc.notWant) {
+				t.Errorf("unexpected %q in %v", tc.notWant, err)
+			}
+		})
 	}
 }

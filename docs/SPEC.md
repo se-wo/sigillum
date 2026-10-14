@@ -377,8 +377,23 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
   | `sigillum_upstream_auth_failures_total` **[v0.4.0]** | Counter | `backend` | Failures to authenticate to an upstream relay (wrong / rotated password, unsupported mechanism) |
   | `sigillum_credential_guard_ok` **[v0.3.0]** | Gauge (controller) | — | 1 while the credential Secret guard is verified (§4.10), 0 while the controller refuses to write credential Secrets |
   | `sigillum_backend_authorized` **[v0.4.0]** | Gauge (controller) | `backend` | 1 while a delegated backend (US-6.3) holds a working refresh token, 0 while it needs a new sign-in |
+  | `sigillum_backend_ready` **[v0.4.0]** | Gauge (controller) | `backend` (`<namespace>/<name>`, or `/<name>` for a `ClusterMailBackend`), `type` | 1 while the backend is `Ready=True`, 0 otherwise |
+  | `sigillum_backend_endpoints_ready`, `sigillum_backend_endpoints` **[v0.4.0]** | Gauge (controller) | `backend` | Endpoints that passed the last health check, and endpoints in it (both 0 with health checks off or an invalid backend) |
+  | `sigillum_policy_ready` **[v0.4.0]** | Gauge (controller) | `namespace`, `policy`, `reason` (the `Ready` condition's reason: `Ready`, `BackendNotReady`, `BackendNotFound`, `InvalidConfiguration`) | 1 while the policy is `Ready=True`, 0 otherwise; one series per policy, the one of the current reason |
+  | `sigillum_credential_ready` **[v0.4.0]** | Gauge (controller) | `namespace`, `credential` | 1 while the `MailCredential` is `Ready=True`, 0 otherwise |
+  | `sigillum_build_info` **[v0.4.0]** | Gauge (every component) | `version`, `commit` | Always 1 |
 
 - Payload errors (before policy evaluation) are not counted in metrics; they appear in the audit stream. Authentication failures are counted in `sigillum_auth_failures_total` only; no namespace label, since the claimed identity is client-supplied.
+- **[v0.4.0]** The readiness gauges are set on every reconcile, so they are served by the controller replica holding the leader lease, and removed when the object is deleted. The first alert to add (until US-4.6 ships rules):
+
+  ```yaml
+  - alert: SigillumBackendNotReady
+    expr: sigillum_backend_ready == 0
+    for: 10m
+    annotations:
+      summary: "Mail backend {{ $labels.backend }} has not been Ready for 10 minutes"
+  ```
+
 - `ServiceMonitor` in the Helm chart (`serviceMonitor.enabled`).
 
 #### US-4.2 — Structured logs **[v0.1.0]**
@@ -435,7 +450,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - Official Helm chart with sensible defaults; every setting available via `values.yaml`.
 - CRDs ship in the chart's `crds/` directory; the generated manifests also live in `config/crd/bases/` for separate installation.
 - **CRD upgrades:** Helm installs `crds/` on first install only and never upgrades or deletes them. Upgrades apply `config/crd/bases/` (or the chart's `crds/`) explicitly, for example with `kubectl apply --server-side --force-conflicts` (the flag takes over `.spec.versions` from the `helm` field manager of the first install; without it the apply fails with a conflict) or an Argo CD application. The CRD-migration runbook (§5.7) documents this.
-- **CRD version check [v0.3.0]:** an outdated CRD makes the API server prune fields it does not know, which only warns a server-side apply. A MailPolicy restricted by `allowedRecipients` alone would then allow every recipient that is not blocked, and one with `messagesPerDay` **[v0.4.0]** would have no daily cap, and a backend's `allowedSenders` **[v0.4.0]** would no longer bound its senders. Every component therefore reads the published OpenAPI v3 schemas at startup (readable by every authenticated client, no RBAC) and exits with an error naming the missing kinds and fields if a field the version relies on is absent. It retries for 30 s because the API server publishes a changed CRD a few seconds late. A failed rollout leaves the old pods serving. `--skip-crd-check` turns the check off for clusters that hide the OpenAPI endpoint.
+- **CRD version check [v0.3.0]:** an outdated CRD makes the API server prune fields it does not know, which only warns a server-side apply. A MailPolicy restricted by `allowedRecipients` alone would then allow every recipient that is not blocked, and one with `messagesPerDay` **[v0.4.0]** would have no daily cap, and a backend's `allowedSenders` **[v0.4.0]** would no longer bound its senders. Every component therefore reads the published OpenAPI v3 schemas at startup (readable by every authenticated client, no RBAC) and exits with an error naming the missing kinds and fields if a field the version relies on is absent. It retries for 30 s because the API server publishes a changed CRD a few seconds late. If the API server cannot serve the schemas at all (one still starting after a node restart), the error says so instead (`could not read the CRD schemas from the API server`) and the pod retries on its restart; only missing kinds or fields are reported as outdated CRDs. A failed rollout leaves the old pods serving. `--skip-crd-check` turns the check off for clusters that hide the OpenAPI endpoint.
 - No runtime configuration outside Kubernetes resources (no init scripts).
 - The admission webhook needs a serving certificate: either cert-manager (`webhook.certificate.useCertManager=true`) or an existing secret, whose issuing CA the API server must trust: `webhook.certificate.caBundle`, else `ca.crt` in the secret, else the `caBundle` already on the `ValidatingWebhookConfiguration`. **[v0.4.0]** `helm install` and `helm upgrade` fail with an explanation when the webhook is enabled without cert-manager and the secret does not exist or no CA is known: the controller could not start, or the API server could not call the webhook, and the webhook (`failurePolicy: Fail`) would reject every Sigillum resource in the cluster. The checks need a cluster connection (they read only Secrets in the release namespace, which Helm's release storage reads anyway, and the chart's own webhook configuration), so `helm template` skips them; GitOps renders without cert-manager set `webhook.certificate.caBundle`. The NOTES warn whenever cert-manager is off. Without a certificate, `webhook.enabled: false` keeps the rules: the controller and the gateway apply them too (§4.3.2).
 
@@ -704,7 +719,7 @@ Personal accounts have no app-only access: no client credentials for Outlook.com
 | **controller** (`--mode=controller`) | Reconciles `MailBackend` / `ClusterMailBackend` / `MailPolicy` / `MailCredential`, status updates, validating webhook, periodic backend probes, credential Secrets and their guard check | Deployment with leader election (chart default 1) |
 | **rate-limit store** | State for sliding-window counters | In-process memory (per replica) **or** external Redis (single node, Sentinel or Cluster) |
 
-All three modes ship as one binary and one container image. The **gateway pipeline** (`internal/gateway`) is transport-agnostic: REST and SMTP only parse their wire format and map the pipeline result to their status codes, so policy, rate limiting, audit, metrics and tracing behave identically on both paths.
+All three modes ship as one binary and one container image. `sigillum --help` lists the flags of every mode, `sigillum --mode=<mode> --help` those of one (exit code 0). The **gateway pipeline** (`internal/gateway`) is transport-agnostic: REST and SMTP only parse their wire format and map the pipeline result to their status codes, so policy, rate limiting, audit, metrics and tracing behave identically on both paths.
 
 ### 4.3 Custom resource definitions
 
@@ -765,7 +780,7 @@ status:
   conditions:
     - type: Ready                # True if at least one endpoint is Ready
       status: "True"
-      reason: AtLeastOneEndpointReady   # or AllEndpointsDown, ProbeError, InvalidConfiguration, Ready
+      reason: AtLeastOneEndpointReady   # or AllEndpointsDown, ProbeError, InvalidConfiguration, SecretNamespaceNotAllowed, Ready
   lastProbeTime: "2026-04-18T09:05:00Z"
   observedGeneration: 1
 ```
@@ -1203,7 +1218,7 @@ The record never contains subject, body, attachment content, header values other
 | smtp-proxy | as api-server; plus `list`/`watch` Pods cluster-wide when `podip` is enabled, and `get`/`list`/`watch` `MailCredential` objects for mode `credential`, never the credential Secrets. |
 | controller | read/watch Sigillum CRs, update their status; read Secrets as above; read/watch ServiceAccounts (MailCredential); `get` the credential guard policy and binding by name; leader-election leases; create events; serves the webhook. With generated credentials: `create` and `patch` on Secrets cluster-wide, **without** `get`, `list` or `watch`, restricted by the credential guard below. |
 
-The api-server and SMTP proxy read backend credentials themselves on the send path, so a `MailBackend` in a team namespace works only if that namespace is listed in `rbac.allowedSecretNamespaces`.
+The api-server and SMTP proxy read backend credentials themselves on the send path, so a `MailBackend` in a team namespace works only if that namespace is listed in `rbac.allowedSecretNamespaces`. **[v0.4.0]** The controller reports a backend whose Secret (credentials or `caSecretRef`) is in a namespace that is not listed as `Ready=False` with reason `SecretNamespaceNotAllowed` and a message naming the namespace and the chart value; the webhook admits such a backend with a warning.
 
 **Credential Secret guard [v0.3.0].** Generated credentials (US-3.7) are available in all namespaces by default, so the controller needs to write Secrets anywhere. RBAC cannot narrow `create` by name or label, so the chart ships a `ValidatingAdmissionPolicy` and binding that apply to requests from the controller's ServiceAccount only:
 
