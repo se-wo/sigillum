@@ -51,7 +51,7 @@ func TestWaitAgainstAPIServer(t *testing.T) {
 		"kind MailCredential is not installed",
 		"the MailBackend CRD has no field spec.allowedSenders",
 		"the ClusterMailBackend CRD has no field spec.allowedSenders",
-		"kubectl apply --server-side -f charts/sigillum/crds/",
+		"kubectl apply --server-side --force-conflicts -f charts/sigillum/crds/",
 	} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("outdated CRDs: want %q, got %v", want, err)

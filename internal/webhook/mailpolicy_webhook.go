@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
@@ -22,23 +23,46 @@ import (
 
 // MailPolicyValidator enforces the structural rules listed in the plan:
 // at least one subject, a non-empty backendRef, and a recognised backend kind.
-type MailPolicyValidator struct{}
+type MailPolicyValidator struct {
+	// Reader looks up the referenced backend for warnings about it (#49);
+	// nil skips them.
+	Reader client.Reader
+	// RateLimitBackend is the rate-limit store of the api-server and SMTP
+	// proxy (--ratelimit-backend, set by the chart); "" if unknown.
+	RateLimitBackend string
+}
 
 // SetupMailPolicyWebhook wires the validator into the manager.
-func SetupMailPolicyWebhook(mgr ctrl.Manager) error {
+func SetupMailPolicyWebhook(mgr ctrl.Manager, rateLimitBackend string) error {
 	return ctrl.NewWebhookManagedBy(mgr, &sigv1.MailPolicy{}).
-		WithValidator(&MailPolicyValidator{}).
+		WithValidator(&MailPolicyValidator{Reader: mgr.GetClient(), RateLimitBackend: rateLimitBackend}).
 		Complete()
 }
 
 var _ admission.Validator[*sigv1.MailPolicy] = &MailPolicyValidator{}
 
-func (v *MailPolicyValidator) ValidateCreate(_ context.Context, obj *sigv1.MailPolicy) (admission.Warnings, error) {
-	return v.validate(obj)
+func (v *MailPolicyValidator) ValidateCreate(ctx context.Context, obj *sigv1.MailPolicy) (admission.Warnings, error) {
+	return v.validateWithWarnings(ctx, obj)
 }
 
-func (v *MailPolicyValidator) ValidateUpdate(_ context.Context, _, newObj *sigv1.MailPolicy) (admission.Warnings, error) {
-	return v.validate(newObj)
+func (v *MailPolicyValidator) ValidateUpdate(ctx context.Context, _, newObj *sigv1.MailPolicy) (admission.Warnings, error) {
+	return v.validateWithWarnings(ctx, newObj)
+}
+
+// validateWithWarnings adds the warnings that need a lookup to validate's;
+// a rejected policy gets none of them.
+func (v *MailPolicyValidator) validateWithWarnings(ctx context.Context, mp *sigv1.MailPolicy) (admission.Warnings, error) {
+	warnings, err := v.validate(mp)
+	if err != nil {
+		return warnings, err
+	}
+	if rl := mp.Spec.RateLimits; rl != nil && rl.MessagesPerDay > 0 && v.RateLimitBackend == "memory" {
+		warnings = append(warnings, "spec.rateLimits.messagesPerDay: this release keeps rate limits in memory "+
+			"(rateLimit.backend: memory), so every api-server and SMTP proxy pod counts on its own and a restart "+
+			"or rollout resets the count: the daily cap can be exceeded up to once per pod. "+
+			"Use rateLimit.backend: redis for a cap that holds (#82).")
+	}
+	return append(warnings, v.backendWarnings(ctx, mp)...), nil
 }
 
 func (v *MailPolicyValidator) ValidateDelete(_ context.Context, _ *sigv1.MailPolicy) (admission.Warnings, error) {

@@ -6,9 +6,11 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
@@ -214,5 +216,69 @@ func TestWebhook_RejectsUnanchoredBackendSender(t *testing.T) {
 	err := testClient.Create(context.Background(), cmb)
 	if err == nil || !strings.Contains(err.Error(), "spec.allowedSenders[0]") {
 		t.Fatalf("want rejection of spec.allowedSenders[0], got %v", err)
+	}
+}
+
+type warningRecorder struct{ got []string }
+
+func (w *warningRecorder) HandleWarningHeaderWithContext(_ context.Context, _ int, _ string, text string) {
+	w.got = append(w.got, text)
+}
+
+// #49 and #82: the policy webhook's warnings reach the client that applies
+// the policy. The suite runs the webhook with --ratelimit-backend=memory.
+func TestWebhook_PolicyWarnings(t *testing.T) {
+	ctx := context.Background()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "sigillum-wh-warn"}}
+	_ = testClient.Create(ctx, ns)
+	mb := &sigv1.MailBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "relay", Namespace: ns.Name},
+		Spec: sigv1.BackendSpec{
+			Type: sigv1.BackendSMTP,
+			SMTP: &sigv1.SMTPBackendSpec{
+				Endpoints: []sigv1.SMTPEndpoint{{Host: "mx", Port: 25}},
+				AuthType:  sigv1.SMTPAuthNone,
+			},
+			AllowedSenders: []string{"*@example.com"},
+		},
+	}
+	if err := testClient.Create(ctx, mb); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := &warningRecorder{}
+	cfg := rest.CopyConfig(testCfg)
+	cfg.WarningHandlerWithContext = rec
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mp := &sigv1.MailPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "warned", Namespace: ns.Name},
+		Spec: sigv1.MailPolicySpec{
+			Subjects:           []sigv1.PolicySubject{{ServiceAccount: &sigv1.ServiceAccountSubject{Name: "app"}}},
+			BackendRef:         sigv1.BackendRef{Name: "relay", Kind: sigv1.KindMailBackend},
+			SenderRestrictions: &sigv1.SenderRestrictions{AllowedSenders: []string{"app@other.test", "app@example.com"}},
+			RateLimits:         &sigv1.RateLimitsSpec{MessagesPerDay: 100},
+		},
+	}
+	// The webhook reads the backend from the manager's cache.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rec.got = nil
+		if err := c.Create(ctx, mp.DeepCopy()); err != nil {
+			t.Fatal(err)
+		}
+		all := strings.Join(rec.got, "\n")
+		if strings.Contains(all, `allows none of ["app@other.test"]`) && strings.Contains(all, "messagesPerDay") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("want sender and messagesPerDay warnings, got %q", rec.got)
+		}
+		if err := c.Delete(ctx, mp.DeepCopy()); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }

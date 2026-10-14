@@ -66,7 +66,13 @@ Secrets there stay Ready=False until then.
 
 Quickstart:
 
-  1. Create a ClusterMailBackend pointing at your relay:
+  1. Store the relay credentials (skip this and use authType: NONE below
+     for a relay without authentication):
+
+       kubectl -n {{ .Release.Namespace }} create secret generic corporate-smtp-credentials \
+         --from-literal=username=<relay-user> --from-literal=password=<relay-password>
+
+  2. Create a ClusterMailBackend pointing at your relay:
 
        kubectl apply -f - <<'YAML'
        apiVersion: sigillum.dev/v1alpha1
@@ -84,7 +90,7 @@ Quickstart:
              namespace: {{ .Release.Namespace }}
        YAML
 
-  2. Bind a workload to the backend with a MailPolicy:
+  3. Bind a workload to the backend with a MailPolicy:
 
        kubectl -n my-team apply -f - <<'YAML'
        apiVersion: sigillum.dev/v1alpha1
@@ -98,7 +104,8 @@ Quickstart:
            allowedSenders: ["noreply@example.com"]
        YAML
 
-  3. Send a message from any pod whose ServiceAccount is "my-app":
+  4. Send a message from any pod whose ServiceAccount is "my-app" and that
+     mounts a projected token with audience "sigillum" (see the README):
 
        curl -H "Authorization: Bearer $(cat /var/run/secrets/tokens/sigillum)" \
             -H "Content-Type: application/json" \

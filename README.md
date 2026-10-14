@@ -51,6 +51,10 @@ Sigillum resource, so `helm install` refuses it.
 
 Point Sigillum at an SMTP relay and authorize a workload to send mail through it.
 
+This README describes `main`. Fields marked `(0.4.0)` are not in a released
+chart yet; the 0.3 CRDs drop them without an error, so a backend would have no
+sender bound and a policy no daily cap. Leave them out with a 0.3 release.
+
 ```yaml
 # 1. Credentials for the upstream relay (omit for unauth relays).
 apiVersion: v1
@@ -77,10 +81,10 @@ spec:
     credentialsRef:
       name: corporate-smtp-credentials
       namespace: sigillum-system
-    # optional, for a relay certificate from a private CA: PEM CA
+    # optional (0.4.0), for a relay certificate from a private CA: PEM CA
     # certificates trusted in addition to the system roots (key ca.crt)
     # caSecretRef: { name: corporate-ca, namespace: sigillum-system }
-  # optional: the relay sends only for these. "*@example.com" does not
+  # optional (0.4.0): the relay sends only for these. "*@example.com" does not
   # cover subdomains, so list every domain the policies use.
   allowedSenders: ["*@example.com", "*@billing.example.com", "*@monitoring.example.com"]
 ---
@@ -106,10 +110,46 @@ spec:
   rateLimits:
     messagesPerMinute: 60
     messagesPerHour: 1000
-    messagesPerDay: 5000          # stay below the upstream mailbox's daily quota
+    messagesPerDay: 5000          # (0.4.0) stay below the upstream mailbox's daily quota (needs rateLimit.backend: redis, see below)
 ```
 
-Mount a projected token with audience `sigillum` in the workload pod, then:
+Rate limits are only exact with `--set rateLimit.backend=redis`. The
+default `memory` backend counts per pod: every api-server replica (two by
+default) and every SMTP proxy replica (two more when the proxy is enabled)
+enforces the full limit on its own, and a restart or `helm upgrade` clears
+the counters. With `memory`, `messagesPerDay: 5000` can let 10,000 messages a
+day through, 20,000 with the SMTP proxy, and more after a rollout. That is the overrun a daily cap exists to prevent, since providers
+such as Microsoft 365 and Google Workspace block the mailbox for a day once
+their quota is exceeded.
+
+Mount a projected ServiceAccount token with audience `sigillum` in the
+workload pod:
+
+```yaml
+apiVersion: v1
+kind: Pod                       # or the pod template of a Deployment
+metadata:
+  name: billing
+  namespace: my-team
+spec:
+  serviceAccountName: billing-mailer
+  containers:
+    - name: app
+      image: registry.example.com/billing:1.0
+      volumeMounts:
+        - { name: sigillum-token, mountPath: /var/run/secrets/tokens, readOnly: true }
+  volumes:
+    - name: sigillum-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              audience: sigillum
+              expirationSeconds: 3600
+              path: sigillum
+```
+
+The kubelet rotates the token before it expires, so read the file for every
+request (or at least every few minutes) instead of once at startup. Then:
 
 ```sh
 TOKEN=$(cat /var/run/secrets/tokens/sigillum)
@@ -215,10 +255,12 @@ for credential rotation.
 ## Upgrading
 
 Helm installs CRDs only on first install. Apply them before upgrading the
-release:
+release. `--force-conflicts` hands the fields over from Helm, which created
+the CRDs on first install; without it the apply fails with a conflict on
+`.spec.versions`:
 
 ```sh
-kubectl apply --server-side -f charts/sigillum/crds/
+kubectl apply --server-side --force-conflicts -f charts/sigillum/crds/
 helm upgrade sigillum ./charts/sigillum -n sigillum-system --reuse-values
 ```
 
@@ -244,6 +286,20 @@ each [GitHub Release](https://github.com/se-wo/sigillum/releases)). Changes in
   `rbac.allowedSecretNamespaces` (a `MailBackend`'s credentials in another
   namespace need that namespace listed, as the RBAC already required).
 - `terminationGracePeriodSeconds` is 35 for the api-server and SMTP proxy.
+
+## Uninstall
+
+```sh
+helm uninstall sigillum -n sigillum-system
+# cert-manager keeps the issued Secret unless it runs with
+# --enable-certificate-owner-ref:
+kubectl -n sigillum-system delete secret sigillum-webhook-tls --ignore-not-found
+```
+
+Helm leaves the CRDs in place. Deleting them
+(`kubectl delete -f charts/sigillum/crds/`) also deletes every
+`MailBackend`, `ClusterMailBackend`, `MailPolicy` and `MailCredential` in
+the cluster.
 
 ## Supply chain
 
