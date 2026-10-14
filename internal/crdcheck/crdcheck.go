@@ -54,7 +54,7 @@ var Required = []Field{
 
 // UpgradeHint tells the operator how to fix an outdated schema.
 const UpgradeHint = "apply the CRDs of this release before upgrading " +
-	"(kubectl apply --server-side -f charts/sigillum/crds/), or set --skip-crd-check"
+	"(kubectl apply --server-side --force-conflicts -f charts/sigillum/crds/), or set --skip-crd-check"
 
 // Timeout bounds Wait at startup, below the liveness probe budgets.
 const Timeout = 30 * time.Second
