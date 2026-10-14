@@ -77,6 +77,14 @@ the version being prepared in the same pull request as the change.
 
 ### Added
 
+- Readiness metrics on the controller, so a broken relay is noticed
+  before the first mail fails: `sigillum_backend_ready{backend,type}`,
+  `sigillum_backend_endpoints_ready{backend}` and
+  `sigillum_backend_endpoints{backend}`,
+  `sigillum_policy_ready{namespace,policy,reason}` and
+  `sigillum_credential_ready{namespace,credential}`, plus
+  `sigillum_build_info{version,commit}` on every component. SPEC US-4.1
+  has an example alert (`sigillum_backend_ready == 0` for 10m) (#76).
 - The `MailPolicy` webhook warns when a policy sets
   `rateLimits.messagesPerDay` and the release keeps rate limits in memory
   (`rateLimit.backend: memory`), where the cap is per pod and reset by

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,10 +25,14 @@ type ClusterMailBackendReconciler struct {
 func (r *ClusterMailBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var cmb sigv1.ClusterMailBackend
 	if err := r.Get(ctx, req.NamespacedName, &cmb); err != nil {
+		if apierrors.IsNotFound(err) {
+			forgetBackendMetrics("/" + req.Name)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	requeue := reconcileBackend(ctx, r.Client, "/"+req.Name, &cmb.Spec, &cmb.Status, cmb.Generation, "",
 		webhook.ValidateBackend(&cmb))
+	recordBackendMetrics("/"+req.Name, cmb.Spec.Type, &cmb.Status)
 	if err := r.Status().Update(ctx, &cmb); err != nil {
 		return ctrl.Result{}, err
 	}
