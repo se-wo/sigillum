@@ -98,7 +98,7 @@ func TestMain(m *testing.M) {
 	if err := whv1.SetupClusterMailBackendWebhook(mgr); err != nil {
 		panic(err)
 	}
-	if err := whv1.SetupMailPolicyWebhook(mgr); err != nil {
+	if err := whv1.SetupMailPolicyWebhook(mgr, "memory"); err != nil {
 		panic(err)
 	}
 	if err := whv1.SetupMailCredentialWebhook(mgr, &whv1.MailCredentialValidator{

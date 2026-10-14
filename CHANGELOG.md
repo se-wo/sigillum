@@ -67,6 +67,15 @@ the version being prepared in the same pull request as the change.
 
 ### Added
 
+- The `MailPolicy` webhook warns when a policy sets
+  `rateLimits.messagesPerDay` and the release keeps rate limits in memory
+  (`rateLimit.backend: memory`), where the cap is per pod and reset by
+  restarts. The chart passes the store to the controller
+  (`--ratelimit-backend`; without the flag there is no warning) (#82).
+- The `MailPolicy` webhook warns when `senderRestrictions.allowedSenders`
+  lists addresses its backend's `allowedSenders` never allows; sends from
+  them would fail with `403 sender-not-allowed` while the policy is Ready
+  (#49).
 - `sigillum_smtp_messages_in_flight{namespace}` metric and the
   `smtp.maxConcurrentPerTenant` setting (see Fixed, #73).
 - `sigillum_upstream_auth_failures_total{backend}` metric (see Fixed, #58).
