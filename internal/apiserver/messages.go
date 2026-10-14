@@ -38,6 +38,9 @@ type requestBody struct {
 	Body        requestBodyContent  `json:"body,omitempty"`
 	Attachments []requestAttachment `json:"attachments,omitempty"`
 	Headers     map[string]string   `json:"headers,omitempty"`
+	// ContentIDs maps the form names of multipart file parts to content
+	// IDs; those parts are sent inline. Multipart requests only.
+	ContentIDs map[string]string `json:"contentIds,omitempty"`
 }
 
 type requestBodyContent struct {
@@ -49,6 +52,7 @@ type requestAttachment struct {
 	Filename      string `json:"filename"`
 	ContentType   string `json:"contentType,omitempty"`
 	Disposition   string `json:"disposition,omitempty"`
+	ContentID     string `json:"contentId,omitempty"`
 	ContentBase64 string `json:"contentBase64"`
 }
 
@@ -178,6 +182,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if len(req.ContentIDs) > 0 {
+			rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+				"Malformed JSON payload", "contentIds names multipart file parts; in a JSON request, set contentId on the attachment"))
+			return
+		}
 		var decErr error
 		atts, decErr = decodeAttachments(req.Attachments)
 		if decErr != nil {
@@ -185,6 +194,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				"Invalid attachment", decErr.Error()))
 			return
 		}
+	}
+
+	if err := uniqueContentIDs(atts); err != nil {
+		rejectPayload(problem.New(problem.TypeInvalidPayload, http.StatusBadRequest,
+			"Invalid attachment", err.Error()))
+		return
 	}
 
 	ev.From = req.From // raw until parsed, so a malformed sender is still recorded
@@ -426,6 +441,7 @@ func decodeAttachments(in []requestAttachment) ([]driver.Attachment, error) {
 			Filename:    a.Filename,
 			ContentType: a.ContentType,
 			Disposition: a.Disposition,
+			ContentID:   a.ContentID,
 			Content:     raw,
 		})
 	}
@@ -706,8 +722,34 @@ func validateAttachmentMeta(a requestAttachment) error {
 			return fmt.Errorf("contentType %q is not a valid media type: %w", a.ContentType, err)
 		}
 	}
-	if strings.ContainsAny(a.Disposition, "\r\n\x00") {
-		return fmt.Errorf("disposition %q contains CR, LF, or NUL", a.Disposition)
+	if a.Disposition != "" && !strings.EqualFold(a.Disposition, "attachment") && !strings.EqualFold(a.Disposition, "inline") {
+		return fmt.Errorf("disposition %q must be \"attachment\" or \"inline\"", a.Disposition)
+	}
+	if a.ContentID != "" {
+		if !strings.EqualFold(a.Disposition, "inline") {
+			return fmt.Errorf("contentId %q needs disposition \"inline\"", a.ContentID)
+		}
+		if err := driver.ValidateContentID(a.ContentID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// uniqueContentIDs rejects two parts with the same content ID: a cid:
+// reference would show either of them. IDs compare case-insensitively,
+// as the domain part does.
+func uniqueContentIDs(atts []driver.Attachment) error {
+	seen := map[string]bool{}
+	for _, a := range atts {
+		if a.ContentID == "" {
+			continue
+		}
+		k := strings.ToLower(a.ContentID)
+		if seen[k] {
+			return fmt.Errorf("content ID %q is used by more than one attachment", a.ContentID)
+		}
+		seen[k] = true
 	}
 	return nil
 }
@@ -727,6 +769,39 @@ func firstBidiOrFormatControl(s string) rune {
 	return 0
 }
 
+// applyContentIDs gives the file parts named in contentIds (form name to
+// content ID) their content ID and sends them inline.
+func applyContentIDs(ids map[string]string, atts []driver.Attachment, formNames []string) error {
+	names := make([]string, 0, len(ids))
+	for n := range ids {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		idx := -1
+		for i, fn := range formNames {
+			if fn != n {
+				continue
+			}
+			if idx >= 0 {
+				return fmt.Errorf("contentIds: more than one file part is named %q", n)
+			}
+			idx = i
+		}
+		if idx < 0 {
+			return fmt.Errorf("contentIds: no file part is named %q", n)
+		}
+		if atts[idx].ContentID != "" {
+			return fmt.Errorf("contentIds: part %q already has a Content-ID header", n)
+		}
+		if err := driver.ValidateContentID(ids[n]); err != nil {
+			return fmt.Errorf("contentIds[%q]: %w", n, err)
+		}
+		atts[idx].ContentID, atts[idx].Disposition = ids[n], "inline"
+	}
+	return nil
+}
+
 var errBodyTooLarge = errors.New("aggregate request body exceeds 32 MiB ceiling")
 
 // parseMultipartMessage parses a multipart/form-data request body.
@@ -743,6 +818,7 @@ func parseMultipartMessage(r *http.Request, maxBytes int64) (requestBody, []driv
 
 	var req requestBody
 	var atts []driver.Attachment
+	var formNames []string // of atts, for contentIds
 	var total int64
 	var seenData bool
 
@@ -792,14 +868,27 @@ func parseMultipartMessage(r *http.Request, maxBytes int64) (requestBody, []driv
 		if ct == "" {
 			ct = "application/octet-stream"
 		}
-		if metaErr := validateAttachmentMeta(requestAttachment{Filename: filename, ContentType: ct}); metaErr != nil {
-			return requestBody{}, nil, metaErr
+		// A Content-ID part header makes the part inline, like an entry
+		// in the data part's contentIds.
+		att := requestAttachment{Filename: filename, ContentType: ct}
+		if cid := part.Header.Get("Content-ID"); cid != "" {
+			att.ContentID, att.Disposition = strings.TrimSuffix(strings.TrimPrefix(cid, "<"), ">"), "inline"
+		}
+		if metaErr := validateAttachmentMeta(att); metaErr != nil {
+			return requestBody{}, nil, fmt.Errorf("part %q: %w", name, metaErr)
 		}
 		atts = append(atts, driver.Attachment{
 			Filename:    filename,
 			ContentType: ct,
+			Disposition: att.Disposition,
+			ContentID:   att.ContentID,
 			Content:     content,
 		})
+		formNames = append(formNames, name)
+	}
+
+	if err := applyContentIDs(req.ContentIDs, atts, formNames); err != nil {
+		return requestBody{}, nil, fmt.Errorf("data part: %w", err)
 	}
 
 	for i, a := range req.Attachments {

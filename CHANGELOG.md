@@ -41,6 +41,8 @@ the version being prepared in the same pull request as the change.
   rollout, that controller reports the guard as changed and writes no
   generated credential Secrets (`SecretsManaged=False`) until the other
   side is updated; it re-checks every 30 s.
+- REST: an attachment `disposition` other than `attachment` or `inline`
+  (any case) is refused with `400 invalid-payload` (see Added, #80).
 - REST: `POST /v1/messages` answers `415 unsupported-media-type` unless
   the `Content-Type` is `application/json` or `multipart/form-data` (see
   Fixed, #50). Check that clients set the header; a body sent without
@@ -98,6 +100,19 @@ the version being prepared in the same pull request as the change.
   lists addresses its backend's `allowedSenders` never allows; sends from
   them would fail with `403 sender-not-allowed` while the policy is Ready
   (#49).
+- REST: inline images for HTML mail. An attachment with
+  `"disposition": "inline"` takes a `contentId` (`logo@example.com`,
+  without `<>`), written as its `Content-ID`, so `body.html` can embed it
+  with `<img src="cid:logo@example.com">`. Such parts are sent as
+  `multipart/related` with the HTML (inside `multipart/alternative` with a
+  text body, inside `multipart/mixed` with other attachments); before,
+  every part went into `multipart/mixed` without a `Content-ID` and HTML
+  could only use external or `data:` images. Multipart requests set it
+  with `contentIds` in the `data` part or a `Content-ID` part header. An
+  invalid, duplicate or non-inline `contentId` is a `400`. An attachment
+  `disposition` other than `attachment` or `inline` is now a `400` too;
+  before, it was copied into the `Content-Disposition` header as given,
+  control characters included, which broke the MIME structure (#80).
 - `sigillum_smtp_messages_in_flight{namespace}` metric and the
   `smtp.maxConcurrentPerTenant` setting (see Fixed, #73).
 - `sigillum_upstream_auth_failures_total{backend}` metric (see Fixed, #58).

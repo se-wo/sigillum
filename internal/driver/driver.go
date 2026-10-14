@@ -7,7 +7,9 @@ package driver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -50,7 +52,43 @@ type Attachment struct {
 	Filename    string
 	ContentType string
 	Disposition string // "attachment" (default) or "inline"
-	Content     []byte
+	// ContentID identifies an inline part for cid: references in the HTML
+	// body, without the angle brackets (see ValidateContentID).
+	ContentID string
+	Content   []byte
+}
+
+// maxContentID bounds a content ID, so its header line stays far below
+// the RFC 5322 line limit.
+const maxContentID = 250
+
+// ValidateContentID checks a content ID as RFC 5322 msg-id content without
+// the angle brackets: id-left "@" id-right, each a dot-atom-text. That
+// excludes CR, LF, spaces, quotes and "<>", so it is safe in a header.
+func ValidateContentID(id string) error {
+	if id == "" || len(id) > maxContentID {
+		return fmt.Errorf("content ID must be 1 to %d characters", maxContentID)
+	}
+	left, right, ok := strings.Cut(id, "@")
+	if !ok || !isDotAtom(left) || !isDotAtom(right) {
+		return fmt.Errorf("content ID %q must look like id-left@id-right (letters, digits, dots and !#$%%&'*+-/=?^_`{|}~), without <>", id)
+	}
+	return nil
+}
+
+// isDotAtom reports whether s is an RFC 5322 dot-atom-text.
+func isDotAtom(s string) bool {
+	if s == "" || s[0] == '.' || s[len(s)-1] == '.' || strings.Contains(s, "..") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' ||
+			c == '.' || strings.IndexByte("!#$%&'*+-/=?^_`{|}~", c) >= 0) {
+			return false
+		}
+	}
+	return true
 }
 
 // Body holds the optional plain-text and HTML alternatives.

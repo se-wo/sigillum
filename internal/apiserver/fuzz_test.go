@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/se-wo/sigillum/internal/driver"
 	"github.com/se-wo/sigillum/internal/policy"
 )
 
@@ -21,6 +22,11 @@ func FuzzParseMultipartMessage(f *testing.F) {
 		"Content-Type: application/pdf\r\n\r\n%PDF\r\n--b--\r\n")
 	f.Add(boundary, "--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a\r\nb\"\r\n\r\nx\r\n--b--\r\n")
 	f.Add(boundary, "--b\r\nContent-Disposition: form-data; name=\"data\"\r\n\r\n{\r\n--b--\r\n")
+	f.Add(boundary, "--b\r\nContent-Disposition: form-data; name=\"data\"\r\n\r\n"+
+		`{"from":"a@x","to":["b@x"],"body":{"html":"<img src=cid:l@x>"},"contentIds":{"logo":"l@x"}}`+
+		"\r\n--b\r\nContent-Disposition: form-data; name=\"logo\"; filename=\"l.png\"\r\n"+
+		"Content-Type: image/png\r\n\r\npng\r\n--b\r\nContent-Disposition: form-data; name=\"c\"; filename=\"c.png\"\r\n"+
+		"Content-ID: <c@x>\r\n\r\npng\r\n--b--\r\n")
 	f.Add("", "")
 	f.Fuzz(func(t *testing.T, boundary, body string) {
 		const maxBytes = 1 << 16
@@ -36,8 +42,12 @@ func FuzzParseMultipartMessage(f *testing.F) {
 		var total int
 		for _, a := range atts {
 			total += len(a.Content)
-			if validateAttachmentMeta(requestAttachment{Filename: a.Filename, ContentType: a.ContentType, Disposition: a.Disposition}) != nil {
-				t.Fatalf("attachment metadata with CR, LF or NUL accepted: %+v", a)
+			if validateAttachmentMeta(requestAttachment{Filename: a.Filename, ContentType: a.ContentType,
+				Disposition: a.Disposition, ContentID: a.ContentID}) != nil {
+				t.Fatalf("invalid attachment metadata accepted: %+v", a)
+			}
+			if a.ContentID != "" && (a.Disposition != "inline" || driver.ValidateContentID(a.ContentID) != nil) {
+				t.Fatalf("content ID on a part that is not inline, or invalid: %+v", a)
 			}
 		}
 		if total > maxBytes {

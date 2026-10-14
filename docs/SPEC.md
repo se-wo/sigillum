@@ -118,6 +118,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 - REST: attachments as Base64 in JSON, or as `multipart/form-data`.
 - Size limit configurable per policy (`messageLimits.maxSizeBytes`, default 10 MiB). Counting rules: §4.4.4.
 - Content type, file name and disposition (`attachment` or `inline`) are preserved.
+- **[v0.4.0]** An inline attachment can carry a content ID, so the HTML body can embed it (`<img src="cid:…">`), §4.4.1.
 
 #### US-1.4 — Transparent errors **[v0.1.0]**
 **As a** developer **I want** clear error messages, **so that** I know whether to retry or whether my payload is wrong.
@@ -984,7 +985,19 @@ Rules:
 - The message needs content: a non-blank `body.text` or `body.html`, or a non-empty attachment (`400` otherwise).
 - Multipart: the `data` part holds the JSON object above (Base64 `attachments` in it are sent too); every other part is a file attachment, named after its filename or its form name. A part without a filename that is named like a message field (`subject`, `text`, …) is refused, since it belongs in `data`.
 - Addresses are RFC 5322 (display names allowed, subject to US-2.3); local parts follow US-2.4.
-- `disposition` is `attachment` (default) or `inline`.
+- `disposition` is `attachment` (default) or `inline`, in any case; **[v0.4.0]** any other value is a `400` (before, it was copied into the `Content-Disposition` header as given).
+- **[v0.4.0]** `contentId` gives an inline attachment a content ID for `cid:` references in `body.html`. It is written as the part's `Content-ID: <…>` header; give it without the angle brackets. It must look like `id-left@id-right` (each side letters, digits, dots and ``!#$%&'*+-/=?^_`{|}~``, at most 250 characters), is allowed only with `"disposition": "inline"`, and must be unique within the message (compared case-insensitively); otherwise `400`. Parts with a `contentId` go with the HTML they belong to: `multipart/related` (RFC 2387, HTML first) in place of the HTML part, inside `multipart/alternative` when there is a text body, inside `multipart/mixed` when there are other attachments:
+  ```
+  multipart/mixed                      (only with other attachments)
+  ├── multipart/alternative            (only with body.text)
+  │   ├── text/plain
+  │   └── multipart/related; type="text/html"
+  │       ├── text/html                <img src="cid:logo@example.com">
+  │       └── image/png                Content-ID: <logo@example.com>
+  └── application/pdf                  invoice.pdf
+  ```
+  Example attachment: `{"filename": "logo.png", "contentType": "image/png", "disposition": "inline", "contentId": "logo@example.com", "contentBase64": "iVBORw0KGgo..."}`. Without `body.html` (or for an inline part without `contentId`) the part stays an ordinary part of `multipart/mixed`, as before.
+- **[v0.4.0]** Multipart: a file part gets a content ID, and is sent inline, from `contentIds` in the `data` part, an object from the part's form name to its content ID (`"contentIds": {"logo": "logo@example.com"}` for a part named `logo`), or from a `Content-ID` part header (`curl -F 'logo=@logo.png;type=image/png;headers="Content-ID: <logo@example.com>"'`). Naming a part that does not exist or exists twice, or giving both for one part, is a `400`. `contentIds` in a JSON request is a `400`: set `contentId` on the attachment there.
 - **[v0.4.0]** Attachment `filename` and `contentType` are encoded for the wire: a non-ASCII `filename` is written both as an ASCII-only `filename="…"` (for old clients) and as an RFC 2231 / 5987 `filename*=UTF-8''…` parameter, rather than as raw bytes; `contentType` is reduced to its media type (plus `charset` for `text/*`), so caller-supplied parameters such as `name="evil.exe"` cannot disagree with the filename. A `filename` containing a Unicode bidirectional or format control (U+202A–202E, U+2066–2069, U+200E/F), or a `contentType` that is not a valid media type, is rejected (`400`).
 - **[v0.4.0]** `subject` and the display names in `from`/`to`/`cc` are folded (RFC 5322 §2.1.1) so no header line exceeds 998 octets, and non-ASCII values are emitted as RFC 2047 encoded-words of at most 75 characters each. A run without spaces too long to fold is RFC 2047-encoded as well, which leaves the decoded text unchanged.
 - `headers`:

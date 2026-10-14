@@ -105,6 +105,55 @@ func FuzzWriteQuotedPrintable(f *testing.F) {
 	})
 }
 
+// FuzzAssembleRelated checks the structure built for inline parts (#80):
+// a valid content ID ends up as exactly one Content-ID header next to the
+// HTML in multipart/related, and an invalid one is refused, never written.
+func FuzzAssembleRelated(f *testing.F) {
+	f.Add("text", `<img src="cid:logo@x">`, "inline", "logo@x", true)
+	f.Add("", "<p>x</p>", "INLINE", "a.b@c.d", false)
+	f.Add("t", "", "inline", "logo@x", true)
+	f.Add("t", "h", "attachment", "logo@x", false)
+	f.Add("t", "h", "inline", "logo@x>\r\nBcc: evil@x", true)
+	f.Add("t", "h", "inline", "<logo@x>", true)
+	f.Fuzz(func(t *testing.T, text, html, disposition, cid string, withPDF bool) {
+		atts := []driver.Attachment{{Filename: "logo.png", ContentType: "image/png", Disposition: disposition,
+			ContentID: cid, Content: []byte("png")}}
+		if withPDF {
+			atts = append(atts, driver.Attachment{Filename: "a.pdf", ContentType: "application/pdf", Content: []byte("%PDF")})
+		}
+		raw, _, err := AssembleMessage(&driver.Message{From: driver.Address{Address: "from@example.com"},
+			To: []driver.Address{{Address: "to@example.com"}}, Body: driver.Body{Text: text, HTML: html}, Attachments: atts}, "")
+		valid := cid == "" || driver.ValidateContentID(cid) == nil
+		if err != nil {
+			if valid {
+				t.Fatalf("valid input refused: %v", err)
+			}
+			return
+		}
+		if !valid {
+			t.Fatalf("invalid content ID %q accepted:\n%q", cid, raw)
+		}
+		m, err := mail.ReadMessage(bytes.NewReader(raw))
+		if err != nil {
+			t.Fatalf("assembled message does not parse: %v\n%q", err, raw)
+		}
+		if len(m.Header["Bcc"]) > 0 {
+			t.Fatalf("assembled message gained recipients:\n%q", raw)
+		}
+		tree, err := mimeTree(m.Header.Get("Content-Type"), "", m.Body)
+		if err != nil {
+			t.Fatalf("MIME structure does not parse: %v\n%q", err, raw)
+		}
+		if cid != "" && strings.Count(tree, "<"+cid+">") != 1 {
+			t.Fatalf("content ID %q must appear once, got %s", cid, tree)
+		}
+		related := cid != "" && strings.TrimSpace(html) != "" && strings.EqualFold(disposition, "inline")
+		if got := strings.Contains(tree, "related(text/html,image/png<"+cid+">)"); got != related {
+			t.Fatalf("multipart/related = %v, want %v: %s", got, related, tree)
+		}
+	})
+}
+
 // FuzzRetryHint checks that a relay's reply text yields a delay only for
 // 421 and 451, never a negative one, and only when it names a number.
 func FuzzRetryHint(f *testing.F) {
