@@ -310,6 +310,11 @@ func TestResultMapping(t *testing.T) {
 			t.Errorf("reply must carry the message id for support: %v", err)
 		}
 	}
+	// #63: the upstream's requested delay is named in the 451 text.
+	err := resultError(gateway.Result{Status: gateway.StatusUpstreamError, RetryAfter: 30 * time.Second}, "m")
+	if smtpCode(err) != 451 || !strings.Contains(err.Error(), "retry in 30s") {
+		t.Errorf("want 451 naming the delay, got %v", err)
+	}
 	if resultError(gateway.Result{Status: gateway.StatusAccepted}, "m") != nil {
 		t.Error("accepted must map to nil (250)")
 	}

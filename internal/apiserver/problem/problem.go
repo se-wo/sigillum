@@ -27,6 +27,9 @@ const (
 	TypeShuttingDown      = "shutting-down"
 	TypeUnavailable       = "unavailable"
 	TypeInternal          = "internal-error"
+	TypeNotFound          = "not-found"
+	TypeMethodNotAllowed  = "method-not-allowed"
+	TypeUnsupportedMedia  = "unsupported-media-type"
 )
 
 // Problem is the RFC-7807 envelope plus a couple of Sigillum-specific keys.

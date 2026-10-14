@@ -232,3 +232,47 @@ func TestAuthenticator_ReviewFailureIsUnavailable(t *testing.T) {
 		t.Fatalf("want ErrUnavailable, got %v", err)
 	}
 }
+
+// #50: a token minted for another audience is explained in terms of how
+// to create the right one, also when the result comes from the cache.
+func TestAuthenticator_AudienceErrorExplainsTheFix(t *testing.T) {
+	kubeErr := func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &authv1.TokenReview{Status: authv1.TokenReviewStatus{
+			Error: `[invalid bearer token, token audiences ["https://kubernetes.default.svc.cluster.local"] is invalid for the target audiences ["sigillum"]]`,
+		}}, nil
+	}
+	cases := map[string]struct {
+		react func(k8stesting.Action) (bool, runtime.Object, error)
+		want  string
+	}{
+		"kube-apiserver": {kubeErr, "token audience is https://kubernetes.default.svc.cluster.local, expected sigillum " +
+			"(create the token with --audience sigillum, or a projected token with audience: sigillum)"},
+		"not audience-aware": {reviewWithAudiences(nil), "token has no audience, expected sigillum " +
+			"(create the token with --audience sigillum, or a projected token with audience: sigillum)"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			cs := fake.NewSimpleClientset()
+			cs.PrependReactor("create", "tokenreviews", c.react)
+			a, err := New(cs, []string{"sigillum"}, 16, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 2 { // the second answer comes from the cache
+				if _, err := a.Authenticate(context.Background(), "tok"); err == nil || err.Error() != c.want {
+					t.Fatalf("got %v\nwant %s", err, c.want)
+				}
+			}
+		})
+	}
+}
+
+func TestRejectedAudiences(t *testing.T) {
+	got, ok := rejectedAudiences(`token audiences ["a" "b\"c"] is invalid for the target audiences ["sigillum"]`)
+	if !ok || len(got) != 2 || got[0] != "a" || got[1] != `b"c` {
+		t.Fatalf("got %q %v", got, ok)
+	}
+	if _, ok := rejectedAudiences("token has expired"); ok {
+		t.Fatal("other errors are kept as they are")
+	}
+}

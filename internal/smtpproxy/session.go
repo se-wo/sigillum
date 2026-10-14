@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/mail"
 	"os"
@@ -444,6 +445,10 @@ func resultError(res gateway.Result, msgID string) error {
 	case gateway.StatusUpstreamError:
 		if res.Permanent {
 			return e(554, smtp.EnhancedCode{5, 0, 0}, "Upstream relay rejected the message")
+		}
+		if res.RetryAfter > 0 {
+			return e(451, smtp.EnhancedCode{4, 4, 1}, fmt.Sprintf("Upstream relay unavailable, retry in %ds",
+				int(math.Ceil(res.RetryAfter.Seconds()))))
 		}
 		return e(451, smtp.EnhancedCode{4, 4, 1}, "Upstream relay unavailable")
 	default: // backend not ready, policy invalid, limiter unavailable

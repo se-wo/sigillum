@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/smtp"
 	"net/textproto"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -180,7 +181,7 @@ func (d *Driver) sendBody(ctx context.Context, from string, rcpts []string, body
 		lastErr = driver.ErrNoReadyEndpoint
 	}
 	if transient {
-		return nil, fmt.Errorf("%w: %v", driver.ErrUpstreamTransient, lastErr)
+		return nil, driver.WithRetryAfter(fmt.Errorf("%w: %v", driver.ErrUpstreamTransient, lastErr), retryHint(lastErr))
 	}
 	return nil, fmt.Errorf("%w: %v", driver.ErrUpstreamPermanent, lastErr)
 }
@@ -425,6 +426,29 @@ func isTransient(err error) bool {
 		return te.Code < 500
 	}
 	return true
+}
+
+// retryDelay matches the delay hint some relays put in a 421 or 451 reply:
+// "try again in 30 seconds", "retry after 5 min".
+var retryDelay = regexp.MustCompile(`(?i)\b(?:retry|try again)\s+(?:in|after)\s+(\d{1,6})\s*(s|secs?|seconds?|m|mins?|minutes?)\b`)
+
+// retryHint returns the delay a 421 or 451 reply asks for, or 0: most
+// relays only say "try again later" (#63).
+func retryHint(err error) time.Duration {
+	var te *textproto.Error
+	if !errors.As(err, &te) || (te.Code != 421 && te.Code != 451) {
+		return 0
+	}
+	m := retryDelay.FindStringSubmatch(te.Msg)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	d := time.Duration(n) * time.Second
+	if strings.HasPrefix(strings.ToLower(m[2]), "m") {
+		d = time.Duration(n) * time.Minute
+	}
+	return d
 }
 
 // isTooManyRecipients reports whether a 452 reply is the "too many

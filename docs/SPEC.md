@@ -124,7 +124,7 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
 **As a** developer **I want** clear error messages, **so that** I know whether to retry or whether my payload is wrong.
 
 *Acceptance criteria:*
-- Errors use RFC 7807 Problem Details (`application/problem+json`).
+- Errors use RFC 7807 Problem Details (`application/problem+json`), also for unknown paths and methods **[v0.4.0]**. The `detail` speaks in terms of the request (`` `to` must be an array of addresses (strings), not a string ``), not of Sigillum's implementation.
 - Whether a request may be retried is defined per status code in §4.4.3. It is **not** "4xx = never retry, 5xx = always retry": `429` is retryable. Upstream failures are split since v0.3.0: `502 upstream-error` is transient (retry), `422 upstream-rejected` is a permanent rejection of this message by the relay (do not retry unchanged).
 - Policy denials name the policy that denied the request (`policy` field).
 
@@ -537,7 +537,7 @@ Two paths, one per kind of account:
   - REST messages are built from the checked `to`, `cc` and `bcc` lists, so they already match.
 - Graph limits one request to 4 MB, Base64 MIME included. Larger messages **[planned v0.4.0, opt-in]** go through a draft: the driver parses the MIME message, creates the draft with body, recipients and `X-` headers, uploads each large attachment through an upload session, and sends the draft. This path needs the additional permission `Mail.ReadWrite` (read access to the whole mailbox), so it is off unless `microsoftGraph.largeMessages: true`. It cannot keep the MIME structure byte for byte: headers other than the standard ones and `X-` headers are dropped, and signed or encrypted messages (S/MIME, PGP/MIME) above 4 MB are rejected with a permanent error. Without the opt-in, larger messages are rejected with a permanent error that names the limit. The mailbox's own send size limit still applies (Exchange Online default 35 MB).
 - Error mapping: `429`, `503` and other `5xx` are `ErrUpstreamTransient` (honoring `Retry-After`); `400`, `403` and `404` (unknown mailbox, missing permission) are `ErrUpstreamPermanent`.
-- Implementation notes (row 4a): REST messages are assembled to MIME like for SMTP; the request is `POST {base}/users/{From}/sendMail` with the Base64 MIME as `text/plain`, and `202` is success (the response's `request-id` is the upstream ID). A `401` drops the token and retries once with a new one; a second `401` is permanent. Graph's `Retry-After` is not passed on yet: driver errors carry no delay, so a throttled send answers like any transient upstream error (`502`, SMTP `451`) and the client retries on its own schedule. A failed token request is permanent for `invalid_client` and the other permanent token errors (§4.5), transient otherwise. Because the gateway builds a driver per send, the token cache is shared by every driver of the same tenant endpoint, client and secret, and by the health check. The envelope rule refuses a message that still carries `Bcc` (the SMTP proxy strips it, REST never writes it) and validates every envelope recipient as a bare address before writing the `Bcc` field; `FuzzPrepare` checks that the delivered set equals the envelope.
+- Implementation notes (row 4a): REST messages are assembled to MIME like for SMTP; the request is `POST {base}/users/{From}/sendMail` with the Base64 MIME as `text/plain`, and `202` is success (the response's `request-id` is the upstream ID). A `401` drops the token and retries once with a new one; a second `401` is permanent. **[v0.4.0]** Graph's `Retry-After` on `429` and `503` (throttling, e.g. `ApplicationThrottled`, `MailboxConcurrency`) is carried in the driver error, capped at 10 minutes like the token endpoint's, and passed on: REST answers `502 upstream-error` with that `Retry-After`, the SMTP proxy names it in its `451` text (#63). Microsoft documents that retrying sooner extends the throttling. Before, the delay was dropped and clients retried at once. A failed token request is permanent for `invalid_client` and the other permanent token errors (§4.5), transient otherwise. Because the gateway builds a driver per send, the token cache is shared by every driver of the same tenant endpoint, client and secret, and by the health check. The envelope rule refuses a message that still carries `Bcc` (the SMTP proxy strips it, REST never writes it) and validates every envelope recipient as a bare address before writing the `Bcc` field; `FuzzPrepare` checks that the delivered set equals the envelope.
 - The health check acquires a token, so a wrong tenant, client ID or secret shows up as `Ready=False` instead of on the first send. `status.endpointStatus` has a single entry for the Graph endpoint.
 - Exchange Online's daily limit (10,000 recipients per mailbox) applies to Graph as well; the daily limit (US-2.7) ships in the same release.
 - Spec: `spec.microsoftGraph` with `tenantID` (tenant ID or verified domain, lower case, since it becomes part of the token URL), `clientID` (a GUID) and `credentialsRef` (key `client_secret`). The webhook requires the block for `type: microsoftGraph`, refuses it on other types and refuses `spec.smtp` on Graph backends, and requires a non-empty `allowedSenders` (US-2.8). The recipe `examples/providers/microsoft-365-graph.yaml` confines the app to its mailboxes with RBAC for Applications in Exchange Online and warns against also granting `Mail.Send` with admin consent in Entra, which would apply to every mailbox.
@@ -946,7 +946,7 @@ Controller behavior in generated mode:
 ### 4.4 REST API (v1)
 
 **Base path:** `/v1`
-**Content type:** `application/json`, or `multipart/form-data` for attachments (US-1.3)
+**Content type:** `application/json`, or `multipart/form-data` for attachments (US-1.3). **[v0.4.0]** Any other or a missing `Content-Type` answers `415 unsupported-media-type` (parameters such as `charset` are allowed).
 **Auth:** `Authorization: Bearer <ServiceAccount token>` with audience `sigillum`
 **Transport:** plain HTTP on port 8443 by default, expecting TLS from the mesh or a gateway. Native TLS when `SIGILLUM_TLS_CERT` / `SIGILLUM_TLS_KEY` are set (chart `api.tls.secretName`). **[v0.4.0]** The files are checked every 10 s and a renewed certificate is used for new connections without a restart (the kubelet updates a mounted Secret within about a minute); a pair that does not load keeps the previous one in use and logs a warning. The same applies to the SMTP proxy's certificate (`smtp.tls.secretName`).
 
@@ -1047,6 +1047,9 @@ The problem `type` is `https://sigillum.dev/errors/<slug>`. The audit / metric `
 | `202` | — | Accepted by the backend | — |
 | `400` | `invalid-payload` | Malformed JSON / multipart, unknown field, invalid address or header, no recipient, no content | No, fix the request |
 | `401` | `invalid-token` | Missing, invalid, expired or wrong-audience token | No, fix the token |
+| `404` | `not-found` | No such endpoint **[v0.4.0]** (before, a `text/plain` body) | No |
+| `405` | `method-not-allowed` | The endpoint exists, the method does not; `Allow` header lists the methods **[v0.4.0]** (before, an empty body) | No |
+| `415` | `unsupported-media-type` | `Content-Type` is neither `application/json` nor `multipart/form-data` **[v0.4.0]**; audit reason `invalid_payload` | No, fix the request |
 | `403` | `no-policy-matched` | No policy matches the caller | No |
 | `403` | `sender-not-allowed` | US-2.3 | No |
 | `403` | `recipient-not-allowed` | US-2.4 (recipients or `Reply-To`) | No |
@@ -1054,7 +1057,7 @@ The problem `type` is `https://sigillum.dev/errors/<slug>`. The audit / metric `
 | `413` | `message-too-large` | Over `maxSizeBytes` or the 32 MiB ceiling | No |
 | `429` | `rate-limited` | US-2.2; `Retry-After` header | Yes, after `Retry-After` |
 | `422` | `upstream-rejected` | The relay permanently rejected this message (`5xx` to `MAIL`, `RCPT` or `DATA`), or capped the recipients of one transaction (`452 4.5.3`, **[v0.4.0]**) | No, not unchanged |
-| `502` | `upstream-error` | Upstream relay failed transiently (unreachable, `4xx`, or a handshake / TLS / relay-login problem on Sigillum's side), or the send did not finish within the request budget (50 s, below the server's 60 s write timeout, so the client always gets an answer) | Yes, with backoff; after a timeout the relay may already have the message |
+| `502` | `upstream-error` | Upstream relay failed transiently (unreachable, `4xx`, or a handshake / TLS / relay-login problem on Sigillum's side), or the send did not finish within the request budget (50 s, below the server's 60 s write timeout, so the client always gets an answer). **[v0.4.0]** When the upstream asked for a delay (Graph `429`/`503` with `Retry-After`, an SMTP `421`/`451` reply saying "try again in N seconds/minutes"), a `Retry-After` header carries it, at most 600 s | Yes, after `Retry-After` if present, else with backoff; after a timeout the relay may already have the message |
 | `503` | `backend-not-ready` | Backend missing, not Ready, invalid, or its config could not be resolved | Yes, with backoff |
 | `503` | `policy-invalid` | The matching policy breaks the admission rules (created without the webhook or by an older version) **[v0.4.0]** | Yes, once the policy is fixed |
 | `503` | `unavailable` | Redis rate-limit store unreachable (fail closed), the TokenReview failed (v0.3.0), or the pod's request-body budget is full **[v0.4.0]**; `Retry-After: 5` | Yes |
@@ -1159,7 +1162,7 @@ Drivers register a factory per type in a process-wide registry. The webhook reje
 | Over policy size | `552 5.3.4` |
 | Malformed message, line over `--max-line-length` (then closes) | `550 5.6.0` |
 | Rate limited | `421 4.7.0` (see Q-7) |
-| Upstream transient / backend not ready / limiter down / busy | `451` |
+| Upstream transient / backend not ready / limiter down / busy | `451`; for an upstream that asked for a delay, the text says `retry in Ns` **[v0.4.0]** |
 | Pause over `--read-timeout` or transfer over `--data-timeout` during `DATA` (then closes) | `451 4.4.2` |
 | Upstream permanent rejection | `554 5.0.0` |
 

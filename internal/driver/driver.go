@@ -161,3 +161,37 @@ var (
 	// wrapped together with ErrUpstreamPermanent.
 	ErrRecipientNotInEnvelope = errors.New("header recipient is not an envelope recipient")
 )
+
+// MaxRetryAfter caps an upstream's requested delay, like the token
+// endpoint's (internal/oauth): a misbehaving upstream must not park
+// callers for hours.
+const MaxRetryAfter = 10 * time.Minute
+
+// retryAfterError carries how long the upstream asked to be left alone
+// (Graph's Retry-After on 429 and 503, an SMTP 421/451 reply's "try again
+// in N seconds").
+type retryAfterError struct {
+	err   error
+	after time.Duration
+}
+
+func (e *retryAfterError) Error() string { return e.err.Error() }
+func (e *retryAfterError) Unwrap() error { return e.err }
+
+// WithRetryAfter attaches the upstream's requested delay to err, capped at
+// MaxRetryAfter. A non-positive delay returns err unchanged.
+func WithRetryAfter(err error, after time.Duration) error {
+	if err == nil || after <= 0 {
+		return err
+	}
+	return &retryAfterError{err: err, after: min(after, MaxRetryAfter)}
+}
+
+// RetryAfter returns the delay attached to err by WithRetryAfter, or 0.
+func RetryAfter(err error) time.Duration {
+	var e *retryAfterError
+	if errors.As(err, &e) {
+		return e.after
+	}
+	return 0
+}

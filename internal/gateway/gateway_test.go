@@ -283,6 +283,22 @@ func TestSend_UpstreamError(t *testing.T) {
 	}
 }
 
+// #63: the upstream's requested delay reaches the transports, for a
+// transient failure only.
+func TestSend_UpstreamRetryAfter(t *testing.T) {
+	transient := driver.WithRetryAfter(fmt.Errorf("%w: HTTP 429", driver.ErrUpstreamTransient), 30*time.Second)
+	g, _ := newGateway(t, &fakeDriver{err: transient}, testPolicy(), readyBackend("relay", true))
+	if res := g.Send(context.Background(), request("app@team.example")); res.Status != StatusUpstreamError ||
+		res.Permanent || res.RetryAfter != 30*time.Second {
+		t.Fatalf("want a transient upstream error with RetryAfter 30s, got %+v", res)
+	}
+	permanent := driver.WithRetryAfter(fmt.Errorf("%w: HTTP 403", driver.ErrUpstreamPermanent), 30*time.Second)
+	g, _ = newGateway(t, &fakeDriver{err: permanent}, testPolicy(), readyBackend("relay", true))
+	if res := g.Send(context.Background(), request("app@team.example")); !res.Permanent || res.RetryAfter != 0 {
+		t.Fatalf("a permanent rejection is not retried, so it carries no delay: %+v", res)
+	}
+}
+
 func TestSend_ServiceAccountSelectorResolvesLabels(t *testing.T) {
 	p := testPolicy()
 	p.Spec.Subjects = []sigv1.PolicySubject{{ServiceAccountSelector: &sigv1.LabelSelectorSubject{
