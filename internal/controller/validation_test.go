@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	"github.com/se-wo/sigillum/internal/kubecache"
 )
 
 func readyConditionOf(t *testing.T, conds []metav1.Condition) metav1.Condition {
@@ -151,5 +152,27 @@ func TestReconcileBackendClearsProbeResultsWhenProbesAreOff(t *testing.T) {
 	}
 	if ready := readyConditionOf(t, status.Conditions); ready.Status != metav1.ConditionTrue {
 		t.Fatalf("want Ready=True, got %+v", ready)
+	}
+}
+
+// #72: a team MailBackend whose Secret is in a namespace the components
+// may not read names the namespace and the chart value to change.
+func TestReconcileBackendSecretNamespaceNotAllowed(t *testing.T) {
+	spec := &sigv1.BackendSpec{Type: sigv1.BackendSMTP, SMTP: &sigv1.SMTPBackendSpec{
+		Endpoints:      []sigv1.SMTPEndpoint{{Host: "relay", Port: 587}},
+		AuthType:       sigv1.SMTPAuthPlain,
+		CredentialsRef: &sigv1.SecretReference{Name: "team-relay"},
+	}}
+	status := &sigv1.BackendStatus{}
+	c := kubecache.GuardSecretReads(fake.NewClientBuilder().WithScheme(scheme).Build(), []string{"sigillum-system"})
+	reconcileBackend(context.Background(), c, "team-a/own-relay", spec, status, 1, "team-a", nil)
+	ready := readyConditionOf(t, status.Conditions)
+	if ready.Status != metav1.ConditionFalse || ready.Reason != sigv1.ReasonSecretNamespaceNotAllowed {
+		t.Fatalf("want Ready=False SecretNamespaceNotAllowed, got %+v", ready)
+	}
+	for _, want := range []string{"Secret team-a/team-relay", "only in sigillum-system", `add "team-a"`, "rbac.allowedSecretNamespaces"} {
+		if !strings.Contains(ready.Message, want) {
+			t.Errorf("want %q in %q", want, ready.Message)
+		}
 	}
 }

@@ -207,6 +207,26 @@ the version being prepared in the same pull request as the change.
   and annotation a reused Secret needs and what to do, instead of ending
   with the API server's generic "the server rejected our request due to
   an error in our request" (#50).
+- A `MailBackend` or `ClusterMailBackend` whose credentials or CA Secret
+  is in a namespace the components may not read (not the release
+  namespace and not in `rbac.allowedSecretNamespaces`) showed
+  controller-runtime's `unknown namespace for the cache` in its
+  condition. It is now `Ready=False` with reason
+  `SecretNamespaceNotAllowed` and a message naming the namespace to add
+  to `rbac.allowedSecretNamespaces`, and the webhook warns about it on
+  `kubectl apply`. This includes a team's `MailBackend` with its
+  credentials in its own namespace (#72).
+- `sigillum --help` printed only `must pass --mode=…` and exited with 2.
+  It now lists the modes and the flags of each (`--mode=<mode> --help`:
+  of that mode) and exits with 0; without `--help`, the mode list goes
+  to stderr. Before, `--mode=<mode> --help` printed the flags and then
+  started the mode anyway (#53).
+- The startup CRD check reported an API server that could not serve the
+  OpenAPI schemas (a slow start after a node restart) as "installed CRDs
+  do not match this version" and told the operator to re-apply the CRDs.
+  It now says `could not read the CRD schemas from the API server (…);
+  retrying on restart`; only missing kinds or fields get the mismatch
+  message (#71).
 - SMTP: `--read-timeout` (60 s) capped the whole `DATA` transfer, so an
   8 MB message sent at about 100 KB/s was cut off after 60 s with no reply
   and audited as `invalid_payload`. During `DATA` it is now an idle

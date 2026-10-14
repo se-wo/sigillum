@@ -4,6 +4,7 @@ package webhook
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -16,6 +17,7 @@ import (
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 	"github.com/se-wo/sigillum/internal/driver"
+	"github.com/se-wo/sigillum/internal/kubecache"
 )
 
 // +kubebuilder:webhook:path=/validate-sigillum-dev-v1alpha1-mailbackend,mutating=false,failurePolicy=fail,sideEffects=None,groups=sigillum.dev,resources=mailbackends,verbs=create;update,versions=v1alpha1,name=vmailbackend.sigillum.dev,admissionReviewVersions=v1
@@ -27,19 +29,24 @@ import (
 // concrete CR type the webhook is registered for.
 type MailBackendValidator[T runtime.Object] struct {
 	clusterScoped bool
+	// secretNamespaces are the namespaces whose Secrets the components may
+	// read (--secret-namespaces); a backend's Secret elsewhere gets a
+	// warning. Empty: no warning.
+	secretNamespaces []string
 }
 
 // SetupMailBackendWebhook registers the namespace-scoped validator.
-func SetupMailBackendWebhook(mgr ctrl.Manager) error {
+// secretNamespaces are the namespaces whose Secrets may be read.
+func SetupMailBackendWebhook(mgr ctrl.Manager, secretNamespaces []string) error {
 	return ctrl.NewWebhookManagedBy(mgr, &sigv1.MailBackend{}).
-		WithValidator(&MailBackendValidator[*sigv1.MailBackend]{clusterScoped: false}).
+		WithValidator(&MailBackendValidator[*sigv1.MailBackend]{secretNamespaces: secretNamespaces}).
 		Complete()
 }
 
 // SetupClusterMailBackendWebhook registers the cluster-scoped validator.
-func SetupClusterMailBackendWebhook(mgr ctrl.Manager) error {
+func SetupClusterMailBackendWebhook(mgr ctrl.Manager, secretNamespaces []string) error {
 	return ctrl.NewWebhookManagedBy(mgr, &sigv1.ClusterMailBackend{}).
-		WithValidator(&MailBackendValidator[*sigv1.ClusterMailBackend]{clusterScoped: true}).
+		WithValidator(&MailBackendValidator[*sigv1.ClusterMailBackend]{clusterScoped: true, secretNamespaces: secretNamespaces}).
 		Complete()
 }
 
@@ -145,10 +152,12 @@ func (v *MailBackendValidator[T]) validate(obj runtime.Object) (admission.Warnin
 			}
 			if spec.SMTP.CredentialsRef != nil {
 				allErrs = append(allErrs, v.validateCredentialsRef(smtpPath.Child("credentialsRef"), *spec.SMTP.CredentialsRef, selfNs)...)
+				warnings = append(warnings, v.secretNamespaceWarning(smtpPath.Child("credentialsRef"), spec.SMTP.CredentialsRef.Namespace, selfNs)...)
 			}
 			if ref := spec.SMTP.CASecretRef; ref != nil {
 				allErrs = append(allErrs, v.validateCredentialsRef(smtpPath.Child("caSecretRef"),
 					sigv1.SecretReference{Name: ref.Name, Namespace: ref.Namespace}, selfNs)...)
+				warnings = append(warnings, v.secretNamespaceWarning(smtpPath.Child("caSecretRef"), ref.Namespace, selfNs)...)
 				if !anyTLSEndpoint(spec.SMTP.Endpoints) {
 					warnings = append(warnings, "spec.smtp.caSecretRef has no effect: no endpoint uses tls or starttls")
 				}
@@ -161,6 +170,9 @@ func (v *MailBackendValidator[T]) validate(obj runtime.Object) (admission.Warnin
 
 	if spec.Type == sigv1.BackendMicrosoftGraph {
 		allErrs = append(allErrs, v.validateGraph(specPath, spec, selfNs)...)
+		if g := spec.MicrosoftGraph; g != nil {
+			warnings = append(warnings, v.secretNamespaceWarning(specPath.Child("microsoftGraph", "credentialsRef"), g.CredentialsRef.Namespace, selfNs)...)
+		}
 	}
 
 	// A backend's sender list bounds every policy that uses it, so its
@@ -225,6 +237,23 @@ func (v *MailBackendValidator[T]) validateCredentialsRef(p *field.Path, ref sigv
 			"cross-namespace Secret references are not permitted on namespace-scoped backends")}
 	}
 	return nil
+}
+
+// secretNamespaceWarning warns when a referenced Secret is in a namespace
+// the components may not read: the object is valid, but the backend stays
+// Ready=False (SecretNamespaceNotAllowed) until the namespace is added
+// (#72).
+func (v *MailBackendValidator[T]) secretNamespaceWarning(p *field.Path, refNs, selfNs string) admission.Warnings {
+	ns := refNs
+	if !v.clusterScoped {
+		ns = selfNs
+	}
+	if ns == "" || kubecache.SecretNamespaceAllowed(v.secretNamespaces, ns) {
+		return nil
+	}
+	return admission.Warnings{fmt.Sprintf("%s: Sigillum reads Secrets only in %s (the release namespace and rbac.allowedSecretNamespaces), "+
+		"so this backend stays not Ready until the platform team adds %q to the chart value rbac.allowedSecretNamespaces",
+		p, strings.Join(v.secretNamespaces, ", "), ns)}
 }
 
 func anyTLSEndpoint(eps []sigv1.SMTPEndpoint) bool {
