@@ -51,6 +51,7 @@ spec:
             - --credential-guard-name={{ include "sigillum.credentials.guardName" . }}
             - --credential-smtp-host={{ include "sigillum.credentials.smtpHost" . }}
             - --credential-smtp-port={{ default .Values.smtp.service.port .Values.credentials.smtpPort }}
+            - --ratelimit-backend={{ .Values.rateLimit.backend }}
             {{- range .Values.controller.extraArgs }}
             - {{ . }}
             {{- end }}

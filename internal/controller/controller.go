@@ -77,6 +77,7 @@ func init() {
 			credentialSMTPPort   int
 			skipCRDCheck         bool
 			shutdownDelay        time.Duration
+			rateLimitBackend     string
 		)
 		fs := cliflags.New("controller")
 		fs.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "address the metric endpoint binds to")
@@ -97,6 +98,7 @@ func init() {
 		fs.StringVar(&credentialSMTPHost, "credential-smtp-host", "", "SMTP proxy host written into generated credential Secrets")
 		fs.IntVar(&credentialSMTPPort, "credential-smtp-port", 587, "SMTP proxy port written into generated credential Secrets")
 		fs.BoolVar(&skipCRDCheck, "skip-crd-check", false, crdcheck.SkipFlagUsage)
+		fs.StringVar(&rateLimitBackend, "ratelimit-backend", "", "rate-limit store of the api-server and SMTP proxy (memory or redis), for admission warnings; empty: unknown")
 
 		// Allow flags to be passed after --mode=controller.
 		if err := cliflags.Parse(fs, os.Args[1:]); err != nil {
@@ -118,6 +120,11 @@ func init() {
 		exclusions := credential.ParseExclusions(credentialExclude, releaseNs)
 		if err := exclusions.Validate(); err != nil {
 			return fmt.Errorf("--credential-exclude-namespaces: %w", err)
+		}
+		switch rateLimitBackend {
+		case "", "memory", "redis":
+		default:
+			return fmt.Errorf("unknown --ratelimit-backend %q (want memory or redis)", rateLimitBackend)
 		}
 		if credentialSMTPPort < 1 || credentialSMTPPort > 65535 {
 			return fmt.Errorf("--credential-smtp-port must be between 1 and 65535, got %d", credentialSMTPPort)
@@ -215,7 +222,7 @@ func init() {
 			if err := whv1.SetupClusterMailBackendWebhook(mgr, secretNs); err != nil {
 				return err
 			}
-			if err := whv1.SetupMailPolicyWebhook(mgr); err != nil {
+			if err := whv1.SetupMailPolicyWebhook(mgr, rateLimitBackend); err != nil {
 				return err
 			}
 			if err := whv1.SetupMailCredentialWebhook(mgr, &whv1.MailCredentialValidator{
