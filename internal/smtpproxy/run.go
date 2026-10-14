@@ -65,6 +65,7 @@ type Options struct {
 	MaxRecipients               int
 	MaxLineLength               int
 	ReadTimeout                 time.Duration
+	DataTimeout                 time.Duration
 	WriteTimeout                time.Duration
 	AuthTimeout                 time.Duration
 	SendTimeout                 time.Duration
@@ -88,6 +89,19 @@ const (
 	maxLineLength = 1 << 20
 )
 
+// minDataRate is the throughput a client must at least reach for
+// --max-message-bytes to fit the derived --data-timeout.
+const minDataRate = 100 << 10 // bytes per second
+
+// dataTimeout is --data-timeout, or the value derived from
+// --max-message-bytes when it is 0.
+func (o *Options) dataTimeout() time.Duration {
+	if o.DataTimeout > 0 {
+		return o.DataTimeout
+	}
+	return time.Duration(o.MaxMessageBytes)*time.Second/minDataRate + o.ReadTimeout
+}
+
 // ParseFlags parses args into Options.
 func ParseFlags(args []string) (*Options, error) {
 	o := &Options{}
@@ -105,7 +119,8 @@ func ParseFlags(args []string) (*Options, error) {
 	fs.Int64Var(&o.MaxMessageBytes, "max-message-bytes", 32*1024*1024, "hard ceiling per message (policies enforce lower limits)")
 	fs.IntVar(&o.MaxRecipients, "max-recipients", 100, "hard ceiling of RCPT TO per message")
 	fs.IntVar(&o.MaxLineLength, "max-line-length", 2000, "longest command or message line in bytes, CRLF included (1000-1048576; RFC 5321 requires at least 1000)")
-	fs.DurationVar(&o.ReadTimeout, "read-timeout", 60*time.Second, "per-command read timeout")
+	fs.DurationVar(&o.ReadTimeout, "read-timeout", 60*time.Second, "idle timeout: waiting for a command, and between data received during DATA")
+	fs.DurationVar(&o.DataTimeout, "data-timeout", 0, "overall limit of one DATA transfer; 0 = derive from --max-message-bytes at 100 KiB/s plus --read-timeout")
 	fs.DurationVar(&o.WriteTimeout, "write-timeout", 60*time.Second, "per-reply write timeout")
 	fs.DurationVar(&o.AuthTimeout, "auth-timeout", 10*time.Second, "timeout for TokenReview and pod lookups")
 	fs.DurationVar(&o.SendTimeout, "send-timeout", 60*time.Second, "timeout for relaying one message (rate limiter and upstream)")
@@ -219,7 +234,8 @@ func Run(logger *slog.Logger) error {
 		_ = shutdownTracing(flushCtx)
 	}()
 
-	backend := &Backend{Logger: logger, AuthTimeout: o.AuthTimeout, SendTimeout: o.SendTimeout}
+	backend := &Backend{Logger: logger, AuthTimeout: o.AuthTimeout, SendTimeout: o.SendTimeout,
+		DataTimeout: o.dataTimeout()}
 	if o.MaxConcurrent > 0 {
 		backend.Slots = make(chan struct{}, o.MaxConcurrent)
 		perTenant := o.MaxConcurrentPerTenant

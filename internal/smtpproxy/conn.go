@@ -47,6 +47,8 @@ func (l listener) Accept() (net.Conn, error) {
 type clientConn struct {
 	net.Conn
 	state atomic.Int32
+	// data, while set, renews the read deadline before every read.
+	data atomic.Pointer[dataWindow]
 }
 
 func (c *clientConn) closeAfterReply() { c.state.CompareAndSwap(connOpen, connCloseAfterReply) }
@@ -67,6 +69,11 @@ func (c *clientConn) Read(p []byte) (int, error) {
 	if c.state.Load() == connReplied {
 		return 0, io.EOF
 	}
+	if w := c.data.Load(); w != nil {
+		if err := c.Conn.SetReadDeadline(w.deadline()); err != nil {
+			return 0, err
+		}
+	}
 	return c.Conn.Read(p)
 }
 
@@ -86,19 +93,61 @@ func (c *clientConn) Close() error {
 // wrapListener) it closes the connection at once: losing the reply is
 // better than reading the rest of the message as commands.
 func (s *session) closeAfterReply() {
-	nc := s.conn.Conn()
-	if tc, ok := nc.(*tls.Conn); ok {
-		nc = tc.NetConn()
-	}
-	if cc, ok := nc.(*clientConn); ok {
+	if cc := s.clientConn(); cc != nil {
 		cc.closeAfterReply()
 		return
 	}
 	_ = s.conn.Close()
 }
 
+// clientConn returns the session's wrapped connection, nil without
+// wrapListener.
+func (s *session) clientConn() *clientConn {
+	nc := s.conn.Conn()
+	if tc, ok := nc.(*tls.Conn); ok {
+		nc = tc.NetConn()
+	}
+	cc, _ := nc.(*clientConn)
+	return cc
+}
+
 // errLineTooLong answers a message line over the server's MaxLineLength.
 func errLineTooLong(srv *smtp.Server) *smtp.SMTPError {
 	return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 6, 0},
 		Message: "Line longer than " + strconv.Itoa(srv.MaxLineLength) + " bytes; use quoted-printable or base64"}
+}
+
+// dataDeadlines makes the server's ReadTimeout an idle timeout during DATA
+// and adds the overall DataTimeout, until the returned function is called.
+// go-smtp sets the read deadline once, before the DATA command, which
+// otherwise caps the whole transfer (#81).
+func (s *session) dataDeadlines() (stop func()) {
+	cc := s.clientConn()
+	idle := s.conn.Server().ReadTimeout
+	if cc == nil || (idle == 0 && s.b.DataTimeout == 0) {
+		return func() {}
+	}
+	w := &dataWindow{idle: idle}
+	if s.b.DataTimeout > 0 {
+		w.end = time.Now().Add(s.b.DataTimeout)
+	}
+	cc.data.Store(w)
+	return func() { cc.data.Store(nil) }
+}
+
+// dataWindow holds the read deadlines of a DATA transfer.
+type dataWindow struct {
+	idle time.Duration
+	end  time.Time // zero: no overall limit
+}
+
+func (w *dataWindow) deadline() time.Time {
+	var dl time.Time
+	if w.idle > 0 {
+		dl = time.Now().Add(w.idle)
+	}
+	if !w.end.IsZero() && (dl.IsZero() || w.end.Before(dl)) {
+		dl = w.end
+	}
+	return dl
 }

@@ -134,6 +134,14 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- SMTP: `--read-timeout` (60 s) capped the whole `DATA` transfer, so an
+  8 MB message sent at about 100 KB/s was cut off after 60 s with no reply
+  and audited as `invalid_payload`. During `DATA` it is now an idle
+  timeout, renewed with every read. The transfer as a whole is bounded by
+  the new `--data-timeout` (chart `smtp.dataTimeout`; by default
+  `--max-message-bytes` at 100 KiB/s plus `--read-timeout`, about 6.5 min
+  for 32 MiB). Either timeout answers `451 4.4.2 Timeout during data
+  transfer`, closes the connection and is audited as `data_timeout` (#81).
 - SMTP: a message line over the line-length limit (go-smtp's default of
   2000 bytes) bounced with `554 5.0.0 Error: transaction failed: smtp: too
   long a line in input stream` and a TCP reset. It now answers

@@ -141,6 +141,9 @@ REST path); headers and MIME framing count on SMTP.
 Lines may be at most `smtp.maxLineLength` bytes (default 2000, CRLF
 included); send long lines quoted-printable or base64, otherwise the
 message is refused with `550 5.6.0`.
+A `DATA` transfer may pause for at most 60 s and must reach about
+100 KiB/s on average to fit `smtp.dataTimeout` (derived from
+`smtp.maxMessageBytes` by default); otherwise it gets `451 4.4.2`.
 Policy denials answer `550`, rate limits `421`, retryable upstream problems
 `451`, permanent upstream rejections `554`. The message is relayed byte-for-byte with a `Received` header that
 carries the Sigillum message id; a `Date` and `Message-ID` are added only when

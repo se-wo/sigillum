@@ -618,3 +618,104 @@ func TestMaxLineLengthFlag(t *testing.T) {
 		}
 	}
 }
+
+// rawData opens an authenticated session on addr and starts DATA, for
+// tests that pace the message themselves.
+func rawData(t *testing.T, addr string) *textproto.Conn {
+	t.Helper()
+	conn, err := textproto.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	steps := []struct {
+		cmd  string
+		code int
+	}{
+		{"", 220},
+		{"EHLO client.test", 250},
+		{"AUTH OAUTHBEARER " + base64.StdEncoding.EncodeToString([]byte("n,,\x01auth=Bearer good-token\x01\x01")), 235},
+		{"MAIL FROM:<app@billing.example>", 250},
+		{"RCPT TO:<a@x.example>", 250},
+		{"DATA", 354},
+	}
+	for _, s := range steps {
+		if s.cmd != "" {
+			_ = conn.PrintfLine("%s", s.cmd)
+		}
+		if _, _, err := conn.ReadResponse(s.code); err != nil {
+			t.Fatalf("%q: want %d: %v", s.cmd, s.code, err)
+		}
+	}
+	return conn
+}
+
+// #81: a slow but steady DATA transfer may take longer than the read
+// timeout, which only bounds a pause; --data-timeout bounds the whole.
+func TestDataReadTimeoutIsAnIdleTimeout(t *testing.T) {
+	const idle = 300 * time.Millisecond
+	cases := []struct {
+		name        string
+		dataTimeout time.Duration
+		pause       time.Duration // before the last line
+		wantCode    int
+		wantReason  string
+	}{
+		{"slow but steady", 10 * time.Second, 0, 250, ""},
+		{"stalled", 10 * time.Second, 2 * idle, 451, "data_timeout"},
+		{"over the overall limit", 600 * time.Millisecond, 0, 451, "data_timeout"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+			addr := startProxyWith(t, &Backend{Sender: sender, Tokens: stubTokens{}, DataTimeout: tc.dataTimeout},
+				func(s *smtp.Server) { s.ReadTimeout = idle })
+			conn := rawData(t, addr)
+			_, _ = io.WriteString(conn.W, testMessage)
+			_ = conn.W.Flush()
+			// 1.2 s in total, four times the idle timeout.
+			for i := 0; i < 12; i++ {
+				time.Sleep(idle / 3)
+				_ = conn.PrintfLine("line %d", i)
+			}
+			time.Sleep(tc.pause)
+			_ = conn.PrintfLine(".")
+			code, msg, err := conn.ReadResponse(tc.wantCode)
+			if err != nil {
+				t.Fatalf("want %d, got %d %q: %v", tc.wantCode, code, msg, err)
+			}
+			if tc.wantReason == "" {
+				if len(sender.reqs) != 1 {
+					t.Fatalf("want the message relayed, rejects=%v", sender.rejects)
+				}
+				return
+			}
+			if !strings.HasPrefix(msg, "4.4.2 Timeout during data transfer") {
+				t.Fatalf("got %q", msg)
+			}
+			if len(sender.reqs) != 0 || len(sender.rejects) != 1 || sender.rejects[0] != tc.wantReason {
+				t.Fatalf("want one audited %s, got reqs=%d rejects=%v", tc.wantReason, len(sender.reqs), sender.rejects)
+			}
+			// The rest of the message must not be read as commands.
+			_ = conn.PrintfLine("NOOP")
+			if _, err := conn.ReadLine(); err == nil {
+				t.Fatal("the connection must be closed after a DATA timeout")
+			}
+		})
+	}
+}
+
+func TestDataTimeoutFlag(t *testing.T) {
+	o, err := ParseFlags(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 32 MiB at 100 KiB/s is 327.68 s, plus the 60 s read timeout.
+	if got, want := o.dataTimeout(), 387680*time.Millisecond; got != want {
+		t.Fatalf("derived data timeout %v, want %v", got, want)
+	}
+	o, err = ParseFlags([]string{"--data-timeout=2m"})
+	if err != nil || o.dataTimeout() != 2*time.Minute {
+		t.Fatalf("got %v, %v", o.dataTimeout(), err)
+	}
+}

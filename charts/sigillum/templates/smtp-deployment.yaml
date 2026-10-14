@@ -37,6 +37,7 @@ spec:
             {{- end }}
             - --max-message-bytes={{ int64 .Values.smtp.maxMessageBytes }}
             - --max-line-length={{ int .Values.smtp.maxLineLength }}
+            - --data-timeout={{ .Values.smtp.dataTimeout | default "0s" }}
             - --max-recipients={{ .Values.smtp.maxRecipients }}
             - --token-audience={{ .Values.api.tokenAudience }}
             - --token-cache-size={{ .Values.api.tokenCacheSize }}
