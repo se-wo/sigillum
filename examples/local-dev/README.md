@@ -11,6 +11,9 @@ kubectl -n mailpit apply -f examples/local-dev/mailpit.yaml
 
 # 2. Sigillum with the local profile (one replica, in-memory rate limits,
 #    no admission webhook, SMTP proxy with credential logins over plaintext).
+#    This installs the latest published chart, so match the docs to it: the
+#    top-level README describes main, and its fields marked (0.4.0) are not
+#    in the 0.3 chart. Its CRDs drop them without an error.
 helm upgrade --install sigillum oci://ghcr.io/se-wo/charts/sigillum \
   --namespace sigillum-system --create-namespace \
   -f examples/local-dev/values-local.yaml

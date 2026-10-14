@@ -22,7 +22,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
@@ -30,6 +29,7 @@ import (
 	"github.com/se-wo/sigillum/internal/crdcheck"
 	"github.com/se-wo/sigillum/internal/credential"
 	"github.com/se-wo/sigillum/internal/kubecache"
+	"github.com/se-wo/sigillum/internal/telemetry"
 	whv1 "github.com/se-wo/sigillum/internal/webhook"
 
 	// pull in the SMTP driver so the registry has it at startup
@@ -57,7 +57,7 @@ func Run(logger *slog.Logger) error {
 }
 
 func init() {
-	run = func(_ *slog.Logger) error {
+	run = func(logger *slog.Logger) error {
 		var (
 			metricsAddr          string
 			probeAddr            string
@@ -77,6 +77,7 @@ func init() {
 			credentialSMTPPort   int
 			skipCRDCheck         bool
 			shutdownDelay        time.Duration
+			rateLimitBackend     string
 		)
 		fs := flag.NewFlagSet("controller", flag.ContinueOnError)
 		// --mode is consumed by the entrypoint; accept it here so Parse does
@@ -100,6 +101,7 @@ func init() {
 		fs.StringVar(&credentialSMTPHost, "credential-smtp-host", "", "SMTP proxy host written into generated credential Secrets")
 		fs.IntVar(&credentialSMTPPort, "credential-smtp-port", 587, "SMTP proxy port written into generated credential Secrets")
 		fs.BoolVar(&skipCRDCheck, "skip-crd-check", false, crdcheck.SkipFlagUsage)
+		fs.StringVar(&rateLimitBackend, "ratelimit-backend", "", "rate-limit store of the api-server and SMTP proxy (memory or redis), for admission warnings; empty: unknown")
 
 		// Allow flags to be passed after --mode=controller.
 		if err := fs.Parse(os.Args[1:]); err != nil && err != flag.ErrHelp {
@@ -110,17 +112,21 @@ func init() {
 			return fmt.Errorf("--credential-guard-check-interval must be positive, got %s", credentialGuardCheck)
 		}
 
-		zlog := zap.New(zap.UseDevMode(false))
 		if clusterName != "" {
-			zlog = zlog.WithValues("cluster", clusterName)
+			logger = logger.With("cluster", clusterName)
 		}
-		ctrl.SetLogger(zlog)
+		telemetry.SetGlobalLogger(logger)
 		setupLog := log.Log.WithName("setup")
 
 		releaseNs := os.Getenv("POD_NAMESPACE")
 		exclusions := credential.ParseExclusions(credentialExclude, releaseNs)
 		if err := exclusions.Validate(); err != nil {
 			return fmt.Errorf("--credential-exclude-namespaces: %w", err)
+		}
+		switch rateLimitBackend {
+		case "", "memory", "redis":
+		default:
+			return fmt.Errorf("unknown --ratelimit-backend %q (want memory or redis)", rateLimitBackend)
 		}
 		if credentialSMTPPort < 1 || credentialSMTPPort > 65535 {
 			return fmt.Errorf("--credential-smtp-port must be between 1 and 65535, got %d", credentialSMTPPort)
@@ -214,7 +220,7 @@ func init() {
 			if err := whv1.SetupClusterMailBackendWebhook(mgr); err != nil {
 				return err
 			}
-			if err := whv1.SetupMailPolicyWebhook(mgr); err != nil {
+			if err := whv1.SetupMailPolicyWebhook(mgr, rateLimitBackend); err != nil {
 				return err
 			}
 			if err := whv1.SetupMailCredentialWebhook(mgr, &whv1.MailCredentialValidator{

@@ -287,6 +287,17 @@ func TestChartCredentialAuthNeedsTLS(t *testing.T) {
 	}
 }
 
+func TestChartSMTPLimits(t *testing.T) {
+	a := args(t, render(t, "--set", "smtp.enabled=true"), "t-sigillum-smtp")
+	if a["max-line-length"] != "2000" || a["data-timeout"] != "0s" {
+		t.Fatalf("max-line-length=%q data-timeout=%q, want 2000 and 0s", a["max-line-length"], a["data-timeout"])
+	}
+	a = args(t, render(t, "--set", "smtp.enabled=true", "--set", "smtp.maxLineLength=8192"), "t-sigillum-smtp")
+	if a["max-line-length"] != "8192" {
+		t.Fatalf("max-line-length=%q, want 8192", a["max-line-length"])
+	}
+}
+
 // The release workflow publishes the CHANGELOG.md section of the tagged
 // version as release notes and fails without one; catch that before a tag.
 func TestChangelogCoversChartVersion(t *testing.T) {
@@ -378,8 +389,14 @@ func TestChartWebhookCertificate(t *testing.T) {
 	}
 
 	objs = render(t, "--set", "webhook.certificate.useCertManager=true", "--set", "webhook.certificate.caBundle=Zm9v")
-	if find(objs, "Certificate", "") == nil {
+	cert := find(objs, "Certificate", "")
+	if cert == nil {
 		t.Fatal("useCertManager=true must render a Certificate")
+	}
+	// #52: the issuer is self-signed, so an empty subject is an empty
+	// Issuer DN, which cert-manager warns about.
+	if orgs, _, _ := unstructured.NestedStringSlice(cert.Object, "spec", "subject", "organizations"); len(orgs) == 0 {
+		t.Fatal("the webhook Certificate needs a subject, or its Issuer DN is empty")
 	}
 	vwc := find(objs, "ValidatingWebhookConfiguration", "")
 	if vwc.GetAnnotations()["cert-manager.io/inject-ca-from"] == "" {
@@ -449,6 +466,21 @@ func TestChartControllerDrainAndWebhookTimeout(t *testing.T) {
 	for _, w := range vwc.Webhooks {
 		if w.TimeoutSeconds == nil || *w.TimeoutSeconds != 10 {
 			t.Fatalf("webhook %s: want timeoutSeconds 10, got %v", w.Name, w.TimeoutSeconds)
+		}
+	}
+}
+
+// #82: the controller learns the rate-limit store the sending pods use, for
+// the messagesPerDay admission warning.
+func TestChartControllerKnowsRateLimitBackend(t *testing.T) {
+	if got := args(t, render(t), "t-sigillum-controller")["ratelimit-backend"]; got != "memory" {
+		t.Fatalf("default: want controller --ratelimit-backend=memory, got %q", got)
+	}
+	objs := render(t, "--set", "smtp.enabled=true", "--set", "rateLimit.backend=redis",
+		"--set", "rateLimit.redis.addrs={redis:6379}")
+	for _, dep := range []string{"t-sigillum-api", "t-sigillum-smtp", "t-sigillum-controller"} {
+		if got := args(t, objs, dep)["ratelimit-backend"]; got != "redis" {
+			t.Fatalf("%s: want --ratelimit-backend=redis, got %q", dep, got)
 		}
 	}
 }

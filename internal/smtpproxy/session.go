@@ -16,6 +16,7 @@ import (
 	"math"
 	"net"
 	"net/mail"
+	"os"
 	"strings"
 	"time"
 
@@ -66,6 +67,10 @@ type Backend struct {
 	// SendTimeout bounds the pipeline for one message (rate limiter and
 	// upstream relay). Zero means no bound.
 	SendTimeout time.Duration
+	// DataTimeout bounds one DATA transfer as a whole, from the DATA
+	// command; the server's ReadTimeout only bounds a pause in it. Zero
+	// means no overall bound.
+	DataTimeout time.Duration
 	// Slots, when non-nil, caps how many messages are buffered and relayed
 	// at once; each holds up to MaxMessageBytes in memory. Its capacity is
 	// the limit.
@@ -304,6 +309,7 @@ func (s *session) Data(r io.Reader) error {
 		return errAuthRequired
 	}
 	baseEvent := s.event(msgID, s.from, s.rcpts)
+	defer s.dataDeadlines()()
 
 	if s.b.SendTimeout > 0 {
 		var cancel context.CancelFunc
@@ -339,8 +345,22 @@ func (s *session) Data(r io.Reader) error {
 	// go-smtp enforces Server.MaxMessageBytes while we read.
 	if _, err := io.Copy(buf, r); err != nil {
 		reason := "invalid_payload"
-		if errors.Is(err, smtp.ErrDataTooLarge) {
+		switch {
+		case errors.Is(err, smtp.ErrDataTooLarge):
 			reason = "message_too_large"
+		case errors.Is(err, os.ErrDeadlineExceeded):
+			// The rest of the message may still arrive; it must not be
+			// read as commands (#81).
+			s.b.Sender.Reject(baseEvent, "data_timeout")
+			s.closeAfterReply()
+			return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 4, 2},
+				Message: "Timeout during data transfer (id " + msgID + ")"}
+		case errors.Is(err, smtp.ErrTooLongLine):
+			// go-smtp cannot resync after an overlong line: answer, then
+			// close instead of a bare 554 and a reset (#64).
+			s.b.Sender.Reject(baseEvent, reason)
+			s.closeAfterReply()
+			return withMessageID(errLineTooLong(s.conn.Server()), msgID)
 		}
 		s.b.Sender.Reject(baseEvent, reason)
 		return err

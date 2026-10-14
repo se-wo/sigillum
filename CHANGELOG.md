@@ -14,14 +14,26 @@ the version being prepared in the same pull request as the change.
 
 ### Upgrading
 
+- Log schema: all three modes now log the same JSON (see Changed).
+  Log pipelines that parse the controller's old zap lines or match these
+  keys need updating:
+  - controller: `ts` → `time`, `level` values `info` → `INFO` (upper
+    case, as api and smtp), `error` → `err`, and controller-runtime keys
+    in snake_case (`controllerGroup` → `controller_group`,
+    `controllerKind` → `controller_kind`, `reconcileID` →
+    `reconcile_id`, the object key such as `MailBackend` →
+    `mail_backend`);
+  - api and smtp: `authMethod` → `auth_method`.
 - Addresses whose domain is not an ASCII host name are rejected with
   `400 invalid-payload` (SMTP `553`), see Security. Send to an
   internationalized domain in its A-label form (`xn--…`).
 - Apply the CRDs before upgrading:
-  `kubectl apply --server-side -f charts/sigillum/crds/`. The 0.4.0 pods
-  refuse to start on 0.3 CRDs, which would drop `messagesPerDay` and a
-  backend's `allowedSenders` without an error, leaving the policy without
-  a daily cap and the backend unbounded.
+  `kubectl apply --server-side --force-conflicts -f charts/sigillum/crds/`.
+  `--force-conflicts` is needed on CRDs that `helm install` created: Helm
+  owns `.spec.versions`, and without the flag the apply fails with a field
+  conflict (#59). The 0.4.0 pods refuse to start on 0.3 CRDs, which
+  would drop `messagesPerDay` and a backend's `allowedSenders` without an
+  error, leaving the policy without a daily cap and the backend unbounded.
 - The credential Secret guard changes (it also admits the OAuth token
   Secrets of delegated backends). Upgrade the chart and the controller
   together with `helm upgrade`. While the old guard and a new
@@ -45,6 +57,11 @@ the version being prepared in the same pull request as the change.
 
 ### Security
 
+- A data race in the HTTP/2 HPACK encoder of `golang.org/x/net` and of the
+  Go standard library (GO-2026-6617) could crash the process; the
+  controller's Kubernetes client and the Microsoft Graph driver reach it.
+  Updated to `golang.org/x/net` v0.60.0, and the binaries and image are
+  built with Go 1.27.2.
 - Recipient restrictions could be bypassed with another spelling of a
   blocked domain: its Unicode form (`evïl.example` for a blocked
   `xn--evl-yla.example`), fullwidth letters or the ideographic full stop
@@ -64,6 +81,15 @@ the version being prepared in the same pull request as the change.
 
 ### Added
 
+- The `MailPolicy` webhook warns when a policy sets
+  `rateLimits.messagesPerDay` and the release keeps rate limits in memory
+  (`rateLimit.backend: memory`), where the cap is per pod and reset by
+  restarts. The chart passes the store to the controller
+  (`--ratelimit-backend`; without the flag there is no warning) (#82).
+- The `MailPolicy` webhook warns when `senderRestrictions.allowedSenders`
+  lists addresses its backend's `allowedSenders` never allows; sends from
+  them would fail with `403 sender-not-allowed` while the policy is Ready
+  (#49).
 - `sigillum_smtp_messages_in_flight{namespace}` metric and the
   `smtp.maxConcurrentPerTenant` setting (see Fixed, #73).
 - `sigillum_upstream_auth_failures_total{backend}` metric (see Fixed, #58).
@@ -104,6 +130,15 @@ the version being prepared in the same pull request as the change.
 
 ### Changed
 
+- One log schema in every mode (#51). The controller logged with zap
+  (`{"level":"info","ts":…}`), api and smtp with slog
+  (`{"time":…,"level":"INFO"}`), and keys mixed camelCase and snake_case.
+  controller-runtime, client-go (klog), Go's standard `log` and
+  OpenTelemetry now all write through the slog JSON handler, with
+  snake_case keys. The controller now honours `logLevel`
+  (`SIGILLUM_LOG_LEVEL`). OpenTelemetry's export errors (an unreachable
+  `tracing.endpoint`) were plain-text lines among the JSON; they are now
+  `WARN` `telemetry export failed`, at most once per minute.
 - Chart: `helm install` and `helm upgrade` fail with an explanation when
   the admission webhook is enabled (the default) without cert-manager
   (`webhook.certificate.useCertManager=false`, the default) and the
@@ -164,6 +199,21 @@ the version being prepared in the same pull request as the change.
   and annotation a reused Secret needs and what to do, instead of ending
   with the API server's generic "the server rejected our request due to
   an error in our request" (#50).
+- SMTP: `--read-timeout` (60 s) capped the whole `DATA` transfer, so an
+  8 MB message sent at about 100 KB/s was cut off after 60 s with no reply
+  and audited as `invalid_payload`. During `DATA` it is now an idle
+  timeout, renewed with every read. The transfer as a whole is bounded by
+  the new `--data-timeout` (chart `smtp.dataTimeout`; by default
+  `--max-message-bytes` at 100 KiB/s plus `--read-timeout`, about 6.5 min
+  for 32 MiB). Either timeout answers `451 4.4.2 Timeout during data
+  transfer`, closes the connection and is audited as `data_timeout` (#81).
+- SMTP: a message line over the line-length limit (go-smtp's default of
+  2000 bytes) bounced with `554 5.0.0 Error: transaction failed: smtp: too
+  long a line in input stream` and a TCP reset. It now answers
+  `550 5.6.0 Line longer than N bytes; use quoted-printable or base64` and
+  closes the connection in order. The limit is set explicitly with the new
+  `--max-line-length` (chart `smtp.maxLineLength`, default 2000, at least
+  1000 per RFC 5321) (#64).
 - REST attachment metadata is now encoded correctly for the wire. A
   non-ASCII `filename` was written as raw bytes into a header parameter
   (not valid MIME unless the hop negotiated SMTPUTF8, which the driver
@@ -277,6 +327,13 @@ the version being prepared in the same pull request as the change.
 - A message now leaves a rate-limit window the moment it is as old as the
   window. Before, a caller retrying exactly after `Retry-After` could be
   rejected once more.
+- Chart: the self-signed webhook `Certificate` has a subject
+  (`O=sigillum`). With an empty one, cert-manager warned that the
+  certificate would be issued with an empty Issuer DN (#52).
+- Chart NOTES: the quickstart creates the relay credentials Secret its
+  backend references; copied as is, the backend stayed `Ready=False`
+  ("credentials secret … not found"). The README now covers uninstalling,
+  including the webhook Secret cert-manager leaves behind (#54).
 
 ## [0.3.1] - unreleased
 
