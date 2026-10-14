@@ -109,7 +109,34 @@ spec:
     messagesPerDay: 5000          # stay below the upstream mailbox's daily quota
 ```
 
-Mount a projected token with audience `sigillum` in the workload pod, then:
+Mount a projected ServiceAccount token with audience `sigillum` in the
+workload pod:
+
+```yaml
+apiVersion: v1
+kind: Pod                       # or the pod template of a Deployment
+metadata:
+  name: billing
+  namespace: my-team
+spec:
+  serviceAccountName: billing-mailer
+  containers:
+    - name: app
+      image: registry.example.com/billing:1.0
+      volumeMounts:
+        - { name: sigillum-token, mountPath: /var/run/secrets/tokens, readOnly: true }
+  volumes:
+    - name: sigillum-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              audience: sigillum
+              expirationSeconds: 3600
+              path: sigillum
+```
+
+The kubelet rotates the token before it expires, so read the file for every
+request (or at least every few minutes) instead of once at startup. Then:
 
 ```sh
 TOKEN=$(cat /var/run/secrets/tokens/sigillum)
