@@ -50,9 +50,8 @@ func FuzzAssembleMessage(f *testing.F) {
 			t.Fatalf("assembled message gained recipients:\n%q", raw)
 		}
 		// In the top-level header block, no line may exceed the RFC 5322
-		// §2.1.1 998-octet limit and no RFC 2047 encoded-word may exceed 75
-		// characters, however long the caller's subject, display name or
-		// header value is.
+		// §2.1.1 998-octet limit, however long the caller's subject, display
+		// name or header value is.
 		head := string(raw)
 		if i := strings.Index(head, crlf+crlf); i >= 0 {
 			head = head[:i]
@@ -62,8 +61,14 @@ func FuzzAssembleMessage(f *testing.F) {
 				t.Fatalf("header line of %d octets exceeds 998:\n%q", len(line), line)
 			}
 		}
-		if w := longestEncodedWord(head); w > 75 {
-			t.Fatalf("encoded-word of %d characters exceeds 75:\n%q", w, head)
+		// No RFC 2047 encoded-word that Sigillum writes may exceed 75
+		// characters. Custom header values are written as the caller sent
+		// them (docs/SPEC.md §4.4.1), so only the fields Sigillum encodes are
+		// checked; net/mail has unfolded them.
+		for _, k := range []string{"From", "To", "Subject"} {
+			if w := longestEncodedWord(m.Header.Get(k)); w > 75 {
+				t.Fatalf("encoded-word of %d characters exceeds 75 in %s:\n%q", w, k, raw)
+			}
 		}
 		from, err := m.Header.AddressList("From")
 		if err != nil || len(from) != 1 || from[0].Address != "from@example.com" {

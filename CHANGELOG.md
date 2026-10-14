@@ -41,6 +41,11 @@ the version being prepared in the same pull request as the change.
 
 ### Security
 
+- A data race in the HTTP/2 HPACK encoder of `golang.org/x/net` and of the
+  Go standard library (GO-2026-6617) could crash the process; the
+  controller's Kubernetes client and the Microsoft Graph driver reach it.
+  Updated to `golang.org/x/net` v0.60.0, and the binaries and image are
+  built with Go 1.27.2.
 - Recipient restrictions could be bypassed with another spelling of a
   blocked domain: its Unicode form (`evïl.example` for a blocked
   `xn--evl-yla.example`), fullwidth letters or the ideographic full stop
