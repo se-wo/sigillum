@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/mail"
 	"net/textproto"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -235,26 +236,45 @@ func TestAssemble_EscapesQuotesInFilename(t *testing.T) {
 	}
 }
 
+// encodedWord matches an RFC 2047 §2 encoded-word: "=?" charset "?" encoding
+// "?" encoded-text "?=", where charset is a token without especials and the
+// encoded text is printable ASCII other than "?". It contains no whitespace,
+// so it never spans a fold or two header fields. The length is not limited
+// here so that over-long words are found.
+var encodedWord = regexp.MustCompile(`=\?[^\x00-\x20()<>@,;:"/\[\]?.=\x7f-\xff]+\?[BbQq]\?[\x21-\x3e\x40-\x7e]+\?=`)
+
 // longestEncodedWord returns the length of the longest RFC 2047 encoded-word
-// (=?...?=) in raw, or 0 if there is none.
+// in raw, or 0 if there is none. A "=?" that does not start a well-formed
+// encoded-word is not one: decoders leave it as text.
 func longestEncodedWord(raw string) int {
 	longest := 0
-	for {
-		i := strings.Index(raw, "=?")
-		if i < 0 {
-			break
-		}
-		j := strings.Index(raw[i+2:], "?=")
-		if j < 0 {
-			break
-		}
-		w := j + 4 // "=?" + inner + "?="
-		if w > longest {
-			longest = w
-		}
-		raw = raw[i+2+j+2:]
+	for _, w := range encodedWord.FindAllString(raw, -1) {
+		longest = max(longest, len(w))
 	}
 	return longest
+}
+
+func TestLongestEncodedWord(t *testing.T) {
+	long := "=?utf-8?b?" + strings.Repeat("QUFB", 20) + "?="
+	for _, tc := range []struct {
+		in   string
+		want int
+	}{
+		{"plain text", 0},
+		{"=?utf-8?q?x?=", 13},
+		{"Subject: =?UTF-8?B?w6Q=?= =?utf-8?q?a_b?=", 16},
+		{long, len(long)},
+		// A raw "=?" in one field and "?=" in a later one is not a word.
+		{"X: =?\r\nTo: =?utf-8?b?sA==?= <to@example.com>", 16},
+		{"X: =? a ?=", 0},
+		{"=?utf-8?x?abc?=", 0},
+		{"=??q?abc?=", 0},
+		{"=?utf-8?q??=", 0},
+	} {
+		if got := longestEncodedWord(tc.in); got != tc.want {
+			t.Errorf("longestEncodedWord(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
 }
 
 func assertLineLimits(t *testing.T, raw []byte) {
