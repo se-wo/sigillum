@@ -300,7 +300,9 @@ rbac:
   aggregateClusterRoles: true
   # allowedSecretNamespaces lists namespaces outside the release namespace from
   # which the api-server and controller are permitted to read Secrets. Required
-  # for ClusterMailBackend credentials that live in a different namespace.
+  # for ClusterMailBackend credentials that live in a different namespace, and
+  # for a team's MailBackend, whose credentials live in the team's namespace
+  # (otherwise it stays Ready=False, reason SecretNamespaceNotAllowed).
   # Each entry renders a Role + RoleBinding in that namespace. An entry whose
   # namespace does not exist is skipped (the Role appears once it does and you
   # upgrade), so onboarding a team before its namespace exists, or offboarding

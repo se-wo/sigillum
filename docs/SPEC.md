@@ -762,7 +762,7 @@ status:
   conditions:
     - type: Ready                # True if at least one endpoint is Ready
       status: "True"
-      reason: AtLeastOneEndpointReady   # or AllEndpointsDown, ProbeError, InvalidConfiguration, Ready
+      reason: AtLeastOneEndpointReady   # or AllEndpointsDown, ProbeError, InvalidConfiguration, SecretNamespaceNotAllowed, Ready
   lastProbeTime: "2026-04-18T09:05:00Z"
   observedGeneration: 1
 ```
@@ -1187,7 +1187,7 @@ The record never contains subject, body, attachment content, header values other
 | smtp-proxy | as api-server; plus `list`/`watch` Pods cluster-wide when `podip` is enabled, and `get`/`list`/`watch` `MailCredential` objects for mode `credential`, never the credential Secrets. |
 | controller | read/watch Sigillum CRs, update their status; read Secrets as above; read/watch ServiceAccounts (MailCredential); `get` the credential guard policy and binding by name; leader-election leases; create events; serves the webhook. With generated credentials: `create` and `patch` on Secrets cluster-wide, **without** `get`, `list` or `watch`, restricted by the credential guard below. |
 
-The api-server and SMTP proxy read backend credentials themselves on the send path, so a `MailBackend` in a team namespace works only if that namespace is listed in `rbac.allowedSecretNamespaces`.
+The api-server and SMTP proxy read backend credentials themselves on the send path, so a `MailBackend` in a team namespace works only if that namespace is listed in `rbac.allowedSecretNamespaces`. **[v0.4.0]** The controller reports a backend whose Secret (credentials or `caSecretRef`) is in a namespace that is not listed as `Ready=False` with reason `SecretNamespaceNotAllowed` and a message naming the namespace and the chart value; the webhook admits such a backend with a warning.
 
 **Credential Secret guard [v0.3.0].** Generated credentials (US-3.7) are available in all namespaces by default, so the controller needs to write Secrets anywhere. RBAC cannot narrow `create` by name or label, so the chart ships a `ValidatingAdmissionPolicy` and binding that apply to requests from the controller's ServiceAccount only:
 

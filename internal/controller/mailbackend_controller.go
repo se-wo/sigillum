@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -10,6 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
+	"github.com/se-wo/sigillum/internal/kubecache"
 	"github.com/se-wo/sigillum/internal/webhook"
 )
 
@@ -78,7 +80,11 @@ func reconcileBackend(
 
 	cfg, err := ResolveBackendConfig(ctx, c, key, spec, secretFallbackNs)
 	if err != nil {
-		status.Conditions = setCondition(status.Conditions, errorReadyCondition(generation, sigv1.ReasonInvalidConfiguration, err.Error()))
+		reason := sigv1.ReasonInvalidConfiguration
+		if nsErr := (*kubecache.SecretNamespaceError)(nil); errors.As(err, &nsErr) {
+			reason = sigv1.ReasonSecretNamespaceNotAllowed
+		}
+		status.Conditions = setCondition(status.Conditions, errorReadyCondition(generation, reason, err.Error()))
 		status.ObservedGeneration = generation
 		return probeInterval
 	}

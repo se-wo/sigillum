@@ -198,7 +198,7 @@ callers. STARTTLS is offered when `smtp.tls.secretName` is set.
 | Several clusters | `clusterName: prod-eu` adds a `cluster` field to every audit record and log line and a `cluster` target label to the ServiceMonitor. |
 | Rolling updates | On SIGTERM a pod fails readiness for `shutdownDelay` (5s) while still serving, then drains for up to `shutdownTimeout` (25s); `terminationGracePeriodSeconds` is 35. The controller does the same for its webhook (`controller.shutdownDelay`), so a rollout does not fail admission; with `webhook.enabled` run `controller.replicas: 2` (keep the PDB) so a second webhook backend serves while one rolls. |
 | Upstream errors (REST) | `502 upstream-error` is transient, retry with backoff; `422 upstream-rejected` means the relay refused this message for good. |
-| Backend credentials in other namespaces | List them in `rbac.allowedSecretNamespaces`; components only read Secrets there and in the release namespace. An entry whose namespace does not exist is skipped (its Role is created once the namespace exists and you upgrade), so this list can be edited as teams come and go without failing `helm upgrade`. |
+| Backend credentials in other namespaces | List them in `rbac.allowedSecretNamespaces`; components only read Secrets there and in the release namespace. This includes a team's own `MailBackend`: its credentials are in its own namespace, so that namespace must be listed. Otherwise the webhook warns on `kubectl apply` and the backend stays `Ready=False` with reason `SecretNamespaceNotAllowed`. An entry whose namespace does not exist is skipped (its Role is created once the namespace exists and you upgrade), so this list can be edited as teams come and go without failing `helm upgrade`. |
 
 ## Recipes
 

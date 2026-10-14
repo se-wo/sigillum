@@ -134,6 +134,15 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- A `MailBackend` or `ClusterMailBackend` whose credentials or CA Secret
+  is in a namespace the components may not read (not the release
+  namespace and not in `rbac.allowedSecretNamespaces`) showed
+  controller-runtime's `unknown namespace for the cache` in its
+  condition. It is now `Ready=False` with reason
+  `SecretNamespaceNotAllowed` and a message naming the namespace to add
+  to `rbac.allowedSecretNamespaces`, and the webhook warns about it on
+  `kubectl apply`. This includes a team's `MailBackend` with its
+  credentials in its own namespace (#72).
 - `sigillum --help` printed only `must pass --mode=…` and exited with 2.
   It now lists the modes and the flags of each (`--mode=<mode> --help`:
   of that mode) and exits with 0; without `--help`, the mode list goes

@@ -136,7 +136,8 @@ func init() {
 			// exits right after the manager stops (#48).
 			LeaderElectionReleaseOnCancel: true,
 		}
-		kubecache.RestrictSecretCache(&opts.Cache, kubecache.SecretNamespaces(secretNamespaces))
+		secretNs := kubecache.SecretNamespaces(secretNamespaces)
+		kubecache.RestrictSecretCache(&opts.Cache, secretNs)
 		if !disableWebhook {
 			opts.WebhookServer = webhook.NewServer(webhook.Options{
 				Port:    webhookPort,
@@ -158,10 +159,13 @@ func init() {
 			return err
 		}
 
-		if err := (&MailBackendReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
+		// A Secret outside secretNs is reported as such, not as the
+		// cache's "unknown namespace" (#72).
+		backendClient := kubecache.GuardSecretReads(mgr.GetClient(), secretNs)
+		if err := (&MailBackendReconciler{Client: backendClient, Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
 			return err
 		}
-		if err := (&ClusterMailBackendReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
+		if err := (&ClusterMailBackendReconciler{Client: backendClient, Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
 			return err
 		}
 		if err := (&MailPolicyReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
@@ -205,10 +209,10 @@ func init() {
 		}
 
 		if !disableWebhook {
-			if err := whv1.SetupMailBackendWebhook(mgr); err != nil {
+			if err := whv1.SetupMailBackendWebhook(mgr, secretNs); err != nil {
 				return err
 			}
-			if err := whv1.SetupClusterMailBackendWebhook(mgr); err != nil {
+			if err := whv1.SetupClusterMailBackendWebhook(mgr, secretNs); err != nil {
 				return err
 			}
 			if err := whv1.SetupMailPolicyWebhook(mgr); err != nil {

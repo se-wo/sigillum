@@ -4,6 +4,7 @@ package controller
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -13,6 +14,7 @@ import (
 
 	sigv1 "github.com/se-wo/sigillum/api/v1alpha1"
 	"github.com/se-wo/sigillum/internal/driver"
+	"github.com/se-wo/sigillum/internal/kubecache"
 )
 
 // ResolveBackendConfig assembles a driver.Config from a backend's spec and
@@ -149,6 +151,10 @@ func backendSecret(ctx context.Context, c client.Reader, refPath, what, name, re
 	if err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &sec); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fmt.Errorf("%s secret %s/%s not found", what, ns, name)
+		}
+		// Says which namespaces may be read (kubecache.GuardSecretReads).
+		if nsErr := (*kubecache.SecretNamespaceError)(nil); errors.As(err, &nsErr) {
+			return nil, err
 		}
 		return nil, fmt.Errorf("failed to load %s secret %s/%s: %w", what, ns, name, err)
 	}
