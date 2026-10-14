@@ -68,6 +68,7 @@ func main() {
 	}
 
 	logger := telemetry.NewLogger()
+	telemetry.BuildInfo.WithLabelValues(version, commit).Set(1)
 	if err := m.run(logger); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return

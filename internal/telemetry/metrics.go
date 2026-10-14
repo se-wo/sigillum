@@ -83,3 +83,14 @@ var (
 		[]string{"backend"},
 	)
 )
+
+// BuildInfo is 1 for the version and commit of the running binary, on
+// every component (#76). The entrypoint sets it; the controller also
+// registers it with controller-runtime's registry, which it serves.
+var BuildInfo = promauto.With(Registry).NewGaugeVec(
+	prometheus.GaugeOpts{
+		Name: "sigillum_build_info",
+		Help: "Always 1; labelled with the version and commit of the running binary.",
+	},
+	[]string{"version", "commit"},
+)
