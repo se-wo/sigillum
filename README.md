@@ -106,8 +106,17 @@ spec:
   rateLimits:
     messagesPerMinute: 60
     messagesPerHour: 1000
-    messagesPerDay: 5000          # stay below the upstream mailbox's daily quota
+    messagesPerDay: 5000          # stay below the upstream mailbox's daily quota (needs rateLimit.backend: redis, see below)
 ```
+
+Rate limits are only exact with `--set rateLimit.backend=redis`. The
+default `memory` backend counts per pod: every api-server replica (two by
+default) and every SMTP proxy replica (two more when the proxy is enabled)
+enforces the full limit on its own, and a restart or `helm upgrade` clears
+the counters. With `memory`, `messagesPerDay: 5000` can let 10,000 messages a
+day through, 20,000 with the SMTP proxy, and more after a rollout. That is the overrun a daily cap exists to prevent, since providers
+such as Microsoft 365 and Google Workspace block the mailbox for a day once
+their quota is exceeded.
 
 Mount a projected ServiceAccount token with audience `sigillum` in the
 workload pod:
