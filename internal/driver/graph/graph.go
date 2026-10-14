@@ -176,7 +176,12 @@ func (d *Driver) post(ctx context.Context, endpoint, token, body string) (*drive
 	detail := errorDetail(resp)
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests, resp.StatusCode == http.StatusRequestTimeout, resp.StatusCode >= 500:
-		return nil, resp.StatusCode, fmt.Errorf("%w: microsoft graph: HTTP %d%s", driver.ErrUpstreamTransient, resp.StatusCode, detail)
+		err := fmt.Errorf("%w: microsoft graph: HTTP %d%s", driver.ErrUpstreamTransient, resp.StatusCode, detail)
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			// Throttling: callers that retry sooner extend it (#63).
+			err = driver.WithRetryAfter(err, oauth.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now()))
+		}
+		return nil, resp.StatusCode, err
 	default:
 		// 400 malformed, 401 twice, 403 missing permission or mailbox
 		// outside the app's scope, 404 unknown mailbox, 413 too large.

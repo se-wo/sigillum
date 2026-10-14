@@ -134,7 +134,10 @@ type Result struct {
 	Backend    string
 	DenyReason policy.DenyReason // StatusDenied only
 	Detail     string
-	RetryAfter time.Duration // StatusRateLimited only
+	// RetryAfter is the wait a caller should observe: the rate limit's
+	// (StatusRateLimited) or the upstream's own request, if it made one
+	// (StatusUpstreamError, transient only, at most driver.MaxRetryAfter).
+	RetryAfter time.Duration
 	// Permanent marks an upstream rejection that will not succeed on retry
 	// (StatusUpstreamError only). SMTP maps it to 5xx instead of 4xx, REST
 	// to 422 upstream-rejected instead of 502 upstream-error.
@@ -374,8 +377,12 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 				logger.Warn("rate limit refund failed", "policy", p.Name, "err", rerr)
 			}
 		}
-		return Result{Status: StatusUpstreamError, Policy: p.Name, Backend: backendKey, Detail: err.Error(),
+		res := Result{Status: StatusUpstreamError, Policy: p.Name, Backend: backendKey, Detail: err.Error(),
 			Permanent: permanent}
+		if !permanent {
+			res.RetryAfter = driver.RetryAfter(err)
+		}
+		return res
 	}
 	const resultLabel = "ok"
 	telemetry.BackendDurationSeconds.WithLabelValues(p.Namespace, p.Name, backendKey, resultLabel).Observe(dur)

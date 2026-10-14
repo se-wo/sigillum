@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/textproto"
 	"strings"
 	"sync"
 	"testing"
@@ -99,6 +100,9 @@ func (f *fakeSMTP) serve(c net.Conn) {
 				continue
 			case strings.HasPrefix(rcpt, "toomany@"):
 				w("452 4.5.3 Too many recipients")
+				continue
+			case strings.HasPrefix(rcpt, "throttled@"):
+				w("451 4.7.0 Too many messages, try again in 90 seconds")
 				continue
 			}
 			env.to = append(env.to, rcpt)
@@ -336,11 +340,45 @@ func TestSMTPDriver_UpstreamReplyClassification(t *testing.T) {
 	if !errors.Is(err, driver.ErrUpstreamTransient) {
 		t.Fatalf("4xx must be transient, got %v", err)
 	}
+	if got := driver.RetryAfter(err); got != 0 {
+		t.Fatalf("a reply without a delay hint carries none, got %v", got)
+	}
+	// #63: a delay hint in a 451 reply is passed on.
+	_, err = d.(driver.RawSender).SendRaw(context.Background(), "a@x.example", []string{"throttled@x.example"}, raw)
+	if !errors.Is(err, driver.ErrUpstreamTransient) || driver.RetryAfter(err) != 90*time.Second {
+		t.Fatalf("want a transient error asking for 90s, got %v (%v)", err, driver.RetryAfter(err))
+	}
 	// 452 4.5.3 (too many recipients) is permanent for this message: the
 	// same recipients fail the same way on every retry (#62).
 	_, err = d.(driver.RawSender).SendRaw(context.Background(), "a@x.example", []string{"toomany@x.example"}, raw)
 	if !errors.Is(err, driver.ErrUpstreamPermanent) {
 		t.Fatalf("452 4.5.3 must be permanent, got %v", err)
+	}
+}
+
+func TestRetryHint(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		msg  string
+		want time.Duration
+	}{
+		{451, "4.7.0 Try again in 30 seconds", 30 * time.Second},
+		{421, "4.7.0 too many connections, retry after 5 min", 5 * time.Minute},
+		{451, "4.3.0 Please retry in 2m", 2 * time.Minute},
+		{421, "4.7.0 try again in 90s", 90 * time.Second},
+		{451, "4.7.500 Server busy. Please try again later", 0},
+		{450, "4.2.0 Greylisted, try again in 300 seconds", 0}, // not a 421/451
+		{554, "5.0.0 retry in 10 seconds", 0},
+		{451, "retry in 30 seconds-ish", 30 * time.Second},
+		{451, "retry in 999999 minutes", 999999 * time.Minute}, // capped by driver.WithRetryAfter
+	} {
+		err := deliveryError{&textproto.Error{Code: tc.code, Msg: tc.msg}}
+		if got := retryHint(err); got != tc.want {
+			t.Errorf("%d %s: want %v, got %v", tc.code, tc.msg, tc.want, got)
+		}
+	}
+	if retryHint(errors.New("dial tcp: connection refused")) != 0 {
+		t.Error("no reply, no hint")
 	}
 }
 

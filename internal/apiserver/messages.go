@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"net/mail"
@@ -338,8 +339,12 @@ func writeResult(w http.ResponseWriter, msgID string, res gateway.Result) {
 }
 
 // writeUpstreamError answers 502 upstream-error: a transient upstream
-// failure the caller may retry.
+// failure the caller may retry, after Retry-After if the upstream asked
+// for a delay (#63).
 func writeUpstreamError(w http.ResponseWriter, msgID string, res gateway.Result) {
+	if res.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(res.RetryAfter.Seconds()))))
+	}
 	problem.Write(w, problem.Problem{
 		Type:      problem.TypeBase + problem.TypeUpstreamError,
 		Title:     "Upstream backend error",

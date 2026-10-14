@@ -116,7 +116,7 @@ func parseResponse(status int, retryAfter string, body []byte, now time.Time) (T
 		switch {
 		case status == http.StatusTooManyRequests, status == http.StatusRequestTimeout, status >= 500,
 			r.Error == "temporarily_unavailable", r.Error == "server_error":
-			e.RetryAfter = parseRetryAfter(retryAfter, now)
+			e.RetryAfter = ParseRetryAfter(retryAfter, now)
 		default:
 			// invalid_client, invalid_scope, unauthorized_client, a
 			// redirect or an unknown path: a configuration problem.
@@ -202,9 +202,9 @@ func isB64Token(s string) bool {
 	return true
 }
 
-// parseRetryAfter reads delay-seconds or an HTTP date, capped at
-// maxRetryAfter.
-func parseRetryAfter(v string, now time.Time) time.Duration {
+// ParseRetryAfter reads a Retry-After value, delay-seconds or an HTTP
+// date, capped at 10 minutes; 0 if there is none.
+func ParseRetryAfter(v string, now time.Time) time.Duration {
 	var d time.Duration
 	if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 		d = time.Duration(n) * time.Second

@@ -3,8 +3,10 @@ package smtp
 import (
 	"bytes"
 	"net/mail"
+	"net/textproto"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/se-wo/sigillum/internal/driver"
 )
@@ -94,6 +96,31 @@ func FuzzWriteQuotedPrintable(f *testing.F) {
 					t.Fatalf("byte %#x in encoded output for %q: %q", c, s, line)
 				}
 			}
+		}
+	})
+}
+
+// FuzzRetryHint checks that a relay's reply text yields a delay only for
+// 421 and 451, never a negative one, and only when it names a number.
+func FuzzRetryHint(f *testing.F) {
+	f.Add(451, "4.7.0 Try again in 30 seconds")
+	f.Add(421, "retry after 5 min")
+	f.Add(451, "Server busy. Please try again later")
+	f.Add(550, "retry in 10 seconds")
+	f.Add(451, "retry in 999999 minutes")
+	f.Fuzz(func(t *testing.T, code int, msg string) {
+		d := retryHint(deliveryError{&textproto.Error{Code: code, Msg: msg}})
+		if d < 0 || d > 999999*time.Minute {
+			t.Fatalf("%d %q: delay %v out of range", code, msg, d)
+		}
+		if d > 0 && code != 421 && code != 451 {
+			t.Fatalf("%d %q: only 421 and 451 carry a delay, got %v", code, msg, d)
+		}
+		if d > 0 && !strings.ContainsAny(msg, "0123456789") {
+			t.Fatalf("%d %q: delay %v without a number", code, msg, d)
+		}
+		if capped := driver.RetryAfter(driver.WithRetryAfter(driver.ErrUpstreamTransient, d)); capped > driver.MaxRetryAfter {
+			t.Fatalf("WithRetryAfter(%v) = %v, above the cap", d, capped)
 		}
 	})
 }

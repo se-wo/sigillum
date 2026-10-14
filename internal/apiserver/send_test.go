@@ -117,6 +117,20 @@ func TestWriteResult_RateLimitedSetsRetryAfter(t *testing.T) {
 	}
 }
 
+// #63: an upstream's Retry-After is passed on with the 502, rounded up.
+func TestWriteResult_UpstreamRetryAfter(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeResult(w, "m", gateway.Result{Status: gateway.StatusUpstreamError, RetryAfter: 1500 * time.Millisecond})
+	if w.Code != http.StatusBadGateway || w.Header().Get("Retry-After") != "2" {
+		t.Fatalf("got %d Retry-After=%q", w.Code, w.Header().Get("Retry-After"))
+	}
+	w = httptest.NewRecorder()
+	writeResult(w, "m", gateway.Result{Status: gateway.StatusUpstreamError})
+	if w.Code != http.StatusBadGateway || w.Header().Get("Retry-After") != "" {
+		t.Fatalf("no delay asked, no header: got %d Retry-After=%q", w.Code, w.Header().Get("Retry-After"))
+	}
+}
+
 func TestWriteResult_UnavailableIs503(t *testing.T) {
 	w := httptest.NewRecorder()
 	writeResult(w, "m", gateway.Result{Status: gateway.StatusUnavailable, Policy: "p"})

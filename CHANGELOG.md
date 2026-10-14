@@ -138,6 +138,15 @@ the version being prepared in the same pull request as the change.
 
 ### Fixed
 
+- An upstream's request to back off was dropped: Microsoft Graph's
+  `Retry-After` on `429` and `503` (`ApplicationThrottled`,
+  `MailboxConcurrency`) reached REST callers as a plain
+  `502 upstream-error`, so they retried at once and kept the mailbox
+  throttled. The delay is now passed on as `Retry-After` on the `502`
+  (capped at 10 minutes, like the token endpoint's) and named in the SMTP
+  proxy's `451` text (`retry in 30s`). An SMTP relay's `421`/`451` reply
+  that says "try again in N seconds/minutes" is passed on the same way
+  (#63).
 - REST errors are now RFC 7807 problem documents everywhere, as the docs
   promised: an unknown path answered a `text/plain` `404 page not found`
   and a wrong method an empty `405`; they now answer `404 not-found` and
