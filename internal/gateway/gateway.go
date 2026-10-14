@@ -40,7 +40,7 @@ import (
 	"github.com/se-wo/sigillum/internal/webhook"
 )
 
-// Auth methods, as logged in the authMethod field (US-4.2).
+// Auth methods, as logged in the auth_method field (US-4.2).
 const (
 	AuthOAuthBearer    = "oauth_bearer"
 	AuthPodIPLegacy    = "pod_ip_legacy"
@@ -165,7 +165,7 @@ func (g *Gateway) Send(ctx context.Context, req Request) Result {
 		"message_id", req.MessageID,
 		"namespace", id.Namespace,
 		"service_account", id.ServiceAccount,
-		"authMethod", id.AuthMethod,
+		"auth_method", id.AuthMethod,
 		"transport", req.Transport,
 	)
 	if id.Credential != "" {

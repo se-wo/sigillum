@@ -103,7 +103,7 @@ func startTLSProxy(t *testing.T, b *Backend) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go func() { _ = srv.Serve(ln) }()
+	go func() { _ = srv.Serve(wrapListener(ln)) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return ln.Addr().String()
 }
