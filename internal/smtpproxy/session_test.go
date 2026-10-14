@@ -92,7 +92,7 @@ func startProxyWith(t *testing.T, b *Backend, tweak func(*smtp.Server)) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go func() { _ = srv.Serve(ln) }()
+	go func() { _ = srv.Serve(wrapListener(ln)) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return ln.Addr().String()
 }
@@ -572,5 +572,150 @@ func TestRelayKeepsClientDateAndMessageID(t *testing.T) {
 	}
 	if !strings.Contains(raw, "<client-123@billing.example>") {
 		t.Fatalf("client's Message-ID must be kept:\n%s", raw)
+	}
+}
+
+// #64: a line over --max-line-length gets a readable permanent reply and an
+// orderly close, not go-smtp's 554 5.0.0 followed by a reset.
+func TestLongLineIs550AndClosesConnection(t *testing.T) {
+	sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+	addr := startProxyWith(t, &Backend{Sender: sender, Tokens: stubTokens{}},
+		func(s *smtp.Server) { s.MaxLineLength = 1000 })
+	c := authed(t, addr)
+
+	ok := testMessage + strings.Repeat("x", 990) + "\r\n"
+	if err := send(c, "app@billing.example", []string{"a@x.example"}, ok); err != nil {
+		t.Fatalf("a line within the limit must pass: %v", err)
+	}
+	// Enough data after the long line that it is still unread when the
+	// proxy answers.
+	long := testMessage + strings.Repeat("x", 1200) + "\r\n" + strings.Repeat("more body\r\n", 20000)
+	err := send(c, "app@billing.example", []string{"a@x.example"}, long)
+	var se *smtp.SMTPError
+	if !errors.As(err, &se) || se.Code != 550 || se.EnhancedCode != (smtp.EnhancedCode{5, 6, 0}) ||
+		!strings.Contains(se.Message, "longer than 1000 bytes") {
+		t.Fatalf("want 550 5.6.0 naming the limit, got %v", err)
+	}
+	if len(sender.reqs) != 1 || len(sender.rejects) != 1 || sender.rejects[0] != "invalid_payload" {
+		t.Fatalf("want one audited invalid_payload, got reqs=%d rejects=%v", len(sender.reqs), sender.rejects)
+	}
+	if err := c.Noop(); err == nil {
+		t.Fatal("the connection must be closed after an overlong line")
+	}
+}
+
+func TestMaxLineLengthFlag(t *testing.T) {
+	o, err := ParseFlags([]string{"--max-line-length=4096"})
+	if err != nil || o.MaxLineLength != 4096 {
+		t.Fatalf("got %+v, %v", o, err)
+	}
+	if NewServer(o, &Backend{}, nil).MaxLineLength != 4096 {
+		t.Fatal("MaxLineLength not passed to go-smtp")
+	}
+	for _, v := range []string{"0", "999", "1048577"} {
+		if _, err := ParseFlags([]string{"--max-line-length=" + v}); err == nil {
+			t.Fatalf("--max-line-length=%s must be refused", v)
+		}
+	}
+}
+
+// rawData opens an authenticated session on addr and starts DATA, for
+// tests that pace the message themselves.
+func rawData(t *testing.T, addr string) *textproto.Conn {
+	t.Helper()
+	conn, err := textproto.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	steps := []struct {
+		cmd  string
+		code int
+	}{
+		{"", 220},
+		{"EHLO client.test", 250},
+		{"AUTH OAUTHBEARER " + base64.StdEncoding.EncodeToString([]byte("n,,\x01auth=Bearer good-token\x01\x01")), 235},
+		{"MAIL FROM:<app@billing.example>", 250},
+		{"RCPT TO:<a@x.example>", 250},
+		{"DATA", 354},
+	}
+	for _, s := range steps {
+		if s.cmd != "" {
+			_ = conn.PrintfLine("%s", s.cmd)
+		}
+		if _, _, err := conn.ReadResponse(s.code); err != nil {
+			t.Fatalf("%q: want %d: %v", s.cmd, s.code, err)
+		}
+	}
+	return conn
+}
+
+// #81: a slow but steady DATA transfer may take longer than the read
+// timeout, which only bounds a pause; --data-timeout bounds the whole.
+func TestDataReadTimeoutIsAnIdleTimeout(t *testing.T) {
+	const idle = 300 * time.Millisecond
+	cases := []struct {
+		name        string
+		dataTimeout time.Duration
+		pause       time.Duration // before the last line
+		wantCode    int
+		wantReason  string
+	}{
+		{"slow but steady", 10 * time.Second, 0, 250, ""},
+		{"stalled", 10 * time.Second, 2 * idle, 451, "data_timeout"},
+		{"over the overall limit", 600 * time.Millisecond, 0, 451, "data_timeout"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sender := &stubSender{result: gateway.Result{Status: gateway.StatusAccepted}}
+			addr := startProxyWith(t, &Backend{Sender: sender, Tokens: stubTokens{}, DataTimeout: tc.dataTimeout},
+				func(s *smtp.Server) { s.ReadTimeout = idle })
+			conn := rawData(t, addr)
+			_, _ = io.WriteString(conn.W, testMessage)
+			_ = conn.W.Flush()
+			// 1.2 s in total, four times the idle timeout.
+			for i := 0; i < 12; i++ {
+				time.Sleep(idle / 3)
+				_ = conn.PrintfLine("line %d", i)
+			}
+			time.Sleep(tc.pause)
+			_ = conn.PrintfLine(".")
+			code, msg, err := conn.ReadResponse(tc.wantCode)
+			if err != nil {
+				t.Fatalf("want %d, got %d %q: %v", tc.wantCode, code, msg, err)
+			}
+			if tc.wantReason == "" {
+				if len(sender.reqs) != 1 {
+					t.Fatalf("want the message relayed, rejects=%v", sender.rejects)
+				}
+				return
+			}
+			if !strings.HasPrefix(msg, "4.4.2 Timeout during data transfer") {
+				t.Fatalf("got %q", msg)
+			}
+			if len(sender.reqs) != 0 || len(sender.rejects) != 1 || sender.rejects[0] != tc.wantReason {
+				t.Fatalf("want one audited %s, got reqs=%d rejects=%v", tc.wantReason, len(sender.reqs), sender.rejects)
+			}
+			// The rest of the message must not be read as commands.
+			_ = conn.PrintfLine("NOOP")
+			if _, err := conn.ReadLine(); err == nil {
+				t.Fatal("the connection must be closed after a DATA timeout")
+			}
+		})
+	}
+}
+
+func TestDataTimeoutFlag(t *testing.T) {
+	o, err := ParseFlags(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 32 MiB at 100 KiB/s is 327.68 s, plus the 60 s read timeout.
+	if got, want := o.dataTimeout(), 387680*time.Millisecond; got != want {
+		t.Fatalf("derived data timeout %v, want %v", got, want)
+	}
+	o, err = ParseFlags([]string{"--data-timeout=2m"})
+	if err != nil || o.dataTimeout() != 2*time.Minute {
+		t.Fatalf("got %v, %v", o.dataTimeout(), err)
 	}
 }
