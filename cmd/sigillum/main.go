@@ -26,6 +26,7 @@ func main() {
 	}
 
 	logger := telemetry.NewLogger()
+	telemetry.BuildInfo.WithLabelValues(version, commit).Set(1)
 
 	switch mode {
 	case "api":

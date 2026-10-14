@@ -374,8 +374,23 @@ User stories are grouped by epic. Each follows **As a \<role\> I want \<capabili
   | `sigillum_upstream_auth_failures_total` **[v0.4.0]** | Counter | `backend` | Failures to authenticate to an upstream relay (wrong / rotated password, unsupported mechanism) |
   | `sigillum_credential_guard_ok` **[v0.3.0]** | Gauge (controller) | — | 1 while the credential Secret guard is verified (§4.10), 0 while the controller refuses to write credential Secrets |
   | `sigillum_backend_authorized` **[v0.4.0]** | Gauge (controller) | `backend` | 1 while a delegated backend (US-6.3) holds a working refresh token, 0 while it needs a new sign-in |
+  | `sigillum_backend_ready` **[v0.4.0]** | Gauge (controller) | `backend` (`<namespace>/<name>`, or `/<name>` for a `ClusterMailBackend`), `type` | 1 while the backend is `Ready=True`, 0 otherwise |
+  | `sigillum_backend_endpoints_ready`, `sigillum_backend_endpoints` **[v0.4.0]** | Gauge (controller) | `backend` | Endpoints that passed the last health check, and endpoints in it (both 0 with health checks off or an invalid backend) |
+  | `sigillum_policy_ready` **[v0.4.0]** | Gauge (controller) | `namespace`, `policy`, `reason` (the `Ready` condition's reason: `Ready`, `BackendNotReady`, `BackendNotFound`, `InvalidConfiguration`) | 1 while the policy is `Ready=True`, 0 otherwise; one series per policy, the one of the current reason |
+  | `sigillum_credential_ready` **[v0.4.0]** | Gauge (controller) | `namespace`, `credential` | 1 while the `MailCredential` is `Ready=True`, 0 otherwise |
+  | `sigillum_build_info` **[v0.4.0]** | Gauge (every component) | `version`, `commit` | Always 1 |
 
 - Payload errors (before policy evaluation) are not counted in metrics; they appear in the audit stream. Authentication failures are counted in `sigillum_auth_failures_total` only; no namespace label, since the claimed identity is client-supplied.
+- **[v0.4.0]** The readiness gauges are set on every reconcile, so they are served by the controller replica holding the leader lease, and removed when the object is deleted. The first alert to add (until US-4.6 ships rules):
+
+  ```yaml
+  - alert: SigillumBackendNotReady
+    expr: sigillum_backend_ready == 0
+    for: 10m
+    annotations:
+      summary: "Mail backend {{ $labels.backend }} has not been Ready for 10 minutes"
+  ```
+
 - `ServiceMonitor` in the Helm chart (`serviceMonitor.enabled`).
 
 #### US-4.2 — Structured logs **[v0.1.0]**
