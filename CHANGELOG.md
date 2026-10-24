@@ -59,6 +59,9 @@ the version being prepared in the same pull request as the change.
 
 ### Security
 
+- `crypto/x509` in Go 1.27.2 still trusted compromised intermediate
+  certificates (GO-2026-6809), which TLS certificate verification reaches.
+  The binaries and image are built with Go 1.27.3.
 - A data race in the HTTP/2 HPACK encoder of `golang.org/x/net` and of the
   Go standard library (GO-2026-6617) could crash the process; the
   controller's Kubernetes client and the Microsoft Graph driver reach it.
