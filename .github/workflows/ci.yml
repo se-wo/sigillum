@@ -83,7 +83,7 @@ jobs:
           path: bin/
       - name: make binary executable
         run: chmod +x bin/sigillum
-      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+      - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
         with:
           # Test on a current Kubernetes (the chart supports >= 1.32, see
           # kubeVersion in charts/sigillum/Chart.yaml). The node image is the
